@@ -200,9 +200,51 @@ inconsistent), D-013 (circular-permission detection is a static
 compile-time graph check over permission-to-permission edges only, not a
 per-branch liveness proof).
 
-**Not yet done:** `test-author`'s test suite (in progress at time of this
-commit — Phase 1's CHECKPOINT isn't reported until that's back and
-reviewed too). The CLI's `authz schema compile <file>` command (§7) —
-Phase 1 built the DSL layer only; wiring it to the CLI is still open,
-possibly folded into this phase's completion or deferred to whichever
-later phase first needs it from the command line.
+**Test suite (`test-author`, two delegations):**
+
+- First pass: 17 tests across `test/unit/schema/{rewrite-rules,
+schema-validation}.test.ts`, covering all four §10 "Schema DSL" cases plus
+  determinism, duplicate-name, and cycle-detection coverage. Fail-checked —
+  every assertion independently mutated to a wrong expected value and
+  confirmed to fail before being restored — proving the suite actually
+  discriminates rather than vacuously passing.
+- Second pass (main-agent-initiated follow-up, after reviewing the first
+  pass's own flag): un-skipped exactly the two `test/isolation/identifier-
+and-tuple-validation.fuzz.test.ts` `.todo()`s that are genuinely
+  implementable against the Phase 1 compiler alone (namespace-name and
+  relation-name injection-corpus rejection). Every other `.todo()` in that
+  file needs Phase 2 (the tuple writer) or later and correctly stays
+  `.todo()` — see the file's own updated doc comment for the four-way
+  payload classification this required (`empty`/`whitespace-decorated`/
+  `invalid-word`/`unlexable`) and why a whitespace-insensitive, unquoted
+  grammar can't reject some corpus payloads by the string arriving intact
+  in the first place — that's a structural property of the grammar, not a
+  gap in validation.
+
+Both passes written from `.claude/commands/build-authz-service.md` §5/§10
+alone — `parser.ts`/`compiler.ts` deliberately not read while writing
+either, per delegation rule 5 — and both independently re-run by the main
+agent, not just trusted from the subagent's report.
+
+**Main-agent review before accepting (delegation rule 4), both
+`schema-compiler`'s and `test-author`'s output:** read every file
+produced, independently re-ran the compiler against all four example
+schemas, the malformed example, and two adversarial cases beyond what
+either subagent reported on its own initiative. `npm run lint`/
+`typecheck`/`format:check`/`test` all re-run and confirmed clean directly,
+not assumed from a subagent transcript.
+
+**Final state:** `npm test` — 24 passed, 18 `.todo()` (was 20 `.todo()`
+before Phase 1; two genuinely Phase-1-scoped identifier-validation todos
+now real and passing). Lint/typecheck/format all clean.
+
+**CHECKPOINT reached — see build spec §9 Phase 1:** exit criteria met
+(the four example schemas compile; the malformed example is rejected with
+an error naming the exact line/construct — verified independently by the
+main agent, not just the subagent's own claim).
+
+**Not yet done:** the CLI's `authz schema compile <file>`/`authz schema
+publish <file>` commands (§7) — Phase 1 built the DSL layer only; wiring
+it to the CLI is still open, deferred to whichever later phase first
+needs it from the command line (likely Phase 2, once there's a
+`namespace_configs` table to publish into).
