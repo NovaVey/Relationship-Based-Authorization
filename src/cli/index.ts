@@ -4,7 +4,7 @@
  * .claude/commands/build-authz-service.md §7. Only commands that actually
  * exist are registered; a stub for a command before its phase lands would
  * be exactly the "half-finished implementation" this project's own rules
- * warn against. Not yet registered: `serve` (Phase 8).
+ * warn against.
  */
 import { Command } from 'commander';
 
@@ -14,6 +14,7 @@ import { tupleWrite, tupleDelete } from './commands/tuple.js';
 import { check } from './commands/check.js';
 import { soundnessRun } from './commands/soundness.js';
 import { expandCli } from './commands/expand.js';
+import { serve } from './commands/serve.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -115,6 +116,13 @@ soundness
   .option('--format <text|markdown|json>', 'output format (default: text)')
   .action(async (options: { queries?: string; seed?: string; format?: string }) => {
     await soundnessRun(options);
+  });
+
+program
+  .command('serve')
+  .description('Start the Fastify API server (check/expand/write/schema over HTTP)')
+  .action(async () => {
+    await serve();
   });
 
 await program.parseAsync(process.argv);
