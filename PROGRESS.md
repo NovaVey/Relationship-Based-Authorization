@@ -506,3 +506,90 @@ return shape (`{ allowed: boolean }`, matching D-020's choice for Phase 3)
 needs to grow a resolution path before Phase 5's divergence reporting is
 designed around it — flagged again by this phase's own delegation, not
 yet settled.
+
+## Phase 5 — Differential-soundness fuzz harness
+
+**Owner:** `soundness-engineer` (harness core) + main agent (migration,
+CLI wiring, independent verification, CHECKPOINT) + `test-author` (§10
+suite, not yet dispatched as of this section being written).
+
+**Files touched so far:**
+
+- `src/store/migrations/0003_soundness_runs.sql` (new, committed
+  separately as `02a1617`) — the `soundness_runs` table from §4, verified
+  against real local Postgres (CHECK constraint, jsonb/count defaults)
+  before committing.
+- `src/soundness/generators.ts` (new, 941 lines) — random schema, tuple
+  graph, and query generator. Fixed-role namespace sources
+  (group/hierarchical/resource) hand-place all four `RewriteRule` kinds
+  and exactly one guaranteed userset-subject cycle in every fixture,
+  regardless of the seed's random draws elsewhere; `computeCoverageReport`
+  independently re-audits this against the _compiled_ schema and the
+  _actual_ tuple array rather than trusting construction intent (D-032).
+  Every generated namespace name is seed-salted (D-033) to prevent a
+  cross-run tuple collision from producing a spurious `false_grant`.
+  `critical` is fuzz-harness-only metadata (D-031), not a DSL feature.
+  `fast-check` is used only as a seeded integer-stream PRNG source
+  (D-034), never via composed arbitraries/shrinking.
+- `src/soundness/classify.ts` (new, 100 lines) — `classifyResult`
+  (agreement → `null`, else `false_grant`/`false_deny` per §6.5, tagging
+  `critical` from the generator's metadata) and `computeVerdict`
+  (`falseGrantCount > 0` → `unsound` unconditionally, checked before the
+  coverage check so a real finding is never masked by
+  `insufficient_coverage`).
+- `src/soundness/runner.ts` (new) — `runSoundnessFuzz(pool, options)`:
+  generates a fixture, compiles + publishes the schema, writes every
+  tuple for real, checks every query against both resolvers, classifies,
+  computes the verdict, persists one `soundness_runs` row. Includes a
+  `maxDepth` override option for replay/reproduction — explicitly
+  documented as _not_ a fix for the cycle-guard-detection gap below
+  (D-035).
+
+**Two things built by `soundness-engineer` and caught/fixed before they
+became a problem, not after — both self-reported in their own final
+report, independently re-verified by the main agent:**
+
+1. The generator's first draft reproduced D-023's raw-NUL-byte bug
+   independently (same `\0`-separator idiom in a cycle-detection key,
+   landing as a literal `0x00` byte instead of the two-character escape).
+   Found via `file`/byte inspection, fixed, re-verified.
+2. The cross-run stale-tuple hazard behind D-033 — found and fixed before
+   it could ever produce a false finding, not discovered via a bad run.
+
+**Main-agent independent verification, beyond `soundness-engineer`'s own
+report:** typecheck/lint/format/unit tests all clean; a clean 5000-query
+run with an independently-chosen seed (`sound`, 0/0); reproducibility
+confirmed directly (`generateFixture` called twice with the same seed →
+identical fixture); coverage confirmed directly (all four rewrite-rule
+kinds + a cycle present in the compiled artifact); the
+intersection-as-union deliberately-broken-engine proof reproduced with an
+independently-chosen seed (89 false grants, `verdict: "unsound"`),
+`src/resolve/production/resolver.ts` restored and confirmed byte-identical
+(`md5sum` match, empty `git diff`) afterward.
+
+**A real finding, confirmed empirically, not just theorized (D-035):**
+differential fuzzing at any depth setting cannot catch a missing SQL
+cycle guard, because that bug class corrupts only a query's latency, never
+its returned boolean. Confirmed twice, independently: by
+`soundness-engineer` at the standard production-realistic depth, and by
+the main agent attempting a forced-depth workaround (`maxDepth: 20_000`,
+500 queries, SQL path-array guard removed) — which did not even finish,
+timing out past 300 seconds, because forcing a large depth cap inflates
+the cost of _every_ query in the batch, not just the one that would
+demonstrate the bug. This is a deliberate, stated division of labor, not
+a gap: that bug class stays covered by the existing elapsed-time-asserting
+Phase 3/4 termination tests (D-024, D-027, D-029), not by this fuzzer —
+see D-035 for the full reasoning, and the Phase 5 CHECKPOINT for how this
+gets reported to the user.
+
+**Not yet done as of this section being written:** the `authz soundness
+run` CLI command (§7), the formal §10 test suite (not yet dispatched to
+`test-author`), a PR, and the CHECKPOINT report itself.
+
+**Open question carried forward:** none new — Phase 4's resolution-path
+question (above) still stands, now sharpened by the fact that
+`DivergenceRecord` currently stores only the query and the two booleans,
+not either resolver's resolution path; a `false_grant` report is
+actionable today (it names the exact query), but showing the bogus chain
+the production resolver _thought_ it found (§6.7) would make it more so —
+deferred, not forgotten, likely Phase 6's concern.

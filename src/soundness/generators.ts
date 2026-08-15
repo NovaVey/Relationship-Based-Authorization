@@ -1,0 +1,941 @@
+/**
+ * Random (schema, tuple-graph, query) generation for Phase 5's differential
+ * soundness fuzzer — see `.claude/commands/build-authz-service.md` §6.2,
+ * §6.8, and §9 Phase 5's exit criteria. `runner.ts` is the only intended
+ * caller of `generateFixture`; this file has zero knowledge of Postgres,
+ * the reference resolver, or the production resolver — it only produces
+ * plain data (a DSL source string, tuples, queries) plus metadata
+ * (`docs/DECISIONS.md`-worthy design notes below).
+ *
+ * **Determinism (§6.8): every value below is derived from `seed` alone.**
+ * The only sources of randomness this file ever touches are (a) a seeded
+ * `fast-check` integer stream (`fc.sample(fc.integer(...), { seed, numRuns
+ * })`), which is backed by a pure-JS PRNG (`pure-rand`) with no dependency
+ * on `Math.random()`, wall-clock time, or any platform-specific entropy
+ * source, and (b) fixed, hand-written word banks / template shapes. Given
+ * the same seed string, every draw this module makes is byte-identical on
+ * any machine, every time — verified directly (see this phase's
+ * verification report) by generating twice from one seed and diffing the
+ * output, not assumed from "it's deterministic in theory."
+ *
+ * **Why `fast-check` here, not a hand-rolled PRNG:** §2 lists `fast-check`
+ * as this project's property-based fuzzing library, and it ships a
+ * seeded, pure-JS random source (`pure-rand`, a transitive dependency)
+ * with no platform-dependent behavior — exactly what a byte-for-byte
+ * reproducible generator needs, and there's no concrete reason to
+ * hand-roll an equivalent. What this file does NOT do is compose
+ * `fast-check` *arbitraries* (`fc.record`, `fc.array`, shrinking, etc.) to
+ * build the fixture: those combinators are built for "generate broadly,
+ * shrink a failing case toward a minimal one," which is the wrong shape
+ * for this task's actual requirement — *guaranteeing* specific structural
+ * properties (every rewrite-rule kind present, a cycle present) by
+ * construction, every run, not by generating broadly and hoping. Instead,
+ * `fc.sample(fc.integer(...), { seed, numRuns })` is used once to draw a
+ * large, deterministic pool of raw integers, and a small local
+ * `SeededRng` class turns that pool into `nextInt`/`pick`/`shuffle`
+ * helpers driving plain, imperative, guarantee-shaped construction code
+ * below. See `docs/DECISIONS.md` for this recorded as its own decision.
+ *
+ * **Why every generated namespace name carries a seed-derived salt:** this
+ * generator writes real rows into a live, shared `relation_tuples` table
+ * across many runs (different seeds, potentially the same run replayed).
+ * `relation_tuples` has no per-run partition — a tuple written under
+ * `object_ns = 'doc'` by one run is visible to *any* later check against
+ * `doc`, forever, regardless of which run wrote it. The reference resolver
+ * only ever sees *this run's own* in-memory tuple array, but the
+ * production resolver reads the live table directly — so if two different
+ * seeds independently chose the plain word `doc` as a namespace name, a
+ * stale tuple from an unrelated earlier run could make the production
+ * resolver see a grant the reference resolver (this run's own tuples only)
+ * has no way to know about, producing a spurious `false_grant` that has
+ * nothing to do with a real resolver bug — exactly the kind of
+ * self-inflicted false positive this project's own standard (§0 rule 9,
+ * the `soundness-engineer` brief) warns against mistaking for a genuine
+ * finding. Salting every generated namespace name with a short,
+ * seed-derived, deterministic suffix (`doc_<base36-hash-of-seed>`) makes
+ * two different seeds' namespaces collide only in the astronomically
+ * unlikely event of a 31-bit hash collision, while the *same* seed always
+ * reproduces the *same* salted names — preserving byte-for-byte
+ * reproducibility. `user:*` subject ids are deliberately left unsalted and
+ * freely reused across runs: the object side of every check is always
+ * salted-unique per run, so a shared `user:u0` subject id occurring in two
+ * unrelated runs' tuples can never cause cross-run leakage (queries are
+ * always anchored to a specific, run-unique object). See
+ * `docs/DECISIONS.md`.
+ */
+import { randomUUID } from 'node:crypto';
+import { integer, sample } from 'fast-check';
+
+import { compileSchema } from '../schema/dsl/compiler.js';
+import { formatSchemaError } from '../schema/dsl/errors.js';
+import type { CompiledRelation, CompiledSchema, RewriteRule } from '../schema/dsl/types.js';
+
+// ---------------------------------------------------------------------------
+// Public data shapes
+// ---------------------------------------------------------------------------
+
+/** A namespaced entity reference — the same `{ ns, id }` shape both resolvers use. */
+export interface GeneratedEntityRef {
+  ns: string;
+  id: string;
+}
+
+/**
+ * One generated relation-tuple fact. Field-for-field identical to
+ * `src/store/tuples.ts`'s `TupleKey` and `src/resolve/reference/
+ * resolver.ts`'s `ReferenceTuple` — deliberately redefined here rather
+ * than imported, matching `docs/DECISIONS.md` D-022's own precedent, so
+ * this generator has no import-time coupling to the store or either
+ * resolver. `runner.ts` passes these values directly to `writeTuple` and
+ * `referenceCheck` — structurally compatible, never re-mapped.
+ */
+export interface GeneratedTuple {
+  objectNs: string;
+  objectId: string;
+  relation: string;
+  subjectNs: string;
+  subjectId: string;
+  /** Present only for a userset subject (`group:eng#member`). */
+  subjectRelation?: string;
+}
+
+/** One generated (subject, relation-or-permission, object) query to check. */
+export interface GeneratedQuery {
+  subject: GeneratedEntityRef;
+  object: GeneratedEntityRef;
+  relationOrPermission: string;
+}
+
+/**
+ * Fuzz-harness-level metadata about one generated namespace — in
+ * particular, `critical`. **This is not a DSL feature.** §6.5's prose
+ * describes a namespace "flagged critical in its schema," but §5's actual
+ * grammar has no such flag, and extending Phase 1's already-shipped
+ * grammar to add one is out of this phase's scope (Phase 1 is done; this
+ * isn't a Phase 1 gap this phase should reopen). `critical` is tracked
+ * here, entirely outside the DSL text, and threaded through
+ * `runner.ts`/`classify.ts` to populate `soundness_runs
+ * .critical_namespace_false_grants`. See `docs/DECISIONS.md`.
+ */
+export interface GeneratedNamespaceMeta {
+  namespace: string;
+  critical: boolean;
+}
+
+/** Which of the four meaningful `RewriteRule` kinds were found in the generated schema. */
+export interface RewriteRuleKindCoverage {
+  union: boolean;
+  intersection: boolean;
+  exclusion: boolean;
+  tupleToUserset: boolean;
+}
+
+/**
+ * The generator's own self-check that its "guaranteed, not probabilistic"
+ * coverage requirements actually held for this run — audited against the
+ * *actual* compiled schema and tuple graph, not trusted from construction
+ * logic alone (construction logic can have bugs; this check independently
+ * re-derives the answer from the artifact itself). `ok` is what
+ * `computeVerdict` (`classify.ts`) reads to decide `insufficient_coverage`.
+ */
+export interface CoverageReport {
+  rewriteRuleKinds: RewriteRuleKindCoverage;
+  hasCycle: boolean;
+  ok: boolean;
+}
+
+/** Everything one differential-fuzz run needs: a compilable schema, a tuple graph, and queries. */
+export interface GeneratedFixture {
+  seed: string;
+  schemaSource: string;
+  namespaces: GeneratedNamespaceMeta[];
+  tuples: GeneratedTuple[];
+  queries: GeneratedQuery[];
+  coverage: CoverageReport;
+}
+
+/** A fresh, unseeded seed value — used when a caller omits `seed` entirely (still recorded afterward). */
+export function generateRandomSeed(): string {
+  return randomUUID();
+}
+
+// ---------------------------------------------------------------------------
+// Seeded randomness — a deterministic draw pool sourced from fast-check
+// ---------------------------------------------------------------------------
+
+/**
+ * FNV-1a, 32-bit, masked into the non-negative 31-bit range `fc.sample`'s
+ * own `seed` option expects ("seeds are supposed to be 32-bit integers").
+ * Pure, deterministic, platform-independent — no `Buffer`, no `crypto`
+ * hash, just arithmetic, so this can never itself be a source of
+ * cross-machine nondeterminism.
+ */
+function hashSeedToInt31(seed: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return (hash >>> 0) & 0x7fffffff;
+}
+
+/**
+ * How many raw integer draws this generator's own construction logic can
+ * ever need, sized with generous headroom rather than tuned tight — a
+ * `SeededRng` that runs out throws a specific, loud "generator sizing bug"
+ * error (see `SeededRng.drawRaw`) rather than silently wrapping around and
+ * quietly breaking determinism or reusing entropy. `queryCount` scales the
+ * pool because query generation is the one phase whose draw count is
+ * genuinely proportional to a caller-supplied number, not a small,
+ * schema-shaped constant.
+ */
+const DRAW_POOL_BASE_SIZE = 4_000;
+const DRAW_POOL_PER_QUERY = 12;
+
+class SeededRng {
+  private readonly pool: readonly number[];
+  private cursor = 0;
+
+  constructor(pool: readonly number[]) {
+    this.pool = pool;
+  }
+
+  private drawRaw(): number {
+    if (this.cursor >= this.pool.length) {
+      throw new Error(
+        `soundness fixture generator exhausted its deterministic draw pool ` +
+          `(${this.pool.length} draws) — this is a generator sizing bug (see ` +
+          `DRAW_POOL_BASE_SIZE/DRAW_POOL_PER_QUERY in src/soundness/generators.ts), ` +
+          `never a random failure.`,
+      );
+    }
+    const value = this.pool[this.cursor];
+    this.cursor += 1;
+    if (value === undefined) {
+      // Unreachable given the bounds check above — `noUncheckedIndexedAccess`
+      // still types `pool[cursor]` as possibly-undefined.
+      throw new Error('unreachable: SeededRng draw pool index within bounds was undefined');
+    }
+    return value;
+  }
+
+  /** A uniform integer in `[0, exclusiveMax)`. */
+  nextInt(exclusiveMax: number): number {
+    if (exclusiveMax <= 0) {
+      throw new Error(`SeededRng.nextInt: exclusiveMax must be positive, got ${exclusiveMax}`);
+    }
+    return this.drawRaw() % exclusiveMax;
+  }
+
+  /** A uniform integer in `[min, max]` — both ends inclusive. */
+  nextIntBetween(min: number, max: number): number {
+    if (max < min) {
+      throw new Error(`SeededRng.nextIntBetween: max (${max}) < min (${min})`);
+    }
+    return min + this.nextInt(max - min + 1);
+  }
+
+  /** `true` with probability `probabilityTrue` (default even odds). */
+  nextBoolean(probabilityTrue = 0.5): boolean {
+    return this.drawRaw() / 0x7fffffff < probabilityTrue;
+  }
+
+  pick<T>(items: readonly T[]): T {
+    if (items.length === 0) {
+      throw new Error('SeededRng.pick: cannot pick from an empty array');
+    }
+    const item = items[this.nextInt(items.length)];
+    if (item === undefined) {
+      throw new Error('unreachable: SeededRng.pick index within bounds was undefined');
+    }
+    return item;
+  }
+
+  /** A Fisher-Yates shuffle, deterministic given this RNG's own draw sequence. */
+  shuffle<T>(items: readonly T[]): T[] {
+    const copy = [...items];
+    for (let i = copy.length - 1; i > 0; i -= 1) {
+      const j = this.nextInt(i + 1);
+      const a = copy[i];
+      const b = copy[j];
+      if (a === undefined || b === undefined) {
+        throw new Error('unreachable: SeededRng.shuffle index out of range');
+      }
+      copy[i] = b;
+      copy[j] = a;
+    }
+    return copy;
+  }
+}
+
+function buildRng(seed: string, queryCount: number): { rng: SeededRng; numericSeed: number } {
+  const numericSeed = hashSeedToInt31(seed);
+  const poolSize = DRAW_POOL_BASE_SIZE + Math.max(0, queryCount) * DRAW_POOL_PER_QUERY;
+  const pool = sample(integer({ min: 0, max: 0x7fffffff }), {
+    seed: numericSeed,
+    numRuns: poolSize,
+  });
+  return { rng: new SeededRng(pool), numericSeed };
+}
+
+function requireDefined<T>(value: T | undefined, message: string): T {
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// Namespace / schema construction
+// ---------------------------------------------------------------------------
+
+const NAMESPACE_WORDS = [
+  'doc',
+  'folder',
+  'group',
+  'org',
+  'project',
+  'space',
+  'repo',
+  'ticket',
+  'asset',
+  'room',
+  'board',
+  'workspace',
+] as const;
+
+const RELATION_WORDS = [
+  'owner',
+  'editor',
+  'viewer',
+  'admin',
+  'member',
+  'approver',
+  'reviewer',
+  'banned',
+  'watcher',
+  'contributor',
+  'maintainer',
+  'guest',
+] as const;
+
+const PERMISSION_WORDS = [
+  'view',
+  'edit',
+  'manage',
+  'access',
+  'read',
+  'write',
+  'moderate',
+  'publish',
+  'archive',
+  'approve',
+] as const;
+
+const CORE_NAMESPACE_COUNT = 3;
+const MIN_EXTRA_NAMESPACES = 1;
+const MAX_EXTRA_NAMESPACES = 3;
+const OBJECTS_PER_NAMESPACE_MIN = 3;
+const OBJECTS_PER_NAMESPACE_MAX = 6;
+const USER_COUNT_MIN = 6;
+const USER_COUNT_MAX = 12;
+
+/**
+ * The group-shaped namespace — always namespace #0. Its `member` relation
+ * accepts `user | <self>#member`, the exact shape a nested-group cycle
+ * needs (§6.4's own worked example: `group:a` nests `group:b` nests
+ * `group:a`). This namespace is where the guaranteed cycle (below) always
+ * lives.
+ */
+function buildGroupNamespaceSource(name: string): string {
+  return [
+    `namespace ${name} {`,
+    `  relation member: user | ${name}#member`,
+    '',
+    '  permission view = member',
+    '}',
+  ].join('\n');
+}
+
+/**
+ * The hierarchical namespace — always namespace #1. `parent->view` is the
+ * one guaranteed `tupleToUserset` construct; `editor | parent->view` is
+ * also a guaranteed `union`.
+ */
+function buildHierNamespaceSource(name: string, groupName: string): string {
+  return [
+    `namespace ${name} {`,
+    `  relation parent: ${name}`,
+    `  relation editor: user | ${groupName}#member`,
+    '',
+    '  permission view = editor | parent->view',
+    '}',
+  ].join('\n');
+}
+
+/**
+ * The resource namespace — always namespace #2. Hosts the guaranteed
+ * `intersection` (`trusted_edit`) and `exclusion` (`unbanned_view`)
+ * constructs, plus a second `tupleToUserset` (`parent_link->view`,
+ * crossing into the hierarchical namespace) for realism — mirrors §5's own
+ * `document`/`folder` worked example shape.
+ */
+function buildResourceNamespaceSource(name: string, groupName: string, hierName: string): string {
+  return [
+    `namespace ${name} {`,
+    '  relation owner: user',
+    `  relation editor: user | ${groupName}#member`,
+    `  relation viewer: user | ${groupName}#member`,
+    '  relation banned: user',
+    `  relation parent_link: ${hierName}`,
+    '',
+    '  permission view = viewer | editor | owner | parent_link->view',
+    '  permission trusted_edit = editor & owner',
+    '  permission unbanned_view = viewer - banned',
+    '}',
+  ].join('\n');
+}
+
+/** Picks a word from `wordBank` not already in `used`, falling back to a numbered variant if exhausted. */
+function pickUniqueName(
+  rng: SeededRng,
+  wordBank: readonly string[],
+  used: ReadonlySet<string>,
+): string {
+  const available = wordBank.filter((word) => !used.has(word));
+  if (available.length > 0) {
+    return rng.pick(available);
+  }
+  const base = rng.pick(wordBank);
+  let suffix = 1;
+  let candidate = `${base}_${suffix}`;
+  while (used.has(candidate)) {
+    suffix += 1;
+    candidate = `${base}_${suffix}`;
+  }
+  return candidate;
+}
+
+/**
+ * A random, always-valid rewrite-rule expression built only from names
+ * already known to exist (`citable`) — guaranteed to compile by
+ * construction, never by hoping a reference happens to resolve. Every
+ * composite node is defensively parenthesized so operator precedence
+ * (`docs/DECISIONS.md` D-011) can never produce a surprising parse for
+ * randomly-composed text.
+ */
+function buildRandomRewriteExpr(
+  rng: SeededRng,
+  citable: readonly string[],
+  depthBudget: number,
+): string {
+  if (citable.length === 0) {
+    throw new Error('buildRandomRewriteExpr: no citable relation/permission names available');
+  }
+  if (depthBudget <= 0 || rng.nextBoolean(0.45)) {
+    return rng.pick(citable);
+  }
+  const kind = rng.pick(['union', 'intersection', 'exclusion'] as const);
+  if (kind === 'union') {
+    const childCount = rng.nextIntBetween(2, 3);
+    const children = Array.from({ length: childCount }, () =>
+      buildRandomRewriteExpr(rng, citable, depthBudget - 1),
+    );
+    return `(${children.join(' | ')})`;
+  }
+  if (kind === 'intersection') {
+    const a = buildRandomRewriteExpr(rng, citable, depthBudget - 1);
+    const b = buildRandomRewriteExpr(rng, citable, depthBudget - 1);
+    return `(${a} & ${b})`;
+  }
+  const base = buildRandomRewriteExpr(rng, citable, depthBudget - 1);
+  const subtract = buildRandomRewriteExpr(rng, citable, depthBudget - 1);
+  return `(${base} - ${subtract})`;
+}
+
+/**
+ * An "extra" namespace layered on top of the three guaranteed-shape ones,
+ * for schema-shape variety beyond what the coverage requirement demands.
+ * Deliberately restricted to `user` and `<groupName>#member` subject
+ * types only (never a plain cross-namespace or self-referencing relation
+ * type) — both are always valid regardless of generation order or which
+ * other extra namespaces exist, which is what keeps "guaranteed to
+ * compile" a real guarantee rather than a probabilistic hope for this
+ * part of the schema too.
+ */
+function buildExtraNamespaceSource(rng: SeededRng, name: string, groupName: string): string {
+  const relationCount = rng.nextIntBetween(1, 3);
+  const usedNames = new Set<string>();
+  const relationLines: string[] = [];
+  const relationNames: string[] = [];
+  const subjectTypeOptions = ['user', `${groupName}#member`];
+
+  for (let i = 0; i < relationCount; i += 1) {
+    const relationName = pickUniqueName(rng, RELATION_WORDS, usedNames);
+    usedNames.add(relationName);
+    relationNames.push(relationName);
+    const typeCount = rng.nextIntBetween(1, subjectTypeOptions.length);
+    const chosenTypes = rng.shuffle(subjectTypeOptions).slice(0, typeCount);
+    relationLines.push(`  relation ${relationName}: ${chosenTypes.join(' | ')}`);
+  }
+
+  const permissionCount = rng.nextIntBetween(1, 3);
+  const citable = [...relationNames];
+  const permissionLines: string[] = [];
+  for (let i = 0; i < permissionCount; i += 1) {
+    const permissionName = pickUniqueName(rng, PERMISSION_WORDS, usedNames);
+    usedNames.add(permissionName);
+    const expr = buildRandomRewriteExpr(rng, citable, 2);
+    permissionLines.push(`  permission ${permissionName} = ${expr}`);
+    citable.push(permissionName);
+  }
+
+  return [`namespace ${name} {`, ...relationLines, '', ...permissionLines, '}'].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Tuple graph construction
+// ---------------------------------------------------------------------------
+
+interface ObjectEntity {
+  ns: string;
+  id: string;
+  /** A single, global, strictly increasing creation index — see this file's own doc comment on cycle avoidance. */
+  order: number;
+}
+
+/**
+ * Composite key for tuple-level deduplication — random generation can
+ * otherwise draw the same (object, relation, subject) triple twice, which
+ * `writeTuple` would happily accept as an idempotent no-op (`created:
+ * false`) but which would make `fixture.tuples.length` (reported as
+ * `soundness_runs.tuple_count`) overcount the graph's real distinct edges.
+ */
+function tupleKey(t: GeneratedTuple): string {
+  return `${t.objectNs}\0${t.objectId}\0${t.relation}\0${t.subjectNs}\0${t.subjectId}\0${t.subjectRelation ?? ''}`;
+}
+
+/**
+ * Randomly assigns 0-3 subjects for one `(object, relation)` pair, drawing
+ * only from subjects that already exist. For a namespace-typed subject
+ * type (plain or userset), the candidate pool is filtered to objects whose
+ * `order` is strictly less than `object`'s own — the single rule that
+ * makes every *randomly generated* userset-subject or tuple-to-userset
+ * edge provably acyclic (a directed edge can only ever point to a
+ * strictly-earlier-created node, so no cycle can form), leaving the one
+ * deliberately hand-inserted cycle (see `generateFixture`) as the run's
+ * only cycle, guaranteed and unambiguous rather than incidental.
+ */
+function assignRandomTuples(
+  rng: SeededRng,
+  addTuple: (t: GeneratedTuple) => void,
+  object: ObjectEntity,
+  relation: CompiledRelation,
+  objectsByNs: ReadonlyMap<string, ObjectEntity[]>,
+  userIds: readonly string[],
+): void {
+  if (relation.subjectTypes.length === 0) return;
+  if (!rng.nextBoolean(0.55)) return;
+
+  const attempts = rng.nextIntBetween(1, 3);
+  for (let i = 0; i < attempts; i += 1) {
+    const subjectType = rng.pick(relation.subjectTypes);
+    if (subjectType.namespace === 'user' && subjectType.relation === undefined) {
+      addTuple({
+        objectNs: object.ns,
+        objectId: object.id,
+        relation: relation.name,
+        subjectNs: 'user',
+        subjectId: rng.pick(userIds),
+      });
+      continue;
+    }
+    const candidates = (objectsByNs.get(subjectType.namespace) ?? []).filter(
+      (candidate) => candidate.order < object.order,
+    );
+    if (candidates.length === 0) continue;
+    const subject = rng.pick(candidates);
+    addTuple({
+      objectNs: object.ns,
+      objectId: object.id,
+      relation: relation.name,
+      subjectNs: subject.ns,
+      subjectId: subject.id,
+      ...(subjectType.relation !== undefined ? { subjectRelation: subjectType.relation } : {}),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Coverage self-check
+// ---------------------------------------------------------------------------
+
+/** Compile-time exhaustiveness guard — independently written, not imported from either resolver's own copy (see `docs/DECISIONS.md` D-022). */
+function assertNeverRewriteRule(node: never): never {
+  throw new Error(`generators.ts: unhandled rewrite-rule kind ${JSON.stringify(node)}`);
+}
+
+/**
+ * Walks every permission's rewrite tree across every namespace and records
+ * which of the four meaningful `RewriteRule` kinds actually appear in the
+ * *compiled* schema — audited against the real artifact, not trusted from
+ * the construction logic that was supposed to guarantee it.
+ */
+export function checkRewriteRuleCoverage(schema: CompiledSchema): RewriteRuleKindCoverage {
+  const found: RewriteRuleKindCoverage = {
+    union: false,
+    intersection: false,
+    exclusion: false,
+    tupleToUserset: false,
+  };
+
+  function walk(node: RewriteRule): void {
+    switch (node.kind) {
+      case 'union':
+        found.union = true;
+        node.children.forEach(walk);
+        return;
+      case 'intersection':
+        found.intersection = true;
+        node.children.forEach(walk);
+        return;
+      case 'exclusion':
+        found.exclusion = true;
+        walk(node.base);
+        walk(node.subtract);
+        return;
+      case 'tupleToUserset':
+        found.tupleToUserset = true;
+        return;
+      case 'computedUserset':
+        return;
+      default:
+        assertNeverRewriteRule(node);
+    }
+  }
+
+  for (const namespace of Object.values(schema.namespaces)) {
+    for (const permission of Object.values(namespace.permissions)) {
+      walk(permission.rewrite);
+    }
+  }
+  return found;
+}
+
+/**
+ * An independent, standalone cycle check over the userset-subject graph
+ * (edges: `(objectNs, objectId, relation)` -> `(subjectNs, subjectId,
+ * subjectRelation)`, present only where `subjectRelation` is set) — a
+ * small, self-contained DFS with grey/black coloring, deliberately
+ * *not* shared with either resolver's own cycle-detection code (this is a
+ * meta-check on the generator's own output, not a resolver, so it carries
+ * none of §6.2's "no shared code" weight either way, but is kept
+ * independent anyway as a matter of hygiene — a bug in this function could
+ * only ever produce a false `insufficient_coverage` report, never a
+ * `false_grant`/`false_deny` miscount, since it's never consulted by
+ * `classify.ts`'s per-query verdict).
+ */
+export function hasUsersetCycle(tuples: readonly GeneratedTuple[]): boolean {
+  const edges = new Map<string, string[]>();
+  for (const t of tuples) {
+    if (t.subjectRelation === undefined) continue;
+    const from = `${t.objectNs}\0${t.objectId}\0${t.relation}`;
+    const to = `${t.subjectNs}\0${t.subjectId}\0${t.subjectRelation}`;
+    const existing = edges.get(from);
+    if (existing) {
+      existing.push(to);
+    } else {
+      edges.set(from, [to]);
+    }
+  }
+
+  const WHITE = 0;
+  const GREY = 1;
+  const BLACK = 2;
+  const color = new Map<string, 0 | 1 | 2>();
+
+  function dfs(node: string): boolean {
+    color.set(node, GREY);
+    for (const next of edges.get(node) ?? []) {
+      const nextColor = color.get(next) ?? WHITE;
+      if (nextColor === GREY) return true;
+      if (nextColor === WHITE && dfs(next)) return true;
+    }
+    color.set(node, BLACK);
+    return false;
+  }
+
+  for (const node of edges.keys()) {
+    if ((color.get(node) ?? WHITE) === WHITE && dfs(node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function computeCoverageReport(
+  schema: CompiledSchema,
+  tuples: readonly GeneratedTuple[],
+): CoverageReport {
+  const rewriteRuleKinds = checkRewriteRuleCoverage(schema);
+  const hasCycle = hasUsersetCycle(tuples);
+  const ok =
+    rewriteRuleKinds.union &&
+    rewriteRuleKinds.intersection &&
+    rewriteRuleKinds.exclusion &&
+    rewriteRuleKinds.tupleToUserset &&
+    hasCycle;
+  return { rewriteRuleKinds, hasCycle, ok };
+}
+
+// ---------------------------------------------------------------------------
+// The entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministically generates one complete differential-fuzz fixture from
+ * `seed` alone: a compilable multi-namespace DSL source, a tuple graph
+ * (guaranteed at least one cycle), and `queryCount` queries drawn from the
+ * graph's own entities. See this file's own top-of-file doc comment for
+ * the determinism and salting guarantees, and `docs/DECISIONS.md` for why
+ * the four required rewrite-rule kinds and the cycle are built first and
+ * hand-placed rather than hoped for.
+ */
+export function generateFixture(seed: string, queryCount: number): GeneratedFixture {
+  const { rng, numericSeed } = buildRng(seed, queryCount);
+  const salt = numericSeed.toString(36);
+
+  // --- namespaces -----------------------------------------------------
+  const extraNamespaceCount = rng.nextIntBetween(MIN_EXTRA_NAMESPACES, MAX_EXTRA_NAMESPACES);
+  const totalNamespaceCount = CORE_NAMESPACE_COUNT + extraNamespaceCount;
+  const chosenWords = rng.shuffle(NAMESPACE_WORDS).slice(0, totalNamespaceCount);
+  const chosenNames = chosenWords.map((word) => `${word}_${salt}`);
+
+  const groupNs = requireDefined(chosenNames[0], 'generator: expected a group-namespace name');
+  const hierNs = requireDefined(
+    chosenNames[1],
+    'generator: expected a hierarchical-namespace name',
+  );
+  const resourceNs = requireDefined(
+    chosenNames[2],
+    'generator: expected a resource-namespace name',
+  );
+  const extraNames = chosenNames.slice(CORE_NAMESPACE_COUNT);
+  const namespaceOrder = [groupNs, hierNs, resourceNs, ...extraNames];
+
+  const namespaceSources = [
+    buildGroupNamespaceSource(groupNs),
+    buildHierNamespaceSource(hierNs, groupNs),
+    buildResourceNamespaceSource(resourceNs, groupNs, hierNs),
+    ...extraNames.map((name) => buildExtraNamespaceSource(rng, name, groupNs)),
+  ];
+  const schemaSource = namespaceSources.join('\n\n');
+
+  // Self-check: this schema must actually compile. If it doesn't, that's a
+  // generator defect, not a fuzz finding — fail loudly rather than hand a
+  // broken fixture to the runner.
+  const compiled = compileSchema(schemaSource);
+  if (!compiled.ok) {
+    throw new Error(
+      `soundness fixture generator (seed=${seed}) produced a schema that failed to compile — ` +
+        `this is a generator bug, not a fuzz finding: ${compiled.errors.map(formatSchemaError).join('; ')}`,
+    );
+  }
+  const schema = compiled.schema;
+
+  const namespaces: GeneratedNamespaceMeta[] = namespaceOrder.map((namespace, index) => ({
+    namespace,
+    // resourceNs is always critical (the "protected resource" role); each
+    // extra namespace is independently, deterministically critical ~25% of
+    // the time, for coverage variety in what a real report would show.
+    critical: namespace === resourceNs || (index >= CORE_NAMESPACE_COUNT && rng.nextBoolean(0.25)),
+  }));
+
+  // --- objects ----------------------------------------------------------
+  let creationOrder = 0;
+  const objectsByNs = new Map<string, ObjectEntity[]>();
+  for (const ns of namespaceOrder) objectsByNs.set(ns, []);
+
+  function createObject(ns: string, id: string): ObjectEntity {
+    const entity: ObjectEntity = { ns, id, order: creationOrder };
+    creationOrder += 1;
+    const list = requireDefined(objectsByNs.get(ns), `generator: namespace ${ns} not initialized`);
+    list.push(entity);
+    return entity;
+  }
+
+  // The guaranteed cycle's two objects are created first, before any other
+  // groupNs object, so later random `groupNs#member` grants can validly
+  // reference them as "earlier" nodes too.
+  const cycleA = createObject(groupNs, 'cycle_a');
+  const cycleB = createObject(groupNs, 'cycle_b');
+
+  for (const ns of namespaceOrder) {
+    const already = requireDefined(
+      objectsByNs.get(ns),
+      `generator: namespace ${ns} not initialized`,
+    ).length;
+    const target = rng.nextIntBetween(OBJECTS_PER_NAMESPACE_MIN, OBJECTS_PER_NAMESPACE_MAX);
+    for (let i = already; i < target; i += 1) {
+      createObject(ns, `o${i}`);
+    }
+  }
+
+  const userCount = rng.nextIntBetween(USER_COUNT_MIN, USER_COUNT_MAX);
+  const userIds = Array.from({ length: userCount }, (_, i) => `u${i}`);
+  const cycleWitnessUser = requireDefined(userIds[0], 'generator: expected at least one user id');
+  const lonelyUser = requireDefined(
+    userIds[userIds.length - 1],
+    'generator: expected at least one user id',
+  );
+
+  // --- tuples -------------------------------------------------------------
+  const tuples: GeneratedTuple[] = [];
+  const seenTupleKeys = new Set<string>();
+  const addTuple = (t: GeneratedTuple): void => {
+    const key = tupleKey(t);
+    if (seenTupleKeys.has(key)) return;
+    seenTupleKeys.add(key);
+    tuples.push(t);
+  };
+
+  // The guaranteed cycle (§6.4's own worked example): cycle_a's `member`
+  // set includes cycle_b's `member` set, and vice versa. Neither grants
+  // real membership to anyone by itself.
+  addTuple({
+    objectNs: groupNs,
+    objectId: cycleA.id,
+    relation: 'member',
+    subjectNs: groupNs,
+    subjectId: cycleB.id,
+    subjectRelation: 'member',
+  });
+  addTuple({
+    objectNs: groupNs,
+    objectId: cycleB.id,
+    relation: 'member',
+    subjectNs: groupNs,
+    subjectId: cycleA.id,
+    subjectRelation: 'member',
+  });
+  // A real, direct grant on cycle_a, outside the cycle itself — gives a
+  // hand-derivable "allowed" seed query (see the reserved queries below)
+  // and matches the precedent in `cross-resolver-agreement.integration
+  // .test.ts`'s own cyclic fixture (a real grant must not be poisoned by
+  // an unrelated cycle sitting on the same object).
+  addTuple({
+    objectNs: groupNs,
+    objectId: cycleA.id,
+    relation: 'member',
+    subjectNs: 'user',
+    subjectId: cycleWitnessUser,
+  });
+
+  for (const ns of namespaceOrder) {
+    const nsConfig = requireDefined(
+      schema.namespaces[ns],
+      `generator: namespace ${ns} missing after compile`,
+    );
+    const objects = objectsByNs.get(ns) ?? [];
+    for (const object of objects) {
+      for (const relation of Object.values(nsConfig.relations)) {
+        assignRandomTuples(rng, addTuple, object, relation, objectsByNs, userIds);
+      }
+    }
+  }
+
+  // --- queries --------------------------------------------------------
+  const checkableNamesByNs = new Map<string, string[]>();
+  for (const ns of namespaceOrder) {
+    const nsConfig = requireDefined(
+      schema.namespaces[ns],
+      `generator: namespace ${ns} missing after compile`,
+    );
+    checkableNamesByNs.set(ns, [
+      ...Object.keys(nsConfig.relations),
+      ...Object.keys(nsConfig.permissions),
+    ]);
+  }
+
+  function pickRandomSubjectEntity(): GeneratedEntityRef {
+    if (rng.nextBoolean(0.75)) {
+      return { ns: 'user', id: rng.pick(userIds) };
+    }
+    const ns = rng.pick(namespaceOrder);
+    const objects = objectsByNs.get(ns) ?? [];
+    if (objects.length === 0) {
+      return { ns: 'user', id: rng.pick(userIds) };
+    }
+    const obj = rng.pick(objects);
+    return { ns: obj.ns, id: obj.id };
+  }
+
+  function pickRandomObjectEntity(): ObjectEntity {
+    const ns = rng.pick(namespaceOrder);
+    const objects = objectsByNs.get(ns) ?? [];
+    return requireDefined(
+      objects.length > 0 ? rng.pick(objects) : undefined,
+      `generator: namespace ${ns} unexpectedly has no objects`,
+    );
+  }
+
+  const queries: GeneratedQuery[] = [];
+
+  // Reserved, hand-derivable seed queries: one that touches the cyclic
+  // construct with no real path (expected denied, exercises cycle
+  // termination end-to-end through an actual query), one with a real
+  // direct grant on the same cyclic object (expected allowed, proves the
+  // cycle didn't poison a real grant sitting next to it).
+  if (queryCount >= 1) {
+    queries.push({
+      subject: { ns: 'user', id: lonelyUser },
+      object: { ns: groupNs, id: cycleA.id },
+      relationOrPermission: 'view',
+    });
+  }
+  if (queryCount >= 2) {
+    queries.push({
+      subject: { ns: 'user', id: cycleWitnessUser },
+      object: { ns: groupNs, id: cycleA.id },
+      relationOrPermission: 'view',
+    });
+  }
+
+  const reserved = Math.min(2, Math.max(0, queryCount));
+  for (let i = reserved; i < queryCount; i += 1) {
+    if (tuples.length > 0 && rng.nextBoolean(0.5)) {
+      // "Likely positive": derive a query from a real tuple's own object,
+      // biasing toward subjects/objects with an actual chance of a path.
+      const t = rng.pick(tuples);
+      const names = requireDefined(
+        checkableNamesByNs.get(t.objectNs),
+        `generator: namespace ${t.objectNs} has no checkable names`,
+      );
+      const subject =
+        t.subjectRelation === undefined
+          ? { ns: t.subjectNs, id: t.subjectId }
+          : pickRandomSubjectEntity();
+      queries.push({
+        subject,
+        object: { ns: t.objectNs, id: t.objectId },
+        relationOrPermission: rng.pick(names),
+      });
+    } else {
+      // Fully random, entity-grounded query — the "should mostly deny" side.
+      const object = pickRandomObjectEntity();
+      const names = requireDefined(
+        checkableNamesByNs.get(object.ns),
+        `generator: namespace ${object.ns} has no checkable names`,
+      );
+      queries.push({
+        subject: pickRandomSubjectEntity(),
+        object: { ns: object.ns, id: object.id },
+        relationOrPermission: rng.pick(names),
+      });
+    }
+  }
+
+  const coverage = computeCoverageReport(schema, tuples);
+
+  return { seed, schemaSource, namespaces, tuples, queries, coverage };
+}
