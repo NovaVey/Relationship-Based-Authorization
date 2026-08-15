@@ -1,0 +1,14 @@
+// Namespace DSL example — see .claude/commands/build-authz-service.md §5.
+// Given verbatim from §5. Compiles standalone: `group` is referenced only
+// as a plain subject type (`group#member`), which this compiler never
+// requires to be present in the same compilation unit — see
+// docs/DECISIONS.md for why that's different from tuple-to-userset's own,
+// stricter "target namespace must exist" rule.
+namespace document {
+  relation owner: user
+  relation editor: user | group#member
+  relation viewer: user | group#member
+
+  permission view = viewer | editor | owner
+  permission edit = editor | owner
+}

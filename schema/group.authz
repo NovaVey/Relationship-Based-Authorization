@@ -1,0 +1,13 @@
+// Namespace DSL example — see .claude/commands/build-authz-service.md §5.
+// `member`'s subject types are `user | group#member` — a group's member set
+// can itself be a subject of another group's member set, which is what
+// makes nested group membership possible: group:eng#member can be a
+// subject of group:all-eng#member without either group namespace needing
+// any special-cased recursion of its own. `view` exists mainly to give
+// `group` at least one permission, analogous to document/folder/org, rather
+// than being a relation-only namespace.
+namespace group {
+  relation member: user | group#member
+
+  permission view = member
+}

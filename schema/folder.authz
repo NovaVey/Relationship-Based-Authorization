@@ -1,0 +1,12 @@
+// Namespace DSL example — see .claude/commands/build-authz-service.md §5.
+// Given verbatim from §5. `permission view`'s `parent->view` is a
+// tuple-to-userset rule whose followed relation (`parent`) targets `folder`
+// itself — self-contained, so this compiles standalone even though
+// tuple-to-userset's target namespace must exist in the compilation unit
+// (unlike a plain relation subject type — see document.authz's comment).
+namespace folder {
+  relation parent: folder
+  relation editor: user | group#member
+
+  permission view = editor | parent->view
+}

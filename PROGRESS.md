@@ -137,3 +137,114 @@ Waiting on Postgres hosting choice for the connection string Phase 2's
 actual migrations will run against — the local Postgres used above is a
 throwaway dev fixture (`authz` / `authz_dev` on `127.0.0.1`), not anything
 this project depends on going forward.
+
+**Resolved — Postgres hosting.** Railway, matching this org's other
+services. Provisioned `Postgres-RBA` in the existing `Upwork Portfolio`
+project (same image/variable convention as `Postgres-ERP`); `.env`'s
+`DATABASE_URL` now points at the real instance via its public TCP proxy.
+One real infra bug found and fixed along the way (missing persistent
+volume — the container looped forever instead of starting; deployment
+status alone said `SUCCESS` throughout, only the runtime logs showed the
+actual problem) — see `docs/DECISIONS.md` D-010 for the full account.
+`DATABASE_URL` is verified working — real auth, real `select version()` —
+via a Railway-hosted sandbox exec, not from this session's own shell: this
+session's network policy only proxies outbound HTTP(S), so raw TCP to
+Postgres isn't reachable directly from here. PR #9 merged.
+
+**Open question carried forward:** Phase 2 onward will want real
+integration-test runs against this database (per this project's own
+"verify by running it, not by inspection" standard). This session can't do
+that directly — confirm before Phase 2's CHECKPOINT that GitHub Actions CI
+(which has normal outbound network access) can reach
+`yamanote.proxy.rlwy.net:36306`, or find another execution path (e.g. a
+Railway sandbox exec, matching how `DATABASE_URL` itself was verified here)
+for any integration test that needs to run from this session specifically.
+
+## Phase 1 — Schema DSL
+
+**Owner:** `schema-compiler` subagent (parser/compiler/types/errors + the
+four example schemas), delegated per `.claude/commands/build-authz-service.md`
+§14. `test-author` subagent dispatched separately, after `schema-compiler`
+finished, given only the compiled interface (`types.ts`/`errors.ts`'s
+exported shapes) — explicitly barred from reading `parser.ts`/`compiler.ts`
+so its tests prove agreement with §5/§10 of the spec, not with the
+implementation's own behavior (delegation rule 5).
+
+**Files touched:**
+
+- Added: `src/schema/dsl/{types.ts,errors.ts,parser.ts,compiler.ts}` — a
+  pure, zero-I/O lexer/recursive-descent parser + semantic compiler for the
+  §5 grammar. `schema/{document,folder,group,org}.authz` (the four example
+  namespaces — `document`/`folder` verbatim from §5, `group`/`org`
+  designed to match) and `schema/malformed-example.authz` (Phase 1's own
+  exit-criteria fixture).
+- Test suite: see below, added by `test-author` once its delegation
+  completes.
+
+**Main-agent review before accepting (delegation rule 4):** read every
+file `schema-compiler` produced, then independently re-ran the compiler
+myself — not just the subagent's own transcript — against all four
+example schemas compiled together (confirmed idempotent), the malformed
+example, and two adversarial cases beyond what the subagent reported on
+its own (a relation subject type targeting another namespace's
+_permission_ instead of a relation, and a self-referential `permission
+view = view`). Both correctly rejected with a specific, located error.
+`npm run lint`/`typecheck`/`format:check` re-run and confirmed clean
+myself, not just trusted from the subagent's report.
+
+**Judgment calls the subagent flagged, now recorded:** `docs/DECISIONS.md`
+D-011 (rewrite-rule operator precedence — `&` binds tighter than `|`/`-`),
+D-012 (tuple-to-userset's target-namespace check is strict; a plain
+relation subject type's is soft — and why those are different, not
+inconsistent), D-013 (circular-permission detection is a static
+compile-time graph check over permission-to-permission edges only, not a
+per-branch liveness proof).
+
+**Test suite (`test-author`, two delegations):**
+
+- First pass: 17 tests across `test/unit/schema/{rewrite-rules,
+schema-validation}.test.ts`, covering all four §10 "Schema DSL" cases plus
+  determinism, duplicate-name, and cycle-detection coverage. Fail-checked —
+  every assertion independently mutated to a wrong expected value and
+  confirmed to fail before being restored — proving the suite actually
+  discriminates rather than vacuously passing.
+- Second pass (main-agent-initiated follow-up, after reviewing the first
+  pass's own flag): un-skipped exactly the two `test/isolation/identifier-
+and-tuple-validation.fuzz.test.ts` `.todo()`s that are genuinely
+  implementable against the Phase 1 compiler alone (namespace-name and
+  relation-name injection-corpus rejection). Every other `.todo()` in that
+  file needs Phase 2 (the tuple writer) or later and correctly stays
+  `.todo()` — see the file's own updated doc comment for the four-way
+  payload classification this required (`empty`/`whitespace-decorated`/
+  `invalid-word`/`unlexable`) and why a whitespace-insensitive, unquoted
+  grammar can't reject some corpus payloads by the string arriving intact
+  in the first place — that's a structural property of the grammar, not a
+  gap in validation.
+
+Both passes written from `.claude/commands/build-authz-service.md` §5/§10
+alone — `parser.ts`/`compiler.ts` deliberately not read while writing
+either, per delegation rule 5 — and both independently re-run by the main
+agent, not just trusted from the subagent's report.
+
+**Main-agent review before accepting (delegation rule 4), both
+`schema-compiler`'s and `test-author`'s output:** read every file
+produced, independently re-ran the compiler against all four example
+schemas, the malformed example, and two adversarial cases beyond what
+either subagent reported on its own initiative. `npm run lint`/
+`typecheck`/`format:check`/`test` all re-run and confirmed clean directly,
+not assumed from a subagent transcript.
+
+**Final state:** `npm test` — 24 passed, 18 `.todo()` (was 20 `.todo()`
+before Phase 1; two genuinely Phase-1-scoped identifier-validation todos
+now real and passing). Lint/typecheck/format all clean.
+
+**CHECKPOINT reached — see build spec §9 Phase 1:** exit criteria met
+(the four example schemas compile; the malformed example is rejected with
+an error naming the exact line/construct — verified independently by the
+main agent, not just the subagent's own claim).
+
+**Not yet done:** the CLI's `authz schema compile <file>`/`authz schema
+publish <file>` commands (§7) — Phase 1 built the DSL layer only; wiring
+it to the CLI is still open, deferred to whichever later phase first
+needs it from the command line (likely Phase 2, once there's a
+`namespace_configs` table to publish into).
