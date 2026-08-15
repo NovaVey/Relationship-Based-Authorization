@@ -348,3 +348,76 @@ can't reach Railway's `DATABASE_URL` directly (network-policy-restricted,
 see D-010), but the local Postgres dev fixture used throughout Phase 2
 remains available and is what later phases should keep using for
 interactive verification in this environment.
+
+## Phase 3 — Reference resolver (the oracle)
+
+**Owner:** `soundness-engineer` (the resolver itself), `test-author` (the
+§10 test suite, from spec alone — did not read `resolver.ts`). Both
+reviewed and independently re-verified by the main agent before
+accepting, per delegation rule 4.
+
+**Files touched:**
+
+- `src/resolve/reference/resolver.ts` (new) — `referenceCheck`, a pure,
+  synchronous, in-memory brute-force graph walker. No I/O, no cache, no
+  shared code with the (not-yet-built) Phase 4 production resolver —
+  isolation enforced structurally (module-private helpers, a redefined
+  not imported tuple type, single import of `src/schema/dsl/types.ts`
+  only). Walks both userset mechanisms (rewrite-rule tuple-to-userset and
+  stored-tuple userset subjects) correctly; cycle detection is
+  branch-local via strict backtracking; an independent depth ceiling
+  backstops a genuinely acyclic but pathologically deep chain.
+- `test/unit/resolve/reference-resolver.{rewrite-rules,graph-shape,
+depth-budget,edge-cases}.test.ts` (new, 29 tests) — every §10 "Reference
+  resolver (Phase 3)" case plus multi-hop tuple-to-userset, diamond-DAG
+  (including a genuinely hard variant — same node _and_ same relation
+  name revisited from sibling branches, which a naive "ever seen this
+  node" cycle guard would get wrong but a correct per-path one doesn't),
+  undeclared namespace/relation, the depth-budget ceiling, and a
+  userset-subject test constructed specifically to catch a resolver that
+  string-compares ids instead of really recursing.
+
+**Main-agent review found two real problems, both fixed before
+committing:**
+
+1. **A raw NUL byte in the source, not a `\0` escape sequence** — same
+   runtime string value, but `git` treats a blob containing one as binary
+   (confirmed: `git diff` showed `Binary files ... differ` instead of a
+   readable diff). Would have made this file's GitHub PR review show no
+   diff at all. Fixed by replacing the raw byte with the two-character
+   escape `\0`; the delimiter design itself (a separator that can never
+   appear in a real identifier, so a composite key can't collide by
+   accident) was sound and kept — see `docs/DECISIONS.md` D-023.
+2. **A test-design gap `test-author` found and fixed via its own
+   fail-check discipline**, worth calling out because of what it proves
+   about testing methodology, not just this one test: the cyclic-nesting
+   "terminates and resolves denied" test, run against the resolver's
+   _default_ depth budget, would still pass even with cycle detection
+   completely removed — the independent depth ceiling silently absorbed
+   the infinite recursion before the assertion ran. Fixed by forcing an
+   explicit, very large `maxDepth` so the depth backstop can't be the
+   thing doing the work the test claims to be checking. See
+   `docs/DECISIONS.md` D-024 — flagged explicitly as a lesson worth
+   carrying into Phase 5's fuzz-harness design.
+
+**Main-agent independent verification, beyond either subagent's own
+report:** wrote and ran a standalone script exercising all 5 required
+CHECKPOINT examples plus two adversarial cases of my own (a diamond DAG
+confirmed _not_ falsely flagged as a cycle, and a direct self-loop) — 16/16
+passed against the real resolver before it was ever accepted or committed.
+
+**Final state:** `npm test` — 56 passed, 15 `.todo()` (unchanged — every
+remaining isolation `.todo()` needs Phase 2+4 or Phase 3+4+5 together, none
+satisfiable from Phase 3 alone). Lint/typecheck/format all clean.
+
+**CHECKPOINT reached — see build spec §9 Phase 3:** the reference resolver
+matches 5 hand-derived examples, including tuple-to-userset through a
+3-level parent chain and a cyclic group nesting that correctly resolves
+denied rather than hanging — verified independently by the main agent, not
+just claimed by either subagent.
+
+**Open question carried forward for Phase 4:** the reference resolver
+deliberately does not return a resolution path (`docs/DECISIONS.md`
+D-020) — confirm whether Phase 4's production resolver needs to agree on a
+path-shaped return value before Phase 5's divergence reporting is built
+around whatever shape exists at that point.
