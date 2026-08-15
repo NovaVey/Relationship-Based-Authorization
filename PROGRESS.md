@@ -689,3 +689,132 @@ resolver's resolution path; a `false_grant` report is actionable today (it
 names the exact query), but showing the bogus chain the production
 resolver _thought_ it found (§6.7) would make it more so — deferred, not
 forgotten, likely Phase 6's concern.
+
+**Closed by Phase 6, see its own section below:** both resolvers now grow
+a resolution path, and `DivergenceRecord` now carries each resolver's own
+path.
+
+## Phase 6 — Expand + audit trail
+
+**Owner:** `soundness-engineer` (resolution paths on both resolvers,
+`expand()`, threading paths into Phase 5's `DivergenceRecord`) + main
+agent (`checks` migration, `src/audit/checks.ts`, CLI wiring, independent
+verification) + `test-author` (the two untested exit-criterion halves).
+No formal CHECKPOINT for this phase (build spec §9) — status reported,
+not a mandatory stop.
+
+**Files touched:**
+
+- `src/store/migrations/0004_checks.sql` (new) — §4's `checks` table, the
+  audit trail. `resolution_path jsonb` (nullable — populated iff
+  `allowed`), two indexes (by object, by subject, most recent first).
+- `src/resolve/reference/resolver.ts`, `src/resolve/production/
+resolver.ts` — both grow a resolution path (`ReferenceCheckResult
+.path`/`ProductionCheckResult.path`, present iff `allowed`): a real
+  evidence tree, not a linear chain or a trusted boolean. `union` records
+  the one branch that succeeded; `intersection` records every branch's
+  own proof; `tupleToUserset` records the followed tuple and the proof at
+  its target; `exclusion` records a proof of `base` **and** a symmetric
+  NEGATIVE disproof tree proving `subtract` does not hold (D-020's own
+  deferred design question, settled as D-036). Field-for-field
+  independent between the two resolvers (D-022's precedent) — the
+  production resolver's relation-membership disproof is deliberately a
+  flat reachability certificate rather than a nested tree (D-037), since
+  matching shapes would mean discarding the single-round-trip recursive
+  CTE for cosmetic symmetry alone. The production resolver's
+  `ProductionCheckResult` also grows `depth` — the actual maximum
+  recursion depth reached, across both mechanisms (D-038).
+- `src/audit/expand.ts` (new) — `expand()`: the exact subject tree for an
+  object#relation, including tuple-to-userset members, mirroring the
+  real rewrite-rule structure. Its own cycle guard (branch-local visiting
+  set + depth ceiling), matching both resolvers' established discipline
+  — cycle safety here is a termination property, not a proof obligation
+  the way a check's disproof leaf is (D-040).
+- `src/soundness/runner.ts` — `DivergenceRecord` grows
+  `referencePath`/`productionPath` (present iff that resolver's own
+  boolean was true), closing the Phase 4/5 carried-forward open
+  question. `buildDivergenceRecord` extracted as a pure function so this
+  is unit-testable without Postgres or mutating a shipped resolver file
+  at test time (D-039). `classify.ts` itself untouched.
+- `src/audit/checks.ts` (new) — `performCheck`: wraps `productionCheck`,
+  times it, inserts one `checks` row per call. The _only_ caller is the
+  CLI's `authz check` — a fuzz run's synthetic per-query checks
+  deliberately never route through it (D-041), and a failed audit-log
+  write fails the whole operation rather than silently returning an
+  unlogged answer (D-042).
+- `src/cli/commands/check.ts` — routes through `performCheck` instead of
+  `productionCheck` directly; same engine, now logged.
+- `src/cli/commands/expand.ts` (new) — `authz expand <object> <relation>`
+  per §7: prints the resolved subject tree, indented to show the real
+  rewrite-rule structure. Functional, not polished — a real rendering is
+  Phase 7/8/9's job.
+- Tests (new): `test/unit/resolve/reference-resolver.resolution-path
+.test.ts` (12), `test/unit/resolve/production/production-resolution-path
+.integration.test.ts` (11), `test/unit/audit/expand.integration.test.ts`
+  (5), `test/unit/audit/checks.integration.test.ts` (6),
+  `test/unit/cli/expand.test.ts` (3), `test/unit/cli/expand.integration
+.test.ts` (1), `test/unit/cli/check.integration.test.ts` (1). One
+  pre-existing `test/isolation/differential-soundness.fuzz.test.ts`
+  `.todo()` un-skipped (the resolution-path-in-a-divergence-report test
+  this phase makes satisfiable).
+- `docs/DECISIONS.md`: D-036 through D-042.
+
+**The single largest design decision this phase:** what an exclusion's
+resolution path even means. §6.7/the exit criterion only say an allowed
+check's path must "independently re-verify" — nothing in the spec
+addresses what that means for `a - b`, where the negative half ("`b` does
+NOT hold") is exactly as load-bearing as the positive half. Settled as a
+full symmetric proof/disproof scheme (D-036) — the alternative (trust the
+resolver's own "subtract was false" claim) would have quietly
+reintroduced the exact kind of unverified trust this whole project's
+soundness claim exists to eliminate, one layer up from where §6.2 already
+eliminates it.
+
+**Two real fail-checks the main agent performed independently, not just
+trusted from either subagent's report** (beyond the extensive additional
+independent verification detailed in this phase's own PR/commit
+messages — clean nested-group `expand()` output, a real logged check
+with its resolution path inspected directly via `jsonb_pretty`, a real
+5,000-query standard-budget run with resolution paths threaded through
+showing no regression, a real deliberately-broken run whose persisted
+`soundness_runs.divergences` row was queried directly and shown to
+contain the exact bogus chain):
+
+1. Broke `resolveRelation`'s `tupleDisproofs` recording in the reference
+   resolver (dropped one `push` call) — confirmed exactly the two
+   exclusion-disproof tests go red, for the expected reason, restored,
+   confirmed byte-identical.
+2. Disabled `expand()`'s cycle guard — confirmed a real 12+ second hang
+   (killed by a hard timeout, not a stack overflow, matching the
+   `await`-based walk's own design), versus sub-second guarded, restored,
+   confirmed byte-identical, no lingering Postgres backends.
+3. Broke `checks.ts`'s own `resolution_path` storage (forced to
+   always-null) — confirmed exactly the 3 dependent tests fail, restored,
+   confirmed byte-identical.
+
+**Final state:** `npm run verify`-equivalent (format:check, lint,
+typecheck, test, build) clean throughout; fast suite 82 passed (was 56 at
+the start of Phase 5), 6 `.todo()` remaining (down from 15 at the start
+of Phase 5 — this phase converted the resolution-path-in-a-divergence-
+report test from `.todo()` to real; the 6 remaining are unrelated,
+carried over from earlier phases). All new real-Postgres tests (23 across
+this phase's four new/touched integration files) independently
+re-confirmed against real local Postgres, since this sandbox still cannot
+pull `testcontainers` images (D-019/D-030's standing limitation) — real
+GitHub Actions CI is what confirms the committed files themselves run
+green.
+
+**Exit criteria met (build spec §9 Phase 6 — no CHECKPOINT):**
+`expand()` returns the exact subject tree including tuple-to-userset
+members (verified directly against a real nested-group graph, matching
+§8's own worked example); every check, allowed or denied, is logged
+(verified directly — an allowed row has a path, a denied row has a null
+path); an allowed check's log entry contains a path that independently
+re-verifies (two from-scratch, real-Postgres-backed verifier suites, both
+proven to have power via tamper tests and fail-checks, not just shape
+assertions).
+
+**Open questions carried forward:** none new. The `checks` audit trail
+is now real but nothing yet renders it for a human (Phase 7/8/9); the
+`authz expand` CLI output is functional, not the polished §8 chain
+notation the eventual report/screens should use.

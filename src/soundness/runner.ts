@@ -22,7 +22,9 @@ import { formatSchemaError } from '../schema/dsl/errors.js';
 import { publishSchema } from '../schema/publish.js';
 import { writeTuple } from '../store/tuples.js';
 import { referenceCheck } from '../resolve/reference/resolver.js';
+import type { ResolutionStep as ReferenceResolutionStep } from '../resolve/reference/resolver.js';
 import { productionCheck } from '../resolve/production/resolver.js';
+import type { ResolutionStep as ProductionResolutionStep } from '../resolve/production/resolver.js';
 import { classifyResult, computeVerdict, type SoundnessVerdict } from './classify.js';
 import {
   generateFixture,
@@ -56,7 +58,22 @@ export interface SoundnessRunOptions {
   maxDepth?: number;
 }
 
-/** One divergence, in the shape `soundness_runs.divergences` (jsonb) stores it. */
+/**
+ * One divergence, in the shape `soundness_runs.divergences` (jsonb) stores
+ * it. `referencePath`/`productionPath` are Phase 6 additions (§6.7): each
+ * resolver's own resolution path, present exactly when *that* resolver's
+ * own `expected`/`actual` boolean is `true` — never a shared or merged
+ * shape (they're independently-typed per-resolver `ResolutionStep`s, per
+ * `docs/DECISIONS.md` D-022's field-for-field-independent precedent, not
+ * unified into one "the" path type). For a `false_grant` specifically,
+ * this is what turns "production disagreed with reference" into "here is
+ * the exact bogus chain the production resolver *thought* it found," per
+ * this task's own restated framing of the Phase 5 PR's open question — see
+ * `test/isolation/differential-soundness.fuzz.test.ts`'s formerly-`.todo()`
+ * test of the same name. Purely additive data on the record: it changes
+ * nothing about which queries count as a divergence or how they're
+ * classified (`classify.ts`'s own logic is untouched by this).
+ */
 export interface DivergenceRecord {
   query: {
     subject: GeneratedEntityRef;
@@ -69,6 +86,10 @@ export interface DivergenceRecord {
   actual: boolean;
   kind: 'false_grant' | 'false_deny';
   critical: boolean;
+  /** Present iff `expected` is true — the real chain the reference resolver found. */
+  referencePath?: ReferenceResolutionStep;
+  /** Present iff `actual` is true — for a `false_grant`, the bogus chain the production resolver thought it found. */
+  productionPath?: ProductionResolutionStep;
 }
 
 export interface SoundnessRunResult {
@@ -87,6 +108,63 @@ export interface SoundnessRunResult {
 
 const DEFAULT_TRIGGER: NonNullable<SoundnessRunOptions['trigger']> = 'cli';
 
+interface CheckedQuery {
+  query: GeneratedQuery;
+  referenceAllowed: boolean;
+  productionAllowed: boolean;
+  /** Present iff `referenceAllowed` — see `DivergenceRecord`'s own doc comment. */
+  referencePath?: ReferenceResolutionStep;
+  /** Present iff `productionAllowed` — see `DivergenceRecord`'s own doc comment. */
+  productionPath?: ProductionResolutionStep;
+}
+
+export interface BuildDivergenceRecordInput extends CheckedQuery {
+  criticalNamespaces: ReadonlySet<string>;
+}
+
+/**
+ * Classifies one already-checked query (`classify.ts`'s own, untouched
+ * `classifyResult` — this function changes nothing about *which* queries
+ * count as a divergence or how they're classified) and, if it is one,
+ * builds its `DivergenceRecord` — `null` on agreement. Pure, no I/O.
+ *
+ * Extracted out of `runSoundnessFuzz`'s own loop specifically so the
+ * `referencePath`/`productionPath` population rule (§6.7, Phase 6 — each
+ * present iff that resolver's own boolean was true) is independently
+ * testable with hand-supplied inputs, the same way `classify.ts`'s own
+ * tests already exercise `classifyResult` directly with synthetic
+ * booleans — no real Postgres, no real fuzz run, and no need to mutate a
+ * shipped resolver file at test time (this project's own established,
+ * deliberate constraint — see `test/isolation/differential-soundness.fuzz
+ * .test.ts`'s own doc comment on why the "fuzz harness has power" tests use
+ * a local synthetic double rather than editing `resolver.ts` live). See
+ * `a-run-that-finds-any-false-grant-records-the-full-resolution-path...`
+ * in that same file for the un-skipped test this makes possible.
+ */
+export function buildDivergenceRecord(input: BuildDivergenceRecordInput): DivergenceRecord | null {
+  const classification = classifyResult({
+    referenceAllowed: input.referenceAllowed,
+    productionAllowed: input.productionAllowed,
+    objectNamespace: input.query.object.ns,
+    criticalNamespaces: input.criticalNamespaces,
+  });
+  if (!classification) return null;
+
+  return {
+    query: {
+      subject: input.query.subject,
+      object: input.query.object,
+      relationOrPermission: input.query.relationOrPermission,
+    },
+    expected: input.referenceAllowed,
+    actual: input.productionAllowed,
+    kind: classification.kind,
+    critical: classification.critical,
+    ...(input.referencePath !== undefined ? { referencePath: input.referencePath } : {}),
+    ...(input.productionPath !== undefined ? { productionPath: input.productionPath } : {}),
+  };
+}
+
 /** Runs `queries` through both resolvers, `concurrency` at a time, preserving input order in the returned array. */
 async function checkAllQueries(
   pool: Pool,
@@ -95,18 +173,12 @@ async function checkAllQueries(
   queries: readonly GeneratedQuery[],
   concurrency: number,
   maxDepth: number | undefined,
-): Promise<
-  Array<{ query: GeneratedQuery; referenceAllowed: boolean; productionAllowed: boolean }>
-> {
-  const results: Array<{
-    query: GeneratedQuery;
-    referenceAllowed: boolean;
-    productionAllowed: boolean;
-  }> = [];
+): Promise<CheckedQuery[]> {
+  const results: CheckedQuery[] = [];
   for (let start = 0; start < queries.length; start += concurrency) {
     const batch = queries.slice(start, start + concurrency);
     const batchResults = await Promise.all(
-      batch.map(async (query) => {
+      batch.map(async (query): Promise<CheckedQuery> => {
         const referenceResult = referenceCheck(
           schema,
           referenceTuples,
@@ -126,6 +198,8 @@ async function checkAllQueries(
           query,
           referenceAllowed: referenceResult.allowed,
           productionAllowed: productionResult.allowed,
+          ...(referenceResult.allowed ? { referencePath: referenceResult.path } : {}),
+          ...(productionResult.allowed ? { productionPath: productionResult.path } : {}),
         };
       }),
     );
@@ -210,30 +284,14 @@ export async function runSoundnessFuzz(
   let falseDenyCount = 0;
   let criticalNamespaceFalseGrants = 0;
 
-  for (const { query, referenceAllowed, productionAllowed } of checked) {
-    const classification = classifyResult({
-      referenceAllowed,
-      productionAllowed,
-      objectNamespace: query.object.ns,
-      criticalNamespaces,
-    });
-    if (!classification) continue;
+  for (const checkedQuery of checked) {
+    const record = buildDivergenceRecord({ ...checkedQuery, criticalNamespaces });
+    if (!record) continue;
 
-    divergences.push({
-      query: {
-        subject: query.subject,
-        object: query.object,
-        relationOrPermission: query.relationOrPermission,
-      },
-      expected: referenceAllowed,
-      actual: productionAllowed,
-      kind: classification.kind,
-      critical: classification.critical,
-    });
-
-    if (classification.kind === 'false_grant') {
+    divergences.push(record);
+    if (record.kind === 'false_grant') {
       falseGrantCount += 1;
-      if (classification.critical) criticalNamespaceFalseGrants += 1;
+      if (record.critical) criticalNamespaceFalseGrants += 1;
     } else {
       falseDenyCount += 1;
     }

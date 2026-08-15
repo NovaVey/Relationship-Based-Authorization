@@ -4,7 +4,8 @@
  * See `.claude/commands/build-authz-service.md` §6.2 (why this exists and
  * why it must never share code with Phase 4), §6.4 (cycle detection and
  * the depth budget as correctness requirements, not performance
- * optimizations), and §5 (the rewrite-rule grammar this walks).
+ * optimizations), §5 (the rewrite-rule grammar this walks), and §6.7/Phase
+ * 6 (the resolution-path evidence chain behind every `allowed: true`).
  *
  * Deliberately naive, deliberately slow: a synchronous, in-memory,
  * brute-force recursive graph search over a fully materialized tuple
@@ -26,6 +27,44 @@
  * dependency is `src/schema/dsl/types.ts` (plain compiled-schema data
  * shapes, no logic) — not `src/store/`, not `src/config/env.ts`, not any
  * future `src/resolve/production/*`. See `docs/DECISIONS.md`.
+ *
+ * ---
+ *
+ * **Phase 6 — the resolution path (§6.7, §9 Phase 6's exit criterion).**
+ * `ReferenceCheckResult.path` is populated only when `allowed` is true —
+ * there is no meaningful path to a "no" (D-020's own reasoning for
+ * omitting it originally). The shape is a real evidence *tree*, not a
+ * flattened breadcrumb list, because a union/intersection/exclusion
+ * rewrite doesn't reduce to one linear chain (D-020 flagged this
+ * explicitly: "an intersection's path is really N paths, one per branch;
+ * an exclusion's is a path plus a *disproof* of another path"):
+ *
+ * - `union` records the ONE branch that succeeded (any one suffices).
+ * - `intersection` records EVERY branch's own proof (all must hold).
+ * - `exclusion` records a proof of `base` AND a `DisproofStep` — a
+ *   structurally symmetric NEGATIVE witness tree proving `subtract` does
+ *   NOT hold, built by mirroring the exact same combinators (a
+ *   `unionDisproof` needs every child disproven; an `intersectionDisproof`
+ *   needs only one; a `relationDisproof` accounts for every stored tuple
+ *   on that relation, either a subject mismatch or a disproven nested
+ *   userset). This is what makes exclusion's path independently
+ *   re-verifiable without asking a verifier to just trust "the resolver
+ *   said subtract was false" — the disproof is itself a checkable
+ *   artifact, walked the same way the proof is.
+ * - `tupleToUserset` records, for the ONE followed tuple that worked, the
+ *   object it pointed at and the proof of membership there.
+ *
+ * **Why this is independently re-verifiable, concretely:** every step
+ * names a real `(object, relation, subject)` triple a verifier can check
+ * against the ORIGINAL tuple array by simple membership (no search), and
+ * every rewrite-combinator step names which schema-declared child(ren) it
+ * corresponds to, checkable by walking the compiled `RewriteRule` tree
+ * alongside the step (again no search — the verifier is handed exactly
+ * which branch/child was used and only confirms it's consistent with the
+ * schema and the tuples, never asked to discover one itself). See
+ * `test/unit/resolve/reference-resolver.resolution-path.test.ts` for the
+ * independent verifier that does exactly this, written from this file's
+ * exported types and doc comments only.
  */
 import type { CompiledSchema, RewriteRule } from '../../schema/dsl/types.js';
 
@@ -69,8 +108,175 @@ export interface ReferenceCheckOptions {
   maxDepth?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Resolution-path shapes (§6.7, Phase 6) — the POSITIVE witness tree.
+// ---------------------------------------------------------------------------
+
+/** A real, stored tuple with no `subjectRelation` directly naming the queried subject. */
+export interface DirectGrantStep {
+  kind: 'directGrant';
+  object: EntityRef;
+  relation: string;
+  subject: EntityRef;
+}
+
+/**
+ * A real, stored tuple whose subject is itself a userset reference
+ * (`object#relation@userset#usersetRelation`) — `member` is the recursive
+ * proof that the queried subject belongs to `userset#usersetRelation`.
+ */
+export interface UsersetMembershipStep {
+  kind: 'usersetMembership';
+  object: EntityRef;
+  relation: string;
+  userset: EntityRef;
+  usersetRelation: string;
+  member: ResolutionStep;
+}
+
+/** One union branch (of possibly several declared) that resolved true — any one suffices. */
+export interface UnionStep {
+  kind: 'union';
+  object: EntityRef;
+  branchIndex: number;
+  branch: ResolutionStep;
+}
+
+/** Every branch of an intersection resolved true — all are recorded, since all were required. */
+export interface IntersectionStep {
+  kind: 'intersection';
+  object: EntityRef;
+  branches: ResolutionStep[];
+}
+
+/** `base` holds and `subtract` is disproven — see `DisproofStep` below. */
+export interface ExclusionStep {
+  kind: 'exclusion';
+  object: EntityRef;
+  base: ResolutionStep;
+  subtractDisproof: DisproofStep;
+}
+
+/** `relation` was followed to `through`, and `computedUserset` resolved true there. */
+export interface TupleToUsersetStep {
+  kind: 'tupleToUserset';
+  object: EntityRef;
+  relation: string;
+  computedUserset: string;
+  through: EntityRef;
+  member: ResolutionStep;
+}
+
+/**
+ * A `computedUserset` rewrite leaf (referencing another relation or
+ * permission by name on the *same* object) has no step kind of its own —
+ * it transparently delegates to whatever `resolveMembership` produced for
+ * that name, exactly mirroring the resolver's own control flow (see
+ * `resolveMembership`/`evalRewrite`'s `computedUserset` case below). A
+ * verifier re-derives the delegation the same way, by looking the name up
+ * in the schema — see this file's own top-of-file doc comment.
+ */
+export type ResolutionStep =
+  | DirectGrantStep
+  | UsersetMembershipStep
+  | UnionStep
+  | IntersectionStep
+  | ExclusionStep
+  | TupleToUsersetStep;
+
+// ---------------------------------------------------------------------------
+// Disproof shapes — the NEGATIVE witness tree, used ONLY inside an
+// `ExclusionStep.subtractDisproof` (never returned as a check's own
+// top-level result; there is no "path to a no" per this file's own
+// top-of-file doc comment — a disproof exists solely to make an
+// *allowed* exclusion's negative half independently checkable).
+// ---------------------------------------------------------------------------
+
+/** One stored tuple on the disproven `(object, relation)`, shown not to grant the queried subject. */
+export type TupleDisproof =
+  | { kind: 'subjectMismatch'; subject: EntityRef }
+  | {
+      kind: 'usersetNotMember';
+      userset: EntityRef;
+      usersetRelation: string;
+      disproof: DisproofStep;
+    };
+
+/** Every stored tuple on `(object, relation)` accounted for, none of them a match. */
+export interface RelationDisproof {
+  kind: 'relationDisproof';
+  object: EntityRef;
+  relation: string;
+  tupleDisproofs: TupleDisproof[];
+}
+
+/** Every union branch (all of them — union needs only one to hold) individually disproven. */
+export interface UnionDisproof {
+  kind: 'unionDisproof';
+  object: EntityRef;
+  branches: DisproofStep[];
+}
+
+/** One intersection branch disproven — sufficient, since intersection needs every branch. */
+export interface IntersectionDisproof {
+  kind: 'intersectionDisproof';
+  object: EntityRef;
+  branchIndex: number;
+  branch: DisproofStep;
+}
+
+/** Either the exclusion's own base is disproven, or its own subtract is proven — either denies it. */
+export interface ExclusionDisproof {
+  kind: 'exclusionDisproof';
+  object: EntityRef;
+  reason:
+    | { kind: 'baseDisproven'; base: DisproofStep }
+    | { kind: 'subtractProven'; subtract: ResolutionStep };
+}
+
+/** Every tuple `relation` on `object` was followed, and none of them resolved `computedUserset` true. */
+export interface TupleToUsersetDisproof {
+  kind: 'tupleToUsersetDisproof';
+  object: EntityRef;
+  relation: string;
+  followed: Array<{ through: EntityRef; disproof: DisproofStep }>;
+}
+
+/**
+ * The independent depth ceiling or the cycle guard cut this branch off —
+ * both are, by §6.4's own stated semantics, a real, defined "no" for that
+ * branch (not an "unknown"), so both are legitimate disproof leaves. A
+ * verifier confirms a `cycle` claim by re-threading the SAME (object,
+ * name)-keyed visiting set down the SAME path the disproof tree describes
+ * (see the verification test) — it is not accepted on faith.
+ */
+export interface BoundReachedDisproof {
+  kind: 'boundReached';
+  object: EntityRef;
+  name: string;
+  reason: 'cycle' | 'depth';
+}
+
+/** The namespace, relation, or permission named doesn't exist — vacuously false, never an "unknown". */
+export interface UndeclaredDisproof {
+  kind: 'undeclared';
+  object: EntityRef;
+  name: string;
+}
+
+export type DisproofStep =
+  | RelationDisproof
+  | UnionDisproof
+  | IntersectionDisproof
+  | ExclusionDisproof
+  | TupleToUsersetDisproof
+  | BoundReachedDisproof
+  | UndeclaredDisproof;
+
 export interface ReferenceCheckResult {
   allowed: boolean;
+  /** Present if and only if `allowed` is true — see this file's own top-of-file doc comment. */
+  path?: ResolutionStep;
 }
 
 /**
@@ -102,6 +308,10 @@ interface WalkContext {
   readonly maxDepth: number;
 }
 
+/** `{ allowed: true; proof }` or `{ allowed: false; disproof }` — the one return shape every recursive step below produces. */
+type MembershipOutcome =
+  { allowed: true; proof: ResolutionStep } | { allowed: false; disproof: DisproofStep };
+
 /**
  * The one recursion "unit" every mechanism in this file funnels through:
  * "is `ctx.subject` a member of the set resolved for `name` (a relation or
@@ -129,11 +339,15 @@ function resolveMembership(
   name: string,
   visiting: Set<string>,
   depth: number,
-): boolean {
+): MembershipOutcome {
+  const object: EntityRef = { ns, id };
+
   // Independent depth backstop (§6.4) — a hard ceiling regardless of
   // whether cycle detection alone would eventually have caught this
   // branch too.
-  if (depth > ctx.maxDepth) return false;
+  if (depth > ctx.maxDepth) {
+    return { allowed: false, disproof: { kind: 'boundReached', object, name, reason: 'depth' } };
+  }
 
   // `\0` (not a space or `:`) joins the three parts on purpose: it can
   // never appear in a valid namespace/relation/permission identifier
@@ -141,11 +355,13 @@ function resolveMembership(
   // different `(ns, id, name)` triples can never collide into the same key
   // by accident — a composite string key is only as safe as its delimiter.
   const key = `${ns}\0${id}\0${name}`;
-  if (visiting.has(key)) return false; // a genuine cycle -> denied, never hangs
+  if (visiting.has(key)) {
+    return { allowed: false, disproof: { kind: 'boundReached', object, name, reason: 'cycle' } };
+  }
   visiting.add(key);
   try {
     const nsConfig = ctx.schema.namespaces[ns];
-    if (!nsConfig) return false; // undeclared namespace -> denied, never throws
+    if (!nsConfig) return { allowed: false, disproof: { kind: 'undeclared', object, name } };
 
     const relation = nsConfig.relations[name];
     if (relation) {
@@ -155,7 +371,7 @@ function resolveMembership(
     if (permission) {
       return evalRewrite(ctx, permission.rewrite, ns, id, visiting, depth);
     }
-    return false; // undeclared relation/permission -> denied, never throws, never "unknown"
+    return { allowed: false, disproof: { kind: 'undeclared', object, name } };
   } finally {
     visiting.delete(key);
   }
@@ -175,6 +391,12 @@ function resolveMembership(
  * which is exactly the distinction the dispatching task calls out as the
  * one not to conflate with tuple-to-userset (mechanism 1, in
  * `evalRewrite`'s `tupleToUserset` case below).
+ *
+ * Every tuple examined that doesn't establish membership is recorded in
+ * `tupleDisproofs` on the way through — not just discarded — so a caller
+ * denied here (or building a disproof for a containing exclusion) gets an
+ * exhaustive, independently-checkable account of every real tuple that was
+ * considered, not merely "false."
  */
 function resolveRelation(
   ctx: WalkContext,
@@ -183,31 +405,58 @@ function resolveRelation(
   relationName: string,
   visiting: Set<string>,
   depth: number,
-): boolean {
+): MembershipOutcome {
+  const object: EntityRef = { ns, id };
+  const tupleDisproofs: TupleDisproof[] = [];
+
   for (const tuple of ctx.tuples) {
     if (tuple.objectNs !== ns || tuple.objectId !== id || tuple.relation !== relationName) {
       continue;
     }
     if (tuple.subjectRelation === undefined) {
-      if (tuple.subjectNs === ctx.subject.ns && tuple.subjectId === ctx.subject.id) {
-        return true;
+      const subject: EntityRef = { ns: tuple.subjectNs, id: tuple.subjectId };
+      if (subject.ns === ctx.subject.ns && subject.id === ctx.subject.id) {
+        return {
+          allowed: true,
+          proof: { kind: 'directGrant', object, relation: relationName, subject },
+        };
       }
+      tupleDisproofs.push({ kind: 'subjectMismatch', subject });
       continue;
     }
-    if (
-      resolveMembership(
-        ctx,
-        tuple.subjectNs,
-        tuple.subjectId,
-        tuple.subjectRelation,
-        visiting,
-        depth + 1,
-      )
-    ) {
-      return true;
+    const userset: EntityRef = { ns: tuple.subjectNs, id: tuple.subjectId };
+    const outcome = resolveMembership(
+      ctx,
+      tuple.subjectNs,
+      tuple.subjectId,
+      tuple.subjectRelation,
+      visiting,
+      depth + 1,
+    );
+    if (outcome.allowed) {
+      return {
+        allowed: true,
+        proof: {
+          kind: 'usersetMembership',
+          object,
+          relation: relationName,
+          userset,
+          usersetRelation: tuple.subjectRelation,
+          member: outcome.proof,
+        },
+      };
     }
+    tupleDisproofs.push({
+      kind: 'usersetNotMember',
+      userset,
+      usersetRelation: tuple.subjectRelation,
+      disproof: outcome.disproof,
+    });
   }
-  return false;
+  return {
+    allowed: false,
+    disproof: { kind: 'relationDisproof', object, relation: relationName, tupleDisproofs },
+  };
 }
 
 /**
@@ -228,19 +477,82 @@ function evalRewrite(
   id: string,
   visiting: Set<string>,
   depth: number,
-): boolean {
+): MembershipOutcome {
+  const object: EntityRef = { ns, id };
   switch (node.kind) {
     case 'computedUserset':
+      // Transparent delegation — see this file's own doc comment on why a
+      // computedUserset leaf has no step kind of its own.
       return resolveMembership(ctx, ns, id, node.name, visiting, depth + 1);
-    case 'union':
-      return node.children.some((child) => evalRewrite(ctx, child, ns, id, visiting, depth));
-    case 'intersection':
-      return node.children.every((child) => evalRewrite(ctx, child, ns, id, visiting, depth));
-    case 'exclusion':
-      return (
-        evalRewrite(ctx, node.base, ns, id, visiting, depth) &&
-        !evalRewrite(ctx, node.subtract, ns, id, visiting, depth)
-      );
+
+    case 'union': {
+      const disproofs: DisproofStep[] = [];
+      for (let i = 0; i < node.children.length; i += 1) {
+        const child = node.children[i];
+        if (child === undefined) continue; // unreachable given the loop bound
+        const outcome = evalRewrite(ctx, child, ns, id, visiting, depth);
+        if (outcome.allowed) {
+          return {
+            allowed: true,
+            proof: { kind: 'union', object, branchIndex: i, branch: outcome.proof },
+          };
+        }
+        disproofs.push(outcome.disproof);
+      }
+      return { allowed: false, disproof: { kind: 'unionDisproof', object, branches: disproofs } };
+    }
+
+    case 'intersection': {
+      const proofs: ResolutionStep[] = [];
+      for (let i = 0; i < node.children.length; i += 1) {
+        const child = node.children[i];
+        if (child === undefined) continue; // unreachable given the loop bound
+        const outcome = evalRewrite(ctx, child, ns, id, visiting, depth);
+        if (!outcome.allowed) {
+          return {
+            allowed: false,
+            disproof: {
+              kind: 'intersectionDisproof',
+              object,
+              branchIndex: i,
+              branch: outcome.disproof,
+            },
+          };
+        }
+        proofs.push(outcome.proof);
+      }
+      return { allowed: true, proof: { kind: 'intersection', object, branches: proofs } };
+    }
+
+    case 'exclusion': {
+      const base = evalRewrite(ctx, node.base, ns, id, visiting, depth);
+      if (!base.allowed) {
+        return {
+          allowed: false,
+          disproof: {
+            kind: 'exclusionDisproof',
+            object,
+            reason: { kind: 'baseDisproven', base: base.disproof },
+          },
+        };
+      }
+      const subtract = evalRewrite(ctx, node.subtract, ns, id, visiting, depth);
+      if (subtract.allowed) {
+        return {
+          allowed: false,
+          disproof: {
+            kind: 'exclusionDisproof',
+            object,
+            reason: { kind: 'subtractProven', subtract: subtract.proof },
+          },
+        };
+      }
+      return {
+        allowed: true,
+        proof: { kind: 'exclusion', object, base: base.proof, subtractDisproof: subtract.disproof },
+      };
+    }
+
     case 'tupleToUserset': {
       // Mechanism 1 (rewrite-rule tuple-to-userset). Follow every stored
       // tuple for `node.relation` on this object; for each one, recurse
@@ -252,25 +564,41 @@ function evalRewrite(
       // worked example precisely: "for every tuple
       // folder:child#parent@X, recursively check whether the subject
       // resolves for view on X."
+      const followed: Array<{ through: EntityRef; disproof: DisproofStep }> = [];
       for (const tuple of ctx.tuples) {
         if (tuple.objectNs !== ns || tuple.objectId !== id || tuple.relation !== node.relation) {
           continue;
         }
-        if (
-          resolveMembership(
-            ctx,
-            tuple.subjectNs,
-            tuple.subjectId,
-            node.computedUserset,
-            visiting,
-            depth + 1,
-          )
-        ) {
-          return true;
+        const through: EntityRef = { ns: tuple.subjectNs, id: tuple.subjectId };
+        const outcome = resolveMembership(
+          ctx,
+          tuple.subjectNs,
+          tuple.subjectId,
+          node.computedUserset,
+          visiting,
+          depth + 1,
+        );
+        if (outcome.allowed) {
+          return {
+            allowed: true,
+            proof: {
+              kind: 'tupleToUserset',
+              object,
+              relation: node.relation,
+              computedUserset: node.computedUserset,
+              through,
+              member: outcome.proof,
+            },
+          };
         }
+        followed.push({ through, disproof: outcome.disproof });
       }
-      return false;
+      return {
+        allowed: false,
+        disproof: { kind: 'tupleToUsersetDisproof', object, relation: node.relation, followed },
+      };
     }
+
     default:
       return assertNeverRewriteRule(node);
   }
@@ -290,14 +618,9 @@ function evalRewrite(
  * tuple graph all resolve `{ allowed: false }` — never an exception, never
  * a hang, never an "unknown" result (§9 Phase 3's own non-negotiable).
  *
- * Returns a result object rather than a bare `boolean` so this interface
- * can grow (e.g. a `depthReached` diagnostic, or the resolution-path
- * evidence §6.7 asks for) without becoming a breaking change for whatever
- * calls it next — see `docs/DECISIONS.md` for why the resolution path
- * itself is deliberately *not* built here: it's Phase 6's own stated
- * scope, and this resolver's job for Phase 3 is exactly the boolean
- * membership question, kept as simple as possible to stay "obviously
- * correct."
+ * `path` is present if and only if `allowed` is true — see this file's own
+ * top-of-file doc comment for the shape and why it's independently
+ * re-verifiable rather than a dump of internal recursion state.
  */
 export function referenceCheck(
   schema: CompiledSchema,
@@ -309,6 +632,6 @@ export function referenceCheck(
 ): ReferenceCheckResult {
   const maxDepth = options.maxDepth ?? DEFAULT_REFERENCE_MAX_DEPTH;
   const ctx: WalkContext = { schema, tuples, subject, maxDepth };
-  const allowed = resolveMembership(ctx, object.ns, object.id, relationOrPermission, new Set(), 0);
-  return { allowed };
+  const outcome = resolveMembership(ctx, object.ns, object.id, relationOrPermission, new Set(), 0);
+  return outcome.allowed ? { allowed: true, path: outcome.proof } : { allowed: false };
 }

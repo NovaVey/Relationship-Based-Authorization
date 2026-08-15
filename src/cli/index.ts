@@ -4,7 +4,7 @@
  * .claude/commands/build-authz-service.md §7. Only commands that actually
  * exist are registered; a stub for a command before its phase lands would
  * be exactly the "half-finished implementation" this project's own rules
- * warn against. Not yet registered: `expand` (Phase 6), `serve` (Phase 8).
+ * warn against. Not yet registered: `serve` (Phase 8).
  */
 import { Command } from 'commander';
 
@@ -13,6 +13,7 @@ import { compileSchemaFile, publishSchemaFile } from './commands/schema.js';
 import { tupleWrite, tupleDelete } from './commands/tuple.js';
 import { check } from './commands/check.js';
 import { soundnessRun } from './commands/soundness.js';
+import { expandCli } from './commands/expand.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -92,6 +93,15 @@ program
       await check(subject, relation, object, options);
     },
   );
+
+program
+  .command('expand')
+  .description('Print the resolved subject tree for a relation or permission on an object')
+  .argument('<object>', "namespace:id, e.g. 'document:readme'")
+  .argument('<relation>', 'relation or permission name')
+  .action(async (object: string, relation: string) => {
+    await expandCli(object, relation);
+  });
 
 const soundness = program.command('soundness').description('Differential-soundness fuzzing');
 
