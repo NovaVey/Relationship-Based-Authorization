@@ -137,3 +137,25 @@ Waiting on Postgres hosting choice for the connection string Phase 2's
 actual migrations will run against — the local Postgres used above is a
 throwaway dev fixture (`authz` / `authz_dev` on `127.0.0.1`), not anything
 this project depends on going forward.
+
+**Resolved — Postgres hosting.** Railway, matching this org's other
+services. Provisioned `Postgres-RBA` in the existing `Upwork Portfolio`
+project (same image/variable convention as `Postgres-ERP`); `.env`'s
+`DATABASE_URL` now points at the real instance via its public TCP proxy.
+One real infra bug found and fixed along the way (missing persistent
+volume — the container looped forever instead of starting; deployment
+status alone said `SUCCESS` throughout, only the runtime logs showed the
+actual problem) — see `docs/DECISIONS.md` D-010 for the full account.
+`DATABASE_URL` is verified working — real auth, real `select version()` —
+via a Railway-hosted sandbox exec, not from this session's own shell: this
+session's network policy only proxies outbound HTTP(S), so raw TCP to
+Postgres isn't reachable directly from here. PR #9 merged.
+
+**Open question carried forward:** Phase 2 onward will want real
+integration-test runs against this database (per this project's own
+"verify by running it, not by inspection" standard). This session can't do
+that directly — confirm before Phase 2's CHECKPOINT that GitHub Actions CI
+(which has normal outbound network access) can reach
+`yamanote.proxy.rlwy.net:36306`, or find another execution path (e.g. a
+Railway sandbox exec, matching how `DATABASE_URL` itself was verified here)
+for any integration test that needs to run from this session specifically.
