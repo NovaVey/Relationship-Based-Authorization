@@ -1,0 +1,97 @@
+name: Soundness
+
+# Build spec §9 Phase 7: "run on every PR", posting a comment "in place on
+# new commits, never stacking." See docs/DECISIONS.md for two deliberate
+# departures from §7's own literal wording:
+#
+# 1. Postgres is this job's own ephemeral `services:` container, never
+#    `secrets.DATABASE_URL` (§7's own YAML stub shows the latter) — running
+#    a 5,000-tuple-per-run fuzz harness against this project's real,
+#    long-lived Railway database on every PR would let synthetic fuzz data
+#    accumulate there forever, purely as a side effect of CI running. A
+#    fresh, disposable database per run is the same reasoning `ci.yml`'s
+#    own `test-integration` job already applies (via testcontainers there;
+#    a native GitHub Actions Postgres service container here, since this
+#    step is a plain CLI invocation, not a Vitest file that can start its
+#    own container in-process).
+# 2. The PR-comment upsert is a plain Node script
+#    (`scripts/post-soundness-comment.mjs`, Node 22's built-in `fetch`)
+#    calling the real, already-tested `decidePrCommentAction` from
+#    `src/report/prComment.ts` — not `actions/github-script` with the
+#    decision re-implemented as inline workflow YAML, which would mean two
+#    implementations of "which comment to update" that could drift.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  SOUNDNESS_FUZZ_QUERIES: 5000
+
+jobs:
+  soundness:
+    name: soundness
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: authz
+          POSTGRES_PASSWORD: authz_ci_password
+          POSTGRES_DB: authz_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://authz:authz_ci_password@localhost:5432/authz_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+
+      # Migrations are NOT applied automatically by any other command —
+      # only `authz doctor` calls `runMigrations` (src/cli/commands/
+      # doctor.ts). The fresh `services:` Postgres container above starts
+      # with none of this project's tables, so this step is required
+      # before `soundness run` can do anything.
+      - run: node dist/cli/index.js doctor
+
+      - name: Run soundness fuzz
+        id: soundness
+        run: |
+          set +e
+          node dist/cli/index.js soundness run --queries "$SOUNDNESS_FUZZ_QUERIES" --format markdown > soundness-report.md
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "--- soundness-report.md ---"
+          cat soundness-report.md
+          exit 0
+
+      - name: Post or update the soundness PR comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/post-soundness-comment.mjs
+
+      # Runs *after* the comment above, deliberately — the PR comment must
+      # post regardless of verdict (a false_grant is exactly what it
+      # exists to report), and only once it has, does this step make the
+      # job's own pass/fail state (the required-status-check surface)
+      # match §7's exit-code table.
+      - name: Fail the job if the soundness run itself did not pass
+        if: steps.soundness.outputs.exit_code != '0'
+        run: |
+          echo "soundness run exited ${{ steps.soundness.outputs.exit_code }} — see the PR comment above for the full report."
+          exit ${{ steps.soundness.outputs.exit_code }}
