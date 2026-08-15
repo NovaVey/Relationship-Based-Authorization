@@ -1,0 +1,187 @@
+{
+  "name": "@novavey/multi-tenant-security-kit",
+  "version": "1.2.0",
+  "description": "A framework-agnostic toolkit for building secure multi-tenant applications: tenant isolation, RBAC, per-tenant rate limiting, audit logging, Postgres row-level security helpers, and per-tenant encryption.",
+  "keywords": [
+    "multi-tenant",
+    "security",
+    "tenant-isolation",
+    "rbac",
+    "rate-limiting",
+    "audit-log",
+    "row-level-security",
+    "encryption",
+    "opentelemetry",
+    "typescript"
+  ],
+  "homepage": "https://github.com/NovaVey/Multi-Tenant-Security-Kit#readme",
+  "bugs": {
+    "url": "https://github.com/NovaVey/Multi-Tenant-Security-Kit/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NovaVey/Multi-Tenant-Security-Kit.git"
+  },
+  "license": "MIT",
+  "author": "Tyler Pepitone / Nova Vey Engineering",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./tenant": {
+      "import": {
+        "types": "./dist/tenant/index.d.ts",
+        "default": "./dist/tenant/index.js"
+      },
+      "require": {
+        "types": "./dist/tenant/index.d.cts",
+        "default": "./dist/tenant/index.cjs"
+      }
+    },
+    "./rbac": {
+      "import": {
+        "types": "./dist/rbac/index.d.ts",
+        "default": "./dist/rbac/index.js"
+      },
+      "require": {
+        "types": "./dist/rbac/index.d.cts",
+        "default": "./dist/rbac/index.cjs"
+      }
+    },
+    "./rate-limit": {
+      "import": {
+        "types": "./dist/rate-limit/index.d.ts",
+        "default": "./dist/rate-limit/index.js"
+      },
+      "require": {
+        "types": "./dist/rate-limit/index.d.cts",
+        "default": "./dist/rate-limit/index.cjs"
+      }
+    },
+    "./audit": {
+      "import": {
+        "types": "./dist/audit/index.d.ts",
+        "default": "./dist/audit/index.js"
+      },
+      "require": {
+        "types": "./dist/audit/index.d.cts",
+        "default": "./dist/audit/index.cjs"
+      }
+    },
+    "./rls": {
+      "import": {
+        "types": "./dist/rls/index.d.ts",
+        "default": "./dist/rls/index.js"
+      },
+      "require": {
+        "types": "./dist/rls/index.d.cts",
+        "default": "./dist/rls/index.cjs"
+      }
+    },
+    "./crypto": {
+      "import": {
+        "types": "./dist/crypto/index.d.ts",
+        "default": "./dist/crypto/index.js"
+      },
+      "require": {
+        "types": "./dist/crypto/index.d.cts",
+        "default": "./dist/crypto/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "tenant": [
+        "./dist/tenant/index.d.ts"
+      ],
+      "rbac": [
+        "./dist/rbac/index.d.ts"
+      ],
+      "rate-limit": [
+        "./dist/rate-limit/index.d.ts"
+      ],
+      "audit": [
+        "./dist/audit/index.d.ts"
+      ],
+      "rls": [
+        "./dist/rls/index.d.ts"
+      ],
+      "crypto": [
+        "./dist/crypto/index.d.ts"
+      ]
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "verify:dist": "node scripts/verify-dist-singleton.mjs",
+    "verify:docs": "node scripts/verify-docs.mjs",
+    "verify:types": "attw --pack .",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run verify:dist && npm run verify:docs && npm run verify:types",
+    "prepublishOnly": "npm run verify"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@auth/express": "^0.12.3",
+    "@changesets/cli": "^3.0.0",
+    "@clerk/express": "^2.1.56",
+    "@eslint/js": "^10.0.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@testcontainers/postgresql": "^12.1.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.21.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "drizzle-orm": "^0.45.2",
+    "eslint": "^10.8.1",
+    "eslint-config-prettier": "^10.1.8",
+    "express": "^5.2.1",
+    "express-oauth2-jwt-bearer": "^1.9.2",
+    "fast-check": "^4.9.0",
+    "pg": "^8.23.0",
+    "prettier": "^3.9.6",
+    "testcontainers": "^12.1.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.10"
+  }
+}

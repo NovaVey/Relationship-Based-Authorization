@@ -1,0 +1,6 @@
+# CODEOWNERS: GitHub automatically requests a review from the listed owner(s)
+# on any pull request that touches a matching path. As the team grows, add
+# more specific path-based rules below the default (e.g. "/src/crypto/ @someone");
+# more specific patterns take precedence over the catch-all.
+
+*       @NovaVey

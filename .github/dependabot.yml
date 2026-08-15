@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 10
+    assignees:
+      - 'NovaVey'
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      # Batch low-risk devDependency bumps together to reduce PR noise. Major
+      # bumps and all production-dependency bumps are left ungrouped so each
+      # gets its own PR and individual review.
+      dev-dependencies-minor-patch:
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
+
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    assignees:
+      - 'NovaVey'
+    commit-message:
+      prefix: 'chore(ci)'

@@ -1,0 +1,81 @@
+# Auto-merges ONLY the low-risk subset of Dependabot PRs: devDependency
+# minor/patch bumps (npm) and minor/patch GitHub Actions version bumps.
+# Everything else (any major bump, any production-dependency bump) is left
+# for manual review — this workflow deliberately does not touch those.
+#
+# Requires "Allow auto-merge" enabled under Settings -> General -> Pull
+# Requests (see docs/github-governance.md) — `gh pr merge --auto` fails
+# without it. Actual merging still goes through the same branch protection
+# as every other PR (required status checks, squash-only); this workflow
+# only flips the "merge automatically once checks pass" switch and, if your
+# ruleset ever requires an approval, supplies it — it never bypasses
+# required status checks.
+#
+# Safe by construction, not just by intent: Dependabot-authored `pull_request`
+# runs get a restricted, read-only GITHUB_TOKEN by default. GitHub carves out
+# an exception for this exact pattern — a workflow, as committed on the
+# default branch, that explicitly requests `contents: write` /
+# `pull-requests: write` for PRs authored by `dependabot[bot]` gets a
+# write-scoped token. Untrusted third-party PRs never get this; this
+# exception is specific to the first-party Dependabot bot.
+
+name: Dependabot auto-merge
+
+on: pull_request
+
+# Explicit restrictive default — see release.yml for why this sits
+# alongside, not instead of, the job-level grant below.
+permissions: {}
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    # Scoped to this job, not declared workflow-wide — same reasoning as
+    # release.yml (OpenSSF Scorecard's Token-Permissions check flags
+    # workflow-level `write`). GitHub still reads this from the workflow
+    # file on the default branch to decide whether dependabot[bot]'s PR
+    # gets the write-scoped token described above.
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+
+      # Low-risk = { npm devDependency, minor or patch } OR { github-actions, minor or patch }.
+      # Any semver-major bump, and any npm production-dependency bump, falls through
+      # to "not auto-merged" and just sits as a normal PR for you to review.
+      - name: Decide whether this update is low-risk
+        id: risk
+        env:
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEP_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          low_risk=false
+          if [[ "$UPDATE_TYPE" == "version-update:semver-patch" || "$UPDATE_TYPE" == "version-update:semver-minor" ]]; then
+            if [[ "$ECOSYSTEM" == "npm_and_yarn" && "$DEP_TYPE" == "direct:development" ]]; then
+              low_risk=true
+            elif [[ "$ECOSYSTEM" == "github_actions" ]]; then
+              low_risk=true
+            fi
+          fi
+          echo "low-risk=$low_risk" >> "$GITHUB_OUTPUT"
+
+      - name: Approve (only needed if required-approvals is ever raised above 0)
+        if: steps.risk.outputs.low-risk == 'true'
+        run: gh pr review --approve "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge
+        if: steps.risk.outputs.low-risk == 'true'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

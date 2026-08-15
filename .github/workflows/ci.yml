@@ -1,0 +1,138 @@
+name: CI
+
+# Job ids below (lint-and-typecheck, test, build, security-audit) are referenced
+# verbatim in docs/github-governance.md as required branch-protection status
+# checks. If you rename a job here, update that doc in the same commit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-typecheck:
+    name: lint-and-typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+
+  # Single-entry matrix (not a plain step) deliberately kept as a matrix:
+  # GitHub Actions still names the check "test (22)" with the parens suffix
+  # even with one value, so this required status check's name is unchanged
+  # from before Node 20 was dropped — no branch-protection rule update
+  # needed for this one, unlike `test (20)` itself (see
+  # docs/github-governance.md Step 2's migration note).
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['22']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run test:coverage
+
+  build:
+    name: build
+    needs: [lint-and-typecheck, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+      # Type-checks and runs every doc-examples/ file against the build
+      # this job just produced — see doc-examples/README.md. Needs dist/,
+      # hence living in this job rather than lint-and-typecheck.
+      - run: npm run verify:docs
+      # Catches a real, previously-shipped bug class that every other check
+      # here missed: `tsc --noEmit` and verify:docs both type-check against
+      # *source*-adjacent .ts files, never against what a consumer actually
+      # resolves through package.json's `exports` map in the published
+      # tarball. That's exactly how a broken/missing `typesVersions` or a
+      # mismatched ESM/CJS `types` condition shipped to 1.0.0 undetected —
+      # `@arethetypeswrong/cli` builds the real tarball (via `npm pack`) and
+      # checks type resolution against it under node10/node16/bundler
+      # resolution, which is the only way to catch this class of bug before
+      # it reaches npm. Needs dist/, hence also living in this job.
+      - run: npm run verify:types
+
+  # Not in the required status checks list yet — this is new (proves the RLS
+  # module's SQL actually enforces isolation against a real Postgres, not
+  # just that it produces the expected SQL text) and container-based tests
+  # carry more infra-flakiness risk than the pure unit suite. ubuntu-latest
+  # runners have Docker preinstalled, so no extra setup is needed. Promoting
+  # this to required is a manual, deliberate choice — see
+  # docs/github-governance.md Step 6.
+  #
+  # Runs on Node 22, same as the rest of CI now (it wasn't always — this
+  # job originally ran Node 22 specifically while the rest of CI still
+  # matrixed Node 20/22, because the `testcontainers` devDependency
+  # requires Node >=22.22: on 20.x its transitive `undici` throws
+  # `webidl.util.markAsUncloneable is not a function` before a single test
+  # even runs. That constraint is moot now that Node 20 was dropped
+  # everywhere (engines.node is >=22 as of this package's stable line), but
+  # is worth keeping in mind if this job's Node version is ever lowered
+  # again independently of the rest of CI.
+  test-integration:
+    name: test-integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run test:integration
+
+  # Advisory only: continue-on-error means this job never blocks a merge.
+  # Under this repo's "Standard" governance tier (see docs/github-governance.md)
+  # it is intentionally NOT added to the required status checks list, so a
+  # known-vulnerable dependency surfaces in the PR checks UI without gating
+  # merges. See docs/github-governance.md Step 6 for the (deliberately
+  # manual) upgrade path, including promoting this job to required. Static
+  # analysis (as opposed to dependency-CVE scanning) lives separately in
+  # codeql.yml.
+  security-audit:
+    name: security-audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high

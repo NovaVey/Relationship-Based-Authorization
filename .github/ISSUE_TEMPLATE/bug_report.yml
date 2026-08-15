@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a problem with @novavey/multi-tenant-security-kit
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please search [existing issues](https://github.com/NovaVey/Multi-Tenant-Security-Kit/issues)
+        first to avoid duplicates.
+
+        If this is a **security vulnerability**, do not open a public issue — see
+        [SECURITY.md](https://github.com/NovaVey/Multi-Tenant-Security-Kit/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps or code needed to reproduce the issue.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: false
+
+  - type: input
+    id: package-version
+    attributes:
+      label: Package version
+      description: The @novavey/multi-tenant-security-kit version you are using.
+      placeholder: '0.1.0'
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      placeholder: '20.11.0'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Module(s) affected
+      multiple: true
+      options:
+        - tenant
+        - rbac
+        - rate-limit
+        - audit
+        - rls
+        - crypto
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Please copy and paste any relevant log or stack trace output. This will be formatted automatically.
+      render: shell
+    validations:
+      required: false

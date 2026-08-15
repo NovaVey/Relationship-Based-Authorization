@@ -1,0 +1,70 @@
+name: Scorecard supply-chain security
+
+# OpenSSF Scorecard: an automated, third-party-verifiable check of this
+# repo's supply-chain security hygiene (branch protection, pinned
+# dependencies, CI practices, vulnerability response, etc.) — distinct from
+# codeql.yml (source-level static analysis) and ci.yml's security-audit job
+# (known-CVE dependency scanning). Results publish to
+# https://scorecard.dev and back the README badge, and also upload as a
+# SARIF file to this repo's Security -> Code scanning alerts tab.
+#
+# Uses the default GITHUB_TOKEN, which is sufficient for most checks on a
+# public repo. A couple of checks (e.g. Branch-Protection, when this
+# workflow itself isn't the one reading the ruleset) are more accurate with
+# a dedicated read-only PAT — see
+# https://github.com/ossf/scorecard-action#authentication — treated here as
+# an optional future enhancement, not required for this workflow to run.
+
+on:
+  branch_protection_rule:
+  schedule:
+    # Weekly, independent of any push — this repo's score can change even
+    # when nothing in the tree does (e.g. an advisory affecting a dependency).
+    - cron: '30 4 * * 6'
+  push:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Pinned to a specific release, not the rolling `@v2` tag: as of this
+      # writing ossf/scorecard-action has no `v2` ref that resolves at all
+      # (only full vX.Y.Z tags) — CI failed outright with "Unable to
+      # resolve action ossf/scorecard-action@v2, unable to find version
+      # v2". Bump this tag periodically; check whether `@v2` has started
+      # resolving again before reverting to it.
+      #
+      # Further pinned to the exact commit SHA, like every other third-party
+      # action in this repo — v2.4.4 is an annotated tag, so the SHA below
+      # is the dereferenced commit (`git ls-remote --tags
+      # https://github.com/ossf/scorecard-action v2.4.4 v2.4.4^{}`), not the
+      # tag object's own SHA.
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - uses: github/codeql-action/upload-sarif@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3
+        with:
+          sarif_file: results.sarif
