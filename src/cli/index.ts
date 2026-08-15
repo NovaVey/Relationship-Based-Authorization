@@ -112,7 +112,8 @@ soundness
   )
   .option('--queries <n>', 'number of random queries to run (defaults to SOUNDNESS_FUZZ_QUERIES)')
   .option('--seed <s>', 'reproduce a specific run (defaults to SOUNDNESS_FUZZ_SEED, else random)')
-  .action(async (options: { queries?: string; seed?: string }) => {
+  .option('--format <text|markdown|json>', 'output format (default: text)')
+  .action(async (options: { queries?: string; seed?: string; format?: string }) => {
     await soundnessRun(options);
   });
 
