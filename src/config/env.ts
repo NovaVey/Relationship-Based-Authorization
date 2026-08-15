@@ -20,10 +20,32 @@ import dotenv from 'dotenv';
 import { z } from 'zod';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(moduleDir, '../../.env') });
+// quiet: true — dotenv's own startup tip line otherwise prints ahead of
+// every CLI command's actual output, including `authz --help`.
+dotenv.config({ path: path.resolve(moduleDir, '../../.env'), quiet: true });
+
+/**
+ * An optional, non-empty string — for env vars that `.env.example` commits
+ * with a blank value (`KEY=`) as a "fill this in" placeholder. dotenv
+ * parses that as the empty string, not as an absent key, so a plain
+ * `z.string().min(1).optional()` rejects the exact blank-placeholder shape
+ * `.env.example` itself uses — caught live running `authz doctor` against
+ * a real `.env` copied from the example and only partially filled in.
+ * Preprocessing '' to undefined first is what actually makes "optional"
+ * mean optional here.
+ */
+function optionalString() {
+  return z.preprocess((value) => (value === '' ? undefined : value), z.string().min(1).optional());
+}
 
 export const EnvSchema = z.object({
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required — see .env.example'),
+  // Deliberately optional at this layer — see docs/DECISIONS.md D-008.
+  // `authz --help` and other commands that touch no store must work on a
+  // fresh clone with no `.env` at all; anything that actually needs
+  // Postgres (starting with `authz doctor`) checks for this itself and
+  // fails with a specific, actionable message at the point of use instead
+  // of crashing before the CLI has even parsed its arguments.
+  DATABASE_URL: optionalString(),
   PORT: z.coerce.number().int().positive().default(3000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
@@ -36,11 +58,11 @@ export const EnvSchema = z.object({
 
   // Differential-soundness fuzz run — see build spec §6.2 and §9 Phase 5.
   SOUNDNESS_FUZZ_QUERIES: z.coerce.number().int().positive().default(5000),
-  SOUNDNESS_FUZZ_SEED: z.string().optional(),
+  SOUNDNESS_FUZZ_SEED: optionalString(),
 
   MAX_CONCURRENCY: z.coerce.number().int().positive().default(8),
 
-  ADMIN_API_KEY: z.string().min(1, 'ADMIN_API_KEY is required — see .env.example').optional(),
+  ADMIN_API_KEY: optionalString(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
