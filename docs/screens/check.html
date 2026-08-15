@@ -1,0 +1,1061 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Check playground — Relationship-Based Authorization</title>
+    <style>
+      :root {
+        --paper: #f7f2e7;
+        --paper-raised: #efe7d5;
+        --ink: #201d17;
+        --muted: #5a5240;
+        --border: #d9cfb5;
+        --border-strong: #c3b795;
+        --accent-exclusion: #6b4119;
+        --accent-exclusion-bg: #f2e6d8;
+        --accent-hop: #4f3d6e;
+        --accent-hop-bg: #ece6f2;
+        --focus: #201d17;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family:
+          ui-monospace, 'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.55;
+        font-size: 15px;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: -999px;
+        top: 0;
+        background: var(--ink);
+        color: var(--paper);
+        padding: 0.5em 1em;
+        z-index: 10;
+      }
+      .skip-link:focus-within {
+        left: 0;
+      }
+
+      a {
+        color: var(--ink);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 1.75rem 1.25rem 4rem;
+      }
+
+      code,
+      pre {
+        font-family: inherit;
+        font-variant-numeric: tabular-nums;
+      }
+
+      pre {
+        margin: 0;
+        padding: 0.85rem 1rem;
+        background: var(--paper-raised);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        overflow-x: auto;
+        font-size: 0.85em;
+        line-height: 1.5;
+      }
+
+      code {
+        background: var(--paper-raised);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.03em 0.35em;
+        font-size: 0.92em;
+      }
+
+      pre code {
+        background: none;
+        border: none;
+        padding: 0;
+      }
+
+      /* ---- header ---- */
+
+      .page-header {
+        border-bottom: 1px solid var(--border-strong);
+        padding-bottom: 1.25rem;
+        margin-bottom: 2rem;
+      }
+
+      .eyebrow {
+        margin: 0 0 0.6rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .screen-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+        margin: 0 0 0.35rem;
+      }
+
+      .screen-tab {
+        font-size: 0.8rem;
+        padding: 0.15rem 0.1rem;
+      }
+      .screen-tab.current {
+        font-weight: 700;
+        border-bottom: 2px solid var(--ink);
+      }
+      .screen-tab.inert {
+        color: var(--muted);
+      }
+      .screen-sep {
+        color: var(--border-strong);
+      }
+
+      .nav-caption {
+        margin: 0.35rem 0 1.1rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.7rem;
+        letter-spacing: -0.01em;
+      }
+
+      .lede {
+        margin: 0 0 0.5rem;
+        max-width: 66ch;
+      }
+
+      .lede-note {
+        margin: 0;
+        font-size: 0.82rem;
+        color: var(--muted);
+        max-width: 66ch;
+      }
+
+      /* ---- shared panel/section chrome ---- */
+
+      section.panel,
+      section.result {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1.25rem 1.4rem 1.5rem;
+        margin-bottom: 2rem;
+        background: var(--paper);
+      }
+
+      section.panel {
+        background: var(--paper-raised);
+      }
+
+      h2 {
+        margin: 0 0 0.5rem;
+        font-size: 1.15rem;
+      }
+
+      .panel > p,
+      .section-note {
+        font-size: 0.88rem;
+        color: var(--muted);
+        max-width: 68ch;
+      }
+
+      /* ---- check form ---- */
+
+      .check-form fieldset {
+        border: 1px solid var(--border-strong);
+        border-radius: 5px;
+        padding: 1rem 1.1rem 1.15rem;
+        margin: 1rem 0 0;
+      }
+
+      .check-form legend {
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        padding: 0 0.4em;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.85rem;
+        margin-bottom: 0.85rem;
+      }
+
+      .field-grid.field-grid-token {
+        grid-template-columns: 1fr;
+        max-width: 260px;
+      }
+
+      .field label {
+        display: block;
+        font-size: 0.78rem;
+        color: var(--muted);
+        margin-bottom: 0.3rem;
+      }
+
+      .field input {
+        width: 100%;
+        font-family: inherit;
+        font-size: 0.9rem;
+        background: var(--paper);
+        color: var(--ink);
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.45rem 0.6rem;
+      }
+
+      .field-hint {
+        margin: 0.25rem 0 0;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .form-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.8rem;
+        margin-top: 1.1rem;
+      }
+
+      .btn-run {
+        font-family: inherit;
+        font-size: 0.9rem;
+        font-weight: 700;
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.5rem 1.1rem;
+        background: var(--paper);
+        color: var(--muted);
+        cursor: not-allowed;
+      }
+
+      .run-inactive-note {
+        margin: 0;
+        font-size: 0.78rem;
+        color: var(--muted);
+        max-width: 52ch;
+      }
+
+      .example-loaders {
+        margin-top: 1.1rem;
+        padding-top: 0.9rem;
+        border-top: 1px dashed var(--border-strong);
+      }
+
+      .example-loaders p {
+        margin: 0 0 0.6rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
+      .load-example {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4em;
+        font-family: inherit;
+        font-size: 0.82rem;
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.4rem 0.75rem;
+        background: var(--paper);
+        color: var(--ink);
+        cursor: pointer;
+        margin: 0 0.5rem 0.5rem 0;
+      }
+
+      .load-example .verdict-pill {
+        margin-left: 0.1em;
+      }
+
+      .cli-echo {
+        margin-top: 1rem;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .cli-echo pre {
+        margin-top: 0.4rem;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .load-example {
+          transition: background-color 120ms ease;
+        }
+        section.result.just-loaded {
+          transition: background-color 700ms ease;
+        }
+      }
+
+      section.result.just-loaded {
+        background: var(--paper-raised);
+      }
+
+      /* ---- verdicts ---- */
+
+      .verdict-pill {
+        display: inline-block;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border-radius: 999px;
+        padding: 0.08rem 0.6rem;
+        border: 1px solid currentColor;
+        font-weight: 700;
+      }
+      .verdict-allowed {
+        color: var(--ink);
+      }
+      .verdict-denied {
+        color: var(--muted);
+      }
+
+      .result-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.3rem;
+      }
+
+      .result-query {
+        font-size: 1.02rem;
+      }
+
+      .rule-tag {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border-radius: 999px;
+        padding: 0.08rem 0.55rem;
+        border: 1px solid var(--border-strong);
+        color: var(--muted);
+      }
+
+      .meta-line {
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin: 0.2rem 0 1rem;
+      }
+
+      /* ---- resolution chain (signature element) ---- */
+
+      details.resolution {
+        border: 1px solid var(--accent-hop);
+        background: var(--accent-hop-bg);
+        border-radius: 6px;
+        padding: 0.9rem 1.1rem 1.05rem;
+        margin: 0.75rem 0 1rem;
+      }
+      details.resolution summary {
+        cursor: pointer;
+        font-weight: 700;
+        font-size: 0.92rem;
+        color: var(--accent-hop);
+      }
+      details.resolution[open] summary {
+        margin-bottom: 0.7rem;
+      }
+
+      .chain {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.3rem;
+        font-size: 0.88rem;
+        margin: 0.4rem 0 0.8rem;
+      }
+
+      .chain-link {
+        border: 1px solid var(--accent-hop);
+        background: var(--paper);
+        border-radius: 3px;
+        padding: 0.2rem 0.55rem;
+      }
+
+      .chain-arrow {
+        color: var(--accent-hop);
+      }
+
+      .resolution-note {
+        font-size: 0.85rem;
+        margin: 0 0 0.6rem;
+        max-width: 74ch;
+      }
+
+      details.raw-json {
+        margin-top: 0.65rem;
+      }
+      details.raw-json summary {
+        cursor: pointer;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      details.raw-json pre {
+        margin-top: 0.5rem;
+      }
+
+      /* ---- denial reasoning ---- */
+
+      .why-denied {
+        border: 1px solid var(--border-strong);
+        background: var(--paper-raised);
+        border-radius: 6px;
+        padding: 0.9rem 1.1rem 1.05rem;
+        margin: 0.75rem 0 1rem;
+      }
+      .why-denied p:first-child {
+        margin-top: 0;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.86rem;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 0.45rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+
+      thead th {
+        background: var(--paper-raised);
+        font-weight: 700;
+        font-size: 0.76rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+      }
+
+      table.evidence-table thead th {
+        background: var(--paper);
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .branch-list {
+        list-style: none;
+        margin: 0.7rem 0 0;
+        padding: 0;
+        display: grid;
+        gap: 0.45rem;
+        font-size: 0.85rem;
+      }
+
+      .branch-mark {
+        display: inline-block;
+        font-weight: 700;
+        margin-right: 0.3em;
+      }
+      .branch-mark.matched {
+        color: var(--accent-exclusion);
+      }
+
+      .op-exclusion {
+        color: var(--accent-exclusion);
+        font-weight: 700;
+        margin: 0 0.35em;
+      }
+
+      .source-cite {
+        display: block;
+        margin-top: 0.5rem;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      footer {
+        border-top: 1px solid var(--border-strong);
+        padding-top: 1rem;
+        margin-top: 2.5rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      footer p {
+        max-width: 72ch;
+      }
+
+      @media (max-width: 640px) {
+        .wrap {
+          padding: 1.25rem 0.9rem 3rem;
+        }
+        h1 {
+          font-size: 1.4rem;
+        }
+        section.panel,
+        section.result {
+          padding: 1rem;
+        }
+        .field-grid {
+          grid-template-columns: 1fr;
+        }
+        th,
+        td {
+          white-space: normal;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="skip-link"><a href="#main">Skip to content</a></div>
+    <div class="wrap">
+      <header class="page-header">
+        <p class="eyebrow">relationship-based-authorization · check playground instrument panel</p>
+        <nav class="screen-nav" aria-label="Screens in this report UI">
+          <span class="screen-tab inert">Namespaces</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Tuple browser</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab current" aria-current="page">Check playground</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Soundness runs</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Expand tree</span>
+        </nav>
+        <p class="nav-caption">
+          Five screens per the design direction (build spec §8). This file renders only
+          <strong>Check playground</strong> — the other four are separate static files in this set,
+          not linked from here.
+        </p>
+        <h1>Check playground</h1>
+        <p class="lede">
+          Run a check — subject, relation, object — against the seeded demo graph, and see either
+          the resolution path that produced <code>allowed</code>, or the concrete reason it didn't.
+          A permission is never granted because it looks like it should be: it resolves because of a
+          specific, walkable chain of tuples, or it doesn't.
+        </p>
+        <p class="lede-note">
+          Checks in this demo run against the schema versions in <code>GET /health</code> —
+          <code>document</code> v1, <code>folder</code> v1, <code>group</code> v1,
+          <code>org</code> v1 (<code>.captures/health.json</code>).
+        </p>
+      </header>
+
+      <main id="main">
+        <!-- ============ check form ============ -->
+        <section class="panel" aria-labelledby="run-heading">
+          <h2 id="run-heading">Run a check</h2>
+          <p>
+            Mirrors
+            <code
+              >authz check &lt;subject&gt; &lt;relation&gt; &lt;object&gt; [--at-token
+              &lt;n&gt;]</code
+            >
+            (build spec §7). Fields accept <code>namespace:id</code> — the datalist suggestions
+            below are real ids and relation names from the seeded demo graph, not placeholders.
+          </p>
+
+          <form class="check-form" onsubmit="return false;">
+            <fieldset>
+              <legend>Query</legend>
+              <div class="field-grid">
+                <div class="field">
+                  <label for="f-subject">subject</label>
+                  <input
+                    type="text"
+                    id="f-subject"
+                    name="subject"
+                    list="subjects-list"
+                    value="user:dana"
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="field">
+                  <label for="f-relation">relation</label>
+                  <input
+                    type="text"
+                    id="f-relation"
+                    name="relation"
+                    list="relations-list"
+                    value="edit"
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="field">
+                  <label for="f-object">object</label>
+                  <input
+                    type="text"
+                    id="f-object"
+                    name="object"
+                    list="objects-list"
+                    value="document:eng_handbook"
+                    autocomplete="off"
+                  />
+                </div>
+              </div>
+              <div class="field-grid field-grid-token">
+                <div class="field">
+                  <label for="f-token">consistency token (optional)</label>
+                  <input
+                    type="number"
+                    id="f-token"
+                    name="at-token"
+                    placeholder="unpinned — latest committed state"
+                    min="0"
+                    autocomplete="off"
+                  />
+                  <p class="field-hint">
+                    Pins the read to a token from a prior write (§6.3). Left blank, the check reads
+                    current committed state.
+                  </p>
+                </div>
+              </div>
+
+              <datalist id="subjects-list">
+                <option value="user:alice"></option>
+                <option value="user:bob"></option>
+                <option value="user:carol"></option>
+                <option value="user:dana"></option>
+                <option value="user:erin"></option>
+                <option value="user:mallory"></option>
+              </datalist>
+              <datalist id="relations-list">
+                <option value="view"></option>
+                <option value="edit"></option>
+                <option value="member"></option>
+                <option value="banned"></option>
+                <option value="owner"></option>
+                <option value="editor"></option>
+                <option value="viewer"></option>
+                <option value="sensitive_reviewer"></option>
+                <option value="sensitive_review"></option>
+                <option value="parent"></option>
+              </datalist>
+              <datalist id="objects-list">
+                <option value="org:acme"></option>
+                <option value="group:eng"></option>
+                <option value="group:eng_backend"></option>
+                <option value="group:eng_backend_interns"></option>
+                <option value="group:finance"></option>
+                <option value="folder:eng_docs"></option>
+                <option value="folder:eng_backend_docs"></option>
+                <option value="folder:finance_docs"></option>
+                <option value="document:eng_handbook"></option>
+                <option value="document:eng_backend_runbook"></option>
+                <option value="document:roadmap"></option>
+                <option value="document:financials"></option>
+              </datalist>
+            </fieldset>
+
+            <div class="form-actions">
+              <button
+                type="submit"
+                class="btn-run"
+                disabled
+                aria-disabled="true"
+                aria-describedby="run-inactive-note"
+              >
+                Run check
+              </button>
+              <p class="run-inactive-note" id="run-inactive-note">
+                Inactive — this file is a static mockup with no live engine behind it. Load one of
+                the two real captured checks below, or run the command shown under each field
+                combination locally.
+              </p>
+            </div>
+
+            <div class="cli-echo" id="cli-echo" aria-live="polite">
+              Equivalent CLI command for the current fields:
+              <pre><code id="cli-echo-code">npx tsx src/cli/index.ts check user:dana edit document:eng_handbook</code></pre>
+            </div>
+
+            <div class="example-loaders">
+              <p>
+                Load a real captured check into the fields above and jump to its result — two are
+                captured for this demo:
+              </p>
+              <button
+                type="button"
+                class="load-example"
+                data-subject="user:dana"
+                data-relation="edit"
+                data-object="document:eng_handbook"
+                data-target="#result-dana"
+              >
+                user:dana edit document:eng_handbook
+                <span class="verdict-pill verdict-allowed">allowed</span>
+              </button>
+              <button
+                type="button"
+                class="load-example"
+                data-subject="user:mallory"
+                data-relation="view"
+                data-object="org:acme"
+                data-target="#result-mallory"
+              >
+                user:mallory view org:acme
+                <span class="verdict-pill verdict-denied">denied</span>
+              </button>
+              <p class="field-hint">
+                Works without JavaScript too: with it disabled, these buttons are inert and the
+                fields keep their default values — both result sections below stay fully visible
+                either way.
+              </p>
+            </div>
+          </form>
+        </section>
+
+        <!-- ============ result: dana / edit / eng_handbook — ALLOWED ============ -->
+        <section
+          class="result"
+          id="result-dana"
+          tabindex="-1"
+          aria-labelledby="result-dana-heading"
+        >
+          <div class="result-head">
+            <h2 id="result-dana-heading" class="result-query">
+              <code>user:dana edit document:eng_handbook</code>
+            </h2>
+            <span class="verdict-pill verdict-allowed">allowed</span>
+            <span class="rule-tag">union · tuple-to-userset · nested groups</span>
+          </div>
+          <p class="meta-line">
+            depth <code>3</code> — recursion depth actually used, per the real
+            <code>POST /check</code> response.
+          </p>
+
+          <details class="resolution" open>
+            <summary>Resolution path — 5 tuples chained together</summary>
+            <div class="chain" role="group" aria-label="resolution path">
+              <span class="chain-link">user:dana</span>
+              <span class="chain-arrow" aria-hidden="true">→</span>
+              <span class="chain-link">group:eng_backend_interns#member</span>
+              <span class="chain-arrow" aria-hidden="true">→</span>
+              <span class="chain-link">group:eng_backend#member</span>
+              <span class="chain-arrow" aria-hidden="true">→</span>
+              <span class="chain-link">group:eng#member</span>
+              <span class="chain-arrow" aria-hidden="true">→</span>
+              <span class="chain-link">folder:eng_docs#editor</span>
+              <span class="chain-arrow" aria-hidden="true">→</span>
+              <span class="chain-link">document:eng_handbook#edit</span>
+            </div>
+            <p class="resolution-note">
+              This is build spec §9 Phase 9's own named non-obvious case: <code>dana</code>'s only
+              route to this permission runs through two levels of group nesting before the
+              <code>parent→edit</code> hop ever fires.
+              <code>group:eng_backend_interns#member</code> has <code>dana</code> as a direct tuple;
+              <code>group:eng_backend#member</code> names
+              <code>group:eng_backend_interns#member</code> as its own subject;
+              <code>group:eng#member</code> names <code>group:eng_backend#member</code> as its
+              subject in turn. <code>document:eng_handbook</code>'s <code>parent</code> relation
+              points at <code>folder:eng_docs</code>, and <code>folder:eng_docs</code> grants its
+              <code>editor</code> relation to <code>group:eng#member</code> directly — so
+              <code>document.edit</code>'s union (branch 3, <code>parent→edit</code>) recurses into
+              <code>folder.edit</code>, which resolves through that <code>editor</code>
+              grant.
+            </p>
+
+            <details class="raw-json">
+              <summary>
+                Full nested resolution structure — raw <code>POST /check</code> response
+              </summary>
+              <pre><code>{
+  "allowed": true,
+  "subject": { "ns": "user", "id": "dana" },
+  "relation": "edit",
+  "object": { "ns": "document", "id": "eng_handbook" },
+  "depth": 3,
+  "path": {
+    "kind": "union",
+    "object": { "ns": "document", "id": "eng_handbook" },
+    "branchIndex": 2,
+    "branch": {
+      "kind": "tupleToUserset",
+      "object": { "ns": "document", "id": "eng_handbook" },
+      "relation": "parent",
+      "computedUserset": "edit",
+      "through": { "ns": "folder", "id": "eng_docs" },
+      "member": {
+        "kind": "union",
+        "object": { "ns": "folder", "id": "eng_docs" },
+        "branchIndex": 0,
+        "branch": {
+          "kind": "usersetMembership",
+          "object": { "ns": "folder", "id": "eng_docs" },
+          "relation": "editor",
+          "userset": { "ns": "group", "id": "eng" },
+          "usersetRelation": "member",
+          "member": {
+            "kind": "usersetMembership",
+            "object": { "ns": "group", "id": "eng" },
+            "relation": "member",
+            "userset": { "ns": "group", "id": "eng_backend" },
+            "usersetRelation": "member",
+            "member": {
+              "kind": "usersetMembership",
+              "object": { "ns": "group", "id": "eng_backend" },
+              "relation": "member",
+              "userset": { "ns": "group", "id": "eng_backend_interns" },
+              "usersetRelation": "member",
+              "member": {
+                "kind": "directGrant",
+                "object": { "ns": "group", "id": "eng_backend_interns" },
+                "relation": "member",
+                "subject": { "ns": "user", "id": "dana" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}</code></pre>
+            </details>
+
+            <details class="raw-json">
+              <summary>
+                Cross-check — <code>expand(document:eng_handbook, edit)</code>, the full subject
+                tree
+              </summary>
+              <p class="resolution-note">
+                The resolution path above is one subject's route through this tree;
+                <code>expand()</code> shows every route to <code>edit</code> on this object at once,
+                including the one dana's path walks (§6.7: an allowed check's path is independently
+                re-verifiable against expand's own tree, not just trusted on its own).
+              </p>
+              <pre><code>document:eng_handbook#edit:
+  union
+    relation editor on document:eng_handbook
+    relation owner on document:eng_handbook
+    parent->edit
+      through folder:eng_docs:
+        union
+          relation editor on folder:eng_docs
+            group:eng#member
+              relation member on group:eng
+                user:alice
+                group:eng_backend#member
+                  relation member on group:eng_backend
+                    group:eng_backend_interns#member
+                      relation member on group:eng_backend_interns
+                        user:dana
+          relation owner on folder:eng_docs
+          parent->edit</code></pre>
+            </details>
+
+            <p class="source-cite">
+              .captures/check-dana-edit-eng_handbook.json, .captures/expand-eng_handbook-edit.txt
+            </p>
+          </details>
+        </section>
+
+        <!-- ============ result: mallory / view / acme — DENIED ============ -->
+        <section
+          class="result"
+          id="result-mallory"
+          tabindex="-1"
+          aria-labelledby="result-mallory-heading"
+        >
+          <div class="result-head">
+            <h2 id="result-mallory-heading" class="result-query">
+              <code>user:mallory view org:acme</code>
+            </h2>
+            <span class="verdict-pill verdict-denied">denied</span>
+            <span class="rule-tag">exclusion</span>
+          </div>
+          <p class="meta-line">
+            depth <code>1</code> — recursion depth actually used, per the real
+            <code>POST /check</code> response.
+          </p>
+
+          <div class="why-denied">
+            <p>
+              No resolution path — a denial doesn't produce one;
+              <code>checks.resolution_path</code> is only populated when <code>allowed</code> is
+              <code>true</code> (§6.7). The reason is the exclusion's own two branches:
+            </p>
+            <p>
+              <code>org.view</code> compiles to <code>member</code>
+              <span class="op-exclusion" aria-hidden="true">−</span><span class="sr-only">not</span>
+              <code>banned</code>. Both tuples exist for <code>mallory</code>:
+            </p>
+            <div
+              class="table-scroll"
+              tabindex="0"
+              role="region"
+              aria-label="relevant tuples for this check"
+            >
+              <table class="evidence-table">
+                <thead>
+                  <tr>
+                    <th scope="col">object</th>
+                    <th scope="col">relation</th>
+                    <th scope="col">subject</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>org:acme</code></td>
+                    <td><code>member</code></td>
+                    <td><code>user:mallory</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>org:acme</code></td>
+                    <td><code>banned</code></td>
+                    <td><code>user:mallory</code></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <ul class="branch-list">
+              <li>
+                <span class="branch-mark matched">✓ matched</span>
+                base branch <code>member</code> — <code>org:acme#member@user:mallory</code> exists;
+                on its own this branch would resolve <code>allowed</code>.
+              </li>
+              <li>
+                <span class="branch-mark matched">✓ matched</span>
+                subtract branch <code>banned</code> —
+                <code>org:acme#banned@user:mallory</code> exists; an exclusion (<code>a - b</code>)
+                resolves <code>allowed</code> only if the base matches <em>and</em> the subtract
+                branch does not. Here it does, so the exclusion nets to <code>denied</code>.
+              </li>
+            </ul>
+
+            <details class="raw-json">
+              <summary>Raw compiled rewrite — <code>org.view</code></summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "view",
+  "rewrite": {
+    "kind": "exclusion",
+    "base": { "kind": "computedUserset", "name": "member" },
+    "subtract": { "kind": "computedUserset", "name": "banned" }
+  }
+}</code></pre>
+            </details>
+
+            <details class="raw-json">
+              <summary>Raw <code>POST /check</code> response</summary>
+              <pre><code>{
+  "allowed": false,
+  "subject": { "ns": "user", "id": "mallory" },
+  "relation": "view",
+  "object": { "ns": "org", "id": "acme" },
+  "depth": 1
+}</code></pre>
+            </details>
+
+            <p class="source-cite">
+              .captures/check-mallory-view-org.json, scripts/seed-example.ts (org:acme membership
+              and ban tuples)
+            </p>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <p>
+          Source of every fact on this page:
+          <code>.captures/check-dana-edit-eng_handbook.json</code>,
+          <code>.captures/check-mallory-view-org.json</code>,
+          <code>.captures/expand-eng_handbook-edit.txt</code>,
+          <code>.captures/compiled-schema.json</code>, <code>.captures/health.json</code>, and
+          <code>.captures/seed-example.ts</code> — real output captured from this project's own
+          CLI/API against the seeded demo graph. This is a static mockup: no build step, no external
+          requests, no live requests of its own; the "Run check" button does not call a real engine.
+        </p>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        var form = document.querySelector('.check-form');
+        var subjectField = document.getElementById('f-subject');
+        var relationField = document.getElementById('f-relation');
+        var objectField = document.getElementById('f-object');
+        var cliCode = document.getElementById('cli-echo-code');
+        var prefersReducedMotion =
+          window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        function updateCliEcho() {
+          var subject = subjectField.value.trim() || 'user:alice';
+          var relation = relationField.value.trim() || 'view';
+          var object = objectField.value.trim() || 'document:readme';
+          cliCode.textContent =
+            'npx tsx src/cli/index.ts check ' + subject + ' ' + relation + ' ' + object;
+        }
+
+        [subjectField, relationField, objectField].forEach(function (field) {
+          field.addEventListener('input', updateCliEcho);
+        });
+
+        var loaders = document.querySelectorAll('.load-example');
+        loaders.forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            subjectField.value = btn.dataset.subject;
+            relationField.value = btn.dataset.relation;
+            objectField.value = btn.dataset.object;
+            updateCliEcho();
+
+            var target = document.querySelector(btn.dataset.target);
+            if (!target) return;
+            target.scrollIntoView({
+              behavior: prefersReducedMotion ? 'auto' : 'smooth',
+              block: 'start',
+            });
+            target.focus({ preventScroll: true });
+            target.classList.add('just-loaded');
+            window.setTimeout(function () {
+              target.classList.remove('just-loaded');
+            }, 1600);
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

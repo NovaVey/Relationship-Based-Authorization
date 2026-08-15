@@ -1,87 +1,221 @@
 # Relationship-Based Authorization
 
 [![CI](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/ci.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/ci.yml)
+[![Soundness](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/soundness.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/soundness.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-A fine-grained, relationship-based authorization service in the style of
-[Google Zanzibar](https://research.google/pubs/zanzibar-googles-consistent-global-authorization-system/):
-a schema DSL for defining relations between namespaces, a relation-tuple
-store, and a graph-walking check engine that answers exactly one question —
-does a relation path from this subject to this object actually exist — and
-proves it never answers yes without one.
+## The failure this exists to stop
 
-## Status: scaffold, not yet a working service
+Every application that grows past "everyone with an account can see
+everything" reinvents authorization, badly, in the same order: a `role`
+column, then a `role` column plus a handful of special-cased `if`
+statements for the exceptions, then a table of exceptions nobody fully
+trusts, then an incident where someone could see something they shouldn't
+have been able to — because the actual rule ("you can see this because
+you're in the group that owns the folder it's in") was never expressed
+anywhere as data. It was scattered across application code as a series of
+individually-plausible checks nobody had ever verified agreed with each
+other, until one of them didn't.
 
-This repository currently holds CI, lint/format, the environment loader, and
-a test suite — no implementation. The full build is specified phase by phase
-in **[`.claude/commands/build-authz-service.md`](.claude/commands/build-authz-service.md)**;
-that document is the plan, this README describes the destination it's
-aimed at. Track real progress in [`PROGRESS.md`](PROGRESS.md) and the
-reasoning behind non-obvious calls in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+Relationship-based authorization (ReBAC) makes the relationships
+themselves the source of truth. A permission question is never answered
+by a route's own bespoke logic — it's answered by walking real,
+current relationship data (`document:readme#viewer@user:alice`,
+`folder:design#editor@group:eng#member`) the same way, every time, in one
+place. That only replaces the risk above with a new one if the walk itself
+can be wrong — so this project's actual subject is proving that it isn't,
+not just building it.
 
-## The problem this is for
+## What an `allow` actually looks like here
 
-A flat `role` column or a scattered pile of `if (user.orgId === resource.orgId)`
-checks can't express "can view this document because you're a member of the
-group that owns the folder it's in" — and once an application starts
-approximating that by hand, in a dozen slightly different ways across a
-dozen routes, the actual security property (can this specific subject reach
-this specific object through a real, current relationship) stops being
-something anyone can verify. It becomes something everyone hopes is still
-true.
+This system never says a permission is granted because it seems like it
+should be. Every `allow` names the exact chain of real tuples that
+produced it — not a description of one, the actual evidence, re-derivable
+by anyone who reads it. Here's a real one, from this repository's own
+seeded example graph (`schema/example.authz`, `scripts/seed-example.ts`):
+`user:dana` can `edit` `document:eng_handbook` — but she was never granted
+that directly, and she isn't even a direct member of the group that was:
 
-Relationship-based authorization (ReBAC) makes the relationships themselves
-the source of truth — `document:readme#viewer@user:alice`,
-`folder:design#editor@group:eng#member` — and answers every permission
-question by walking that graph, the same way, every time, in one place. The
-question this project exists to answer about its own implementation is not
-"is the graph model expressive enough" (Zanzibar and its production
-implementations already settled that) — it's **does the check engine ever
-say yes when no path exists.** See
-[`test/isolation/`](test/isolation/README.md) for how that gets proven, not
-just asserted.
+```
+user:dana
+  → group:eng_backend_interns#member
+  → group:eng_backend#member
+  → group:eng#member
+  → folder:eng_docs#editor
+  → document:eng_handbook#edit
+```
+
+Two levels of nested group membership, then a folder-level grant, then
+inheritance down to the document — five real hops, none of them a
+shortcut. `authz check user:dana edit document:eng_handbook` returns this
+exact path (`docs/RELATIONS.md` walks through why each hop is there);
+`authz expand document:eng_handbook edit` shows the same structure as a
+full tree, every branch that was and wasn't involved. Deny decisions are
+symmetric: `authz check user:mallory view org:acme` returns `DENIED`
+because she's excluded by name (`org.view = member - banned` — see
+`docs/RELATIONS.md`), not because nothing else was checked.
+
+## The soundness result
+
+Fuzzed against an independent reference resolver across 5,000 random
+`(schema, tuple graph, query)` triples:
+
+```
+SOUND — 0 false_grant, 0 false_deny, across 5000 queries
+```
+
+That's a real run's output (`authz soundness run`), not a projected or
+aspirational number — every PR to this repository re-runs it and posts
+the result as a comment (see the Soundness badge above). A system stating
+its own false-grant rate under adversarial random testing, and reporting
+it even when it isn't zero, is a claim almost nothing in this space states
+this plainly — and it's the entire reason this project exists: proving
+the check engine never says yes when no path exists is worth more than
+any feature the engine itself has. `docs/RELATIONS.md`'s "every `allow`
+can show its work" section and `.claude/commands/build-authz-service.md`
+§6.2/§6.5 cover the mechanism — a deliberately naive, deliberately slow,
+independently-written oracle (no shared code with the production engine)
+checked against the real engine on every random query, with a **false
+grant always failing the run outright**, regardless of how rare it was,
+and a false deny reported but never blocking on its own — the asymmetry
+is deliberate, because the two failure modes are not equally dangerous.
+
+## Try it yourself — under 10 minutes, from a clean clone
+
+```bash
+git clone https://github.com/NovaVey/Relationship-Based-Authorization
+cd Relationship-Based-Authorization
+npm install
+cp .env.example .env        # set DATABASE_URL to any reachable Postgres 16+
+npx tsx src/cli/index.ts doctor          # confirms Postgres is reachable, applies migrations
+npm run seed:example                     # publishes schema/example.authz + the real demo graph above
+npx tsx src/cli/index.ts check user:dana edit document:eng_handbook
+npx tsx src/cli/index.ts expand document:eng_handbook edit
+npx tsx src/cli/index.ts soundness run   # the SOUND result above, reproduced live against your own database
+```
+
+`npm run seed:example` prints a handful of other real checks worth trying
+(a denied case, the intersection case) once it finishes. `authz soundness
+run` generates and checks its **own** random schema/tuple graph each time
+(that's the whole point — it's testing the engine, not this repository's
+example data), so it writes some randomly-named namespaces into the same
+database alongside the demo graph; harmless, but expect to see them if
+you go looking at `namespace_configs` directly afterward.
+
+## How it works
+
+Two kinds of facts live in a namespace: a **relation** is something you
+can write a tuple against (a stored fact — `alice is an editor of
+readme`); a **permission** is a rule computed from relations, on demand,
+every time — union, intersection, exclusion, and tuple-to-userset
+(following a relation to another object, then recursing) are the four
+ways a permission can combine them. Nested group membership needs no
+special case at all — it falls out of letting a relation's subject be
+another relation's entire member set. **[`docs/RELATIONS.md`](docs/RELATIONS.md)**
+covers all four with real examples from this repository's own schema, plus
+why a depth ceiling and cycle detection are correctness requirements here,
+not performance tuning.
+
+Every write returns a consistency token; a check can pin to it and is
+then guaranteed to observe that write and everything before it — a plain,
+stated read-your-writes guarantee on a single Postgres instance, not
+Spanner-style external consistency across a distributed deployment.
+**[`docs/CONSISTENCY.md`](docs/CONSISTENCY.md)** states the one property
+this must never violate, and what this project deliberately does not
+claim.
 
 ## What this is not
 
 This is not a from-scratch alternative to production Zanzibar
 implementations — [SpiceDB](https://authzed.com/spicedb),
 [OpenFGA](https://openfga.dev/), and [Ory Keto](https://www.ory.sh/keto/)
-already exist, are battle-tested, and are the right choice for most teams
-that need this today. This project is not a distributed, globally-consistent
-authorization system either — it runs on a single Postgres, with
-consistency handled by a token/zookie mechanism (see the build spec §6.3),
-not multi-region consensus. It is not an ABAC/policy-language engine
-(no attribute rules, no Rego/Cedar-style policy evaluation) — relationships
-only. What it demonstrates is building and reasoning correctly about ReBAC
-infrastructure end to end, soundness proof included.
+already exist, are battle-tested at real scale, and are the right choice
+for most teams that need this today. This project is not a distributed,
+globally-consistent authorization system either — it runs on a single
+Postgres, with consistency handled by the token mechanism above, not
+multi-region consensus. It is not an ABAC/policy-language engine (no
+attribute rules, no Rego/Cedar-style policy evaluation) — relationships
+only. It is not an authentication system — subjects are opaque ids; who
+authenticates them is out of scope entirely.
 
-## Repository layout (current)
+What this project actually contributes is the proof methodology —
+differential fuzzing against an independent oracle, asymmetric verdicts
+that treat an over-grant as categorically worse than an under-grant, and
+resolution-path audit trails for every decision — applied carefully to a
+well-understood model (Zanzibar), not a novel authorization model of its
+own. It demonstrates the ability to design, build, and prove correct
+relationship-based authorization infrastructure end to end. If you want
+this done against your own product's real schema rather than this
+repository's example one, see **[`docs/DELIVERY.md`](docs/DELIVERY.md)**.
+
+## Stack
+
+Node 22 LTS + TypeScript (strict), Postgres via `pg` (hand-written SQL and
+migrations, no ORM — the recursive graph walk is the part of this project
+that must be exactly right and auditable, and a query builder is the
+wrong place to hide that), Fastify for the API, `commander` for the CLI,
+Vitest + `fast-check` for testing and property-based fuzzing, GitHub
+Actions for CI. No LLM API, no third-party auth provider — Postgres is
+the only paid dependency this project has.
+
+## API and CLI
 
 ```
-src/config/env.ts    validated environment loading (Phase 0 scaffolding — see docs/DECISIONS.md)
-test/isolation/       the inherited, repurposed isolation-proof suite — see test/isolation/README.md
-docs/                 process docs (governance) + the build spec's supporting docs, as phases add them
-.claude/commands/     the build specification — read this before any implementation PR
-.claude/agents/       subagents the build specification delegates specific phases to
+authz schema compile <file>                        parse + compile a namespace DSL file
+authz schema publish <file>                         compile and publish a new namespace_configs version
+authz tuple write <object> <relation> <subject>     write a tuple, prints the returned consistency token
+authz tuple delete <object> <relation> <subject>
+authz check <subject> <relation> <object> [--at-token <n>]
+authz expand <object> <relation>                    print the resolved subject tree
+authz soundness run [--queries N] [--seed S]        run the differential fuzz harness, print/store the report
+authz serve                                         start the Fastify API server
 ```
 
-## Setup
+`authz serve` exposes the same five operations over HTTP
+(`POST /check`, `POST /expand`, `POST`/`DELETE /tuples`, `POST
+/schema/compile`, `POST /schema/publish`, plus `GET /health`) —
+`ADMIN_API_KEY`-gated writes, rate-limited, `/health` reporting database
+connectivity and every currently-published namespace's version. See
+`src/api/server.ts`'s own doc comments for the exact route shapes.
 
-```bash
-npm install
-cp .env.example .env   # see .env.example for what each variable is for
-npm test                # runs the isolation suite — currently all `.todo()`, by design
-npm run lint && npm run typecheck && npm run build
+Static mockups of what a real UI over this would look like —
+Namespaces, Tuple browser, Check playground, Soundness runs, Expand
+tree — live under [`docs/screens/`](docs/screens/), built against this
+same real example data.
+
+## Repository layout
+
+```
+src/
+  config/    validated environment loading
+  schema/    the namespace DSL — parser, compiler, publish
+  store/     migrations, the tuple store, consistency tokens
+  resolve/
+    reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
+    production/  the real, SQL-backed check engine
+  soundness/ the differential-fuzz generator, classifier, runner
+  audit/     expand(), and the checks audit trail every real check is logged to
+  report/    markdown/JSON soundness reporters, exit codes, PR-comment logic
+  api/       the Fastify server
+  cli/       the authz CLI
+schema/example.authz        the real demo schema this README's own examples come from
+scripts/seed-example.ts     publishes it + the real demo tuple graph
+docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, github-governance.md, screens/
+test/
+  isolation/ the inherited, repurposed proof suite — see test/isolation/README.md
+  unit/      per-module unit + integration tests, one file per real claim
+.claude/commands/  the build specification this whole project was built under
+.claude/agents/    the subagents that specification delegates specific phases to
 ```
 
-`npm run test:integration` additionally needs Docker (it spins up a real
-Postgres via testcontainers once the tuple store exists — see
-`vitest.integration.config.ts`).
-
-## Contributing / building this out
+## Building this out further / contributing
 
 Read [`.claude/commands/build-authz-service.md`](.claude/commands/build-authz-service.md)
-in full before writing any implementation code — it defines the phases, the
+in full before touching implementation code — it defines the phases, the
 data model, the soundness-validation methodology, the test plan, and the
-subagent delegation rules this project is built under. Un-skip a `.todo()`
-test only in the same change that implements what makes it pass.
+subagent delegation rules this project was built under. Track real,
+current status in [`PROGRESS.md`](PROGRESS.md) and the reasoning behind
+every non-obvious call in [`docs/DECISIONS.md`](docs/DECISIONS.md) — on an
+authorization system, "it seemed reasonable" is not an answer a security
+reviewer should accept, and it isn't one this project accepts from itself
+either.

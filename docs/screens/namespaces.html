@@ -1,0 +1,1583 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Namespaces — Relationship-Based Authorization</title>
+    <style>
+      :root {
+        --paper: #f7f2e7;
+        --paper-raised: #efe7d5;
+        --ink: #201d17;
+        --muted: #5a5240;
+        --border: #d9cfb5;
+        --border-strong: #c3b795;
+        --accent-intersection: #2f5d55;
+        --accent-intersection-bg: #e4efec;
+        --accent-exclusion: #6b4119;
+        --accent-exclusion-bg: #f2e6d8;
+        --accent-hop: #4f3d6e;
+        --accent-hop-bg: #ece6f2;
+        --focus: #201d17;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family:
+          ui-monospace, 'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.55;
+        font-size: 15px;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: -999px;
+        top: 0;
+        background: var(--ink);
+        color: var(--paper);
+        padding: 0.5em 1em;
+        z-index: 10;
+      }
+      .skip-link:focus-within {
+        left: 0;
+      }
+
+      a {
+        color: var(--ink);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 1.75rem 1.25rem 4rem;
+      }
+
+      code,
+      pre {
+        font-family: inherit;
+        font-variant-numeric: tabular-nums;
+      }
+
+      pre {
+        margin: 0;
+        padding: 0.85rem 1rem;
+        background: var(--paper-raised);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        overflow-x: auto;
+        font-size: 0.85em;
+        line-height: 1.5;
+      }
+
+      code {
+        background: var(--paper-raised);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.03em 0.35em;
+        font-size: 0.92em;
+      }
+
+      pre code {
+        background: none;
+        border: none;
+        padding: 0;
+      }
+
+      /* ---- header ---- */
+
+      .page-header {
+        border-bottom: 1px solid var(--border-strong);
+        padding-bottom: 1.25rem;
+        margin-bottom: 2rem;
+      }
+
+      .eyebrow {
+        margin: 0 0 0.6rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .screen-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+        margin: 0 0 0.35rem;
+      }
+
+      .screen-tab {
+        font-size: 0.8rem;
+        padding: 0.15rem 0.1rem;
+      }
+      .screen-tab.current {
+        font-weight: 700;
+        border-bottom: 2px solid var(--ink);
+      }
+      .screen-tab.inert {
+        color: var(--muted);
+      }
+      .screen-sep {
+        color: var(--border-strong);
+      }
+
+      .nav-caption {
+        margin: 0.35rem 0 1.1rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.7rem;
+        letter-spacing: -0.01em;
+      }
+
+      .lede {
+        margin: 0 0 1rem;
+        max-width: 62ch;
+      }
+
+      .health-check summary {
+        cursor: pointer;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      .health-check pre {
+        margin-top: 0.6rem;
+      }
+
+      /* ---- legend ---- */
+
+      .legend {
+        border: 1px solid var(--border);
+        background: var(--paper-raised);
+        border-radius: 6px;
+        padding: 1rem 1.15rem;
+        margin-bottom: 2rem;
+      }
+
+      .legend h2 {
+        margin: 0 0 0.5rem;
+        font-size: 1rem;
+      }
+
+      .legend p {
+        margin: 0 0 0.85rem;
+        font-size: 0.88rem;
+        color: var(--muted);
+        max-width: 68ch;
+      }
+
+      .legend-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 0.55rem;
+      }
+
+      .legend-list li {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        font-size: 0.88rem;
+      }
+
+      .legend-key {
+        flex: 0 0 auto;
+        min-width: 6.5rem;
+      }
+
+      .legend-note {
+        color: var(--muted);
+        font-size: 0.82rem;
+        margin: 0;
+      }
+
+      .kind-filter {
+        margin-top: 1rem;
+        padding-top: 0.85rem;
+        border-top: 1px dashed var(--border-strong);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .kind-filter-label {
+        font-size: 0.78rem;
+        color: var(--muted);
+        margin-right: 0.15rem;
+      }
+
+      .kind-filter button {
+        font-family: inherit;
+        font-size: 0.78rem;
+        background: var(--paper);
+        color: var(--ink);
+        border: 1px solid var(--border-strong);
+        border-radius: 999px;
+        padding: 0.25rem 0.7rem;
+        cursor: pointer;
+      }
+
+      .kind-filter button[aria-pressed='true'] {
+        background: var(--ink);
+        color: var(--paper);
+        border-color: var(--ink);
+      }
+
+      .kind-filter-hint {
+        font-size: 0.75rem;
+        color: var(--muted);
+        margin: 0.5rem 0 0;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .kind-filter button,
+        .permission {
+          transition:
+            background-color 120ms ease,
+            color 120ms ease,
+            opacity 120ms ease;
+        }
+      }
+
+      /* ---- namespace sections ---- */
+
+      .namespace {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1.25rem 1.4rem 1.5rem;
+        margin-bottom: 2rem;
+        background: var(--paper);
+      }
+
+      .ns-head {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 1rem;
+      }
+
+      .ns-head h2 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+
+      .version-badge {
+        font-size: 0.72rem;
+        border: 1px solid var(--border-strong);
+        border-radius: 999px;
+        padding: 0.1rem 0.55rem;
+        color: var(--muted);
+      }
+
+      h3 {
+        font-size: 0.95rem;
+        margin: 1.5rem 0 0.6rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .namespace h3:first-of-type {
+        margin-top: 0;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.88rem;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 0.45rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+
+      thead th {
+        background: var(--paper-raised);
+        font-weight: 700;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .chip {
+        display: inline-block;
+        border: 1px solid var(--border-strong);
+        background: var(--paper-raised);
+        border-radius: 3px;
+        padding: 0.03em 0.45em;
+        font-size: 0.92em;
+      }
+
+      .chip-subject {
+        margin-right: 0.25rem;
+      }
+
+      .chip-hop {
+        border-style: dashed;
+        border-color: var(--accent-hop);
+        background: var(--accent-hop-bg);
+        color: var(--accent-hop);
+      }
+
+      .hop-arrow {
+        margin: 0 0.15em;
+      }
+
+      /* ---- permissions ---- */
+
+      .permission {
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 0.9rem 1rem;
+        margin-bottom: 0.9rem;
+      }
+
+      .permission.dimmed {
+        opacity: 0.35;
+      }
+
+      .permission-head {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      .perm-name {
+        font-weight: 700;
+        font-size: 1rem;
+      }
+
+      .rule-kind {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border-radius: 999px;
+        padding: 0.08rem 0.55rem;
+        border: 1px solid currentColor;
+      }
+      .rule-kind-union {
+        color: var(--ink);
+      }
+      .rule-kind-intersection {
+        color: var(--accent-intersection);
+      }
+      .rule-kind-exclusion {
+        color: var(--accent-exclusion);
+      }
+      .rule-kind-reference {
+        color: var(--muted);
+      }
+
+      .rewrite-expr {
+        font-size: 1rem;
+        padding: 0.15rem 0;
+      }
+
+      .op {
+        font-weight: 700;
+        margin: 0 0.4em;
+      }
+      .op-union {
+        color: var(--ink);
+      }
+      .op-intersection {
+        color: var(--accent-intersection);
+      }
+      .op-exclusion {
+        color: var(--accent-exclusion);
+      }
+
+      .paren {
+        color: var(--muted);
+        margin: 0 0.1em;
+      }
+
+      .group {
+        background: var(--accent-intersection-bg);
+        border-radius: 3px;
+        padding: 0.05em 0.35em;
+      }
+
+      .rewrite-note {
+        font-size: 0.82rem;
+        color: var(--muted);
+        margin: 0.6rem 0 0;
+        max-width: 70ch;
+      }
+
+      .example-note {
+        font-size: 0.85rem;
+        margin: 0.7rem 0 0;
+        padding: 0.6rem 0.75rem;
+        border-left: 3px solid var(--border-strong);
+        background: var(--paper-raised);
+        max-width: 72ch;
+      }
+
+      .source-cite {
+        display: block;
+        margin-top: 0.4rem;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      details.example {
+        margin-top: 0.75rem;
+        border: 1px solid var(--border-strong);
+        border-radius: 5px;
+        padding: 0.7rem 0.9rem 0.85rem;
+        background: var(--paper-raised);
+      }
+      details.example summary {
+        cursor: pointer;
+        font-size: 0.85rem;
+        font-weight: 700;
+      }
+      details.example[open] summary {
+        margin-bottom: 0.6rem;
+      }
+
+      .chain {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.3rem;
+        font-size: 0.86rem;
+        margin: 0.6rem 0;
+      }
+
+      .chain-link {
+        border: 1px solid var(--border-strong);
+        background: var(--paper);
+        border-radius: 3px;
+        padding: 0.15rem 0.5rem;
+      }
+
+      .chain-arrow {
+        color: var(--muted);
+      }
+
+      .compare-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 1rem;
+        margin: 0.5rem 0 0.75rem;
+      }
+
+      .compare-case {
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.65rem 0.8rem;
+        background: var(--paper);
+      }
+
+      .compare-subject {
+        margin: 0 0 0.5rem;
+        font-size: 0.84rem;
+      }
+
+      .muted-strong {
+        color: var(--muted);
+      }
+
+      .branch-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 0.4rem;
+        font-size: 0.8rem;
+      }
+
+      .branch-mark {
+        display: inline-block;
+        font-weight: 700;
+        margin-right: 0.3em;
+      }
+      .branch-mark.ok {
+        color: var(--ink);
+      }
+      .branch-mark.no {
+        color: var(--muted);
+      }
+
+      details.raw-json {
+        margin-top: 0.65rem;
+      }
+      details.raw-json summary {
+        cursor: pointer;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      details.raw-json pre {
+        margin-top: 0.5rem;
+      }
+
+      /* ---- version history ---- */
+
+      details.version-history {
+        margin-top: 1.5rem;
+        border-top: 1px dashed var(--border-strong);
+        padding-top: 0.85rem;
+      }
+      details.version-history summary {
+        cursor: pointer;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 700;
+      }
+
+      .version-list {
+        list-style: none;
+        margin: 0.7rem 0 0.9rem;
+        padding: 0;
+        display: grid;
+        gap: 0.35rem;
+      }
+
+      .version-entry {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        font-size: 0.85rem;
+      }
+
+      .version-tag {
+        font-weight: 700;
+        border: 1px solid var(--border-strong);
+        border-radius: 3px;
+        padding: 0.02em 0.4em;
+      }
+
+      .version-state {
+        color: var(--muted);
+      }
+
+      .compare-control {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.7rem;
+      }
+
+      .compare-control button {
+        font-family: inherit;
+        font-size: 0.82rem;
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.35rem 0.8rem;
+        background: var(--paper-raised);
+        color: var(--muted);
+      }
+
+      .compare-control button[disabled] {
+        cursor: not-allowed;
+      }
+
+      .compare-note {
+        margin: 0;
+        font-size: 0.78rem;
+        color: var(--muted);
+        max-width: 55ch;
+      }
+
+      /* ---- dsl source ---- */
+
+      details.dsl-source {
+        margin-top: 1.1rem;
+      }
+      details.dsl-source summary {
+        cursor: pointer;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      details.dsl-source .table-scroll {
+        margin-top: 0.55rem;
+        border: none;
+      }
+
+      footer {
+        border-top: 1px solid var(--border-strong);
+        padding-top: 1rem;
+        margin-top: 2.5rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      footer p {
+        max-width: 72ch;
+      }
+
+      @media (max-width: 640px) {
+        .wrap {
+          padding: 1.25rem 0.9rem 3rem;
+        }
+        h1 {
+          font-size: 1.4rem;
+        }
+        .namespace {
+          padding: 1rem;
+        }
+        th,
+        td {
+          white-space: normal;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="skip-link"><a href="#main">Skip to content</a></div>
+    <div class="wrap">
+      <header class="page-header">
+        <p class="eyebrow">relationship-based-authorization · schema instrument panel</p>
+        <nav class="screen-nav" aria-label="Screens in this report UI">
+          <span class="screen-tab current" aria-current="page">Namespaces</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Tuple browser</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Check playground</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Soundness runs</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Expand tree</span>
+        </nav>
+        <p class="nav-caption">
+          Five screens per the design direction (build spec §8). This file renders only
+          <strong>Namespaces</strong> — the other four are separate static files in this set, not
+          linked from here.
+        </p>
+        <h1>Namespaces</h1>
+        <p class="lede">
+          4 namespaces compiled from <code>schema/example.authz</code> and currently published:
+          <code>org</code>, <code>group</code>, <code>folder</code>, <code>document</code>. Each has
+          exactly one published version.
+        </p>
+        <details class="health-check">
+          <summary>
+            Real <code>GET /health</code> response used for the version badges below
+          </summary>
+          <pre><code>{
+  "status": "ok",
+  "database": { "reachable": true },
+  "namespaces": [
+    { "namespace": "document", "version": 1 },
+    { "namespace": "folder", "version": 1 },
+    { "namespace": "group", "version": 1 },
+    { "namespace": "org", "version": 1 }
+  ]
+}</code></pre>
+        </details>
+      </header>
+
+      <main id="main">
+        <section class="legend" aria-labelledby="legend-heading">
+          <h2 id="legend-heading">Reading a permission</h2>
+          <p>
+            A <code>permission</code> is never itself the target of a tuple write — it's computed
+            from relations by one rewrite rule. Rendered expressions below use <code>→</code> for a
+            tuple-to-userset hop; the DSL source itself writes that as <code>-&gt;</code> — see each
+            namespace's own source excerpt for the exact syntax.
+          </p>
+          <ul class="legend-list">
+            <li>
+              <span class="legend-key"
+                ><span class="op op-union" aria-hidden="true">|</span> union</span
+              >
+              <span>allowed if <em>any</em> operand resolves.</span>
+            </li>
+            <li>
+              <span class="legend-key"
+                ><span class="op op-intersection" aria-hidden="true">&amp;</span> intersection</span
+              >
+              <span>allowed only if <em>every</em> operand resolves.</span>
+            </li>
+            <li>
+              <span class="legend-key"
+                ><span class="op op-exclusion" aria-hidden="true">-</span> exclusion</span
+              >
+              <span
+                >allowed if the left operand resolves <em>and</em> the right does not (<code
+                  >a - b</code
+                >).</span
+              >
+            </li>
+            <li>
+              <span class="legend-key"><span class="chip chip-hop">rel → perm</span></span>
+              <span
+                >tuple-to-userset: follow <code>rel</code> to another object, then recurse into its
+                <code>perm</code>.</span
+              >
+            </li>
+            <li>
+              <span class="legend-key"
+                ><span class="rule-kind rule-kind-reference">direct reference</span></span
+              >
+              <span
+                >not one of the four rewrite operators — the permission is exactly the named
+                relation, nothing combined.</span
+              >
+            </li>
+          </ul>
+          <div
+            class="kind-filter"
+            role="group"
+            aria-label="Filter permissions by rewrite-rule kind"
+          >
+            <span class="kind-filter-label">Filter by kind:</span>
+            <button type="button" data-kind="union" aria-pressed="false">Union</button>
+            <button type="button" data-kind="intersection" aria-pressed="false">
+              Intersection
+            </button>
+            <button type="button" data-kind="exclusion" aria-pressed="false">Exclusion</button>
+            <button type="button" data-kind="tuple-to-userset" aria-pressed="false">
+              Tuple-to-userset
+            </button>
+            <button type="button" data-kind="reference" aria-pressed="false">
+              Direct reference
+            </button>
+          </div>
+          <p class="kind-filter-hint">
+            De-emphasizes permissions that don't use the selected kind(s) — nothing is hidden,
+            everything stays in the document. Works without JavaScript too: with it disabled, the
+            buttons are inert and every permission stays fully visible.
+          </p>
+        </section>
+
+        <!-- ============ org ============ -->
+        <section class="namespace" id="ns-org" aria-labelledby="ns-org-heading">
+          <div class="ns-head">
+            <h2 id="ns-org-heading"><code>org</code></h2>
+            <span class="version-badge">v1</span>
+          </div>
+
+          <h3>Relations</h3>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="org relations">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject types</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>member</code></td>
+                  <td>
+                    <span class="chip chip-subject">user</span>
+                    <span class="chip chip-subject">group#member</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>banned</code></td>
+                  <td><span class="chip chip-subject">user</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Permissions</h3>
+          <div class="permission" id="perm-org-view" data-kinds="exclusion">
+            <div class="permission-head">
+              <span class="perm-name">view</span>
+              <span class="rule-kind rule-kind-exclusion">exclusion</span>
+            </div>
+            <div class="rewrite-expr">
+              <span class="chip chip-ref">member</span>
+              <span class="op op-exclusion" aria-hidden="true">-</span
+              ><span class="sr-only">not</span>
+              <span class="chip chip-ref">banned</span>
+            </div>
+            <p class="example-note">
+              Real example: <code>user:mallory view org:acme</code> →
+              <strong class="muted-strong">denied</strong>. Mallory is an org
+              <code>member</code> and also <code>banned</code> — the exclusion's subtract branch
+              removes her. depth <code>1</code>. A denial carries no resolution path: there is
+              nothing to walk back through, only tuples that didn't add up to an allow.
+              <span class="source-cite">.captures/check-mallory-view-org.json</span>
+            </p>
+            <details class="raw-json">
+              <summary>Raw compiled rewrite (JSON)</summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "view",
+  "rewrite": {
+    "kind": "exclusion",
+    "base": { "kind": "computedUserset", "name": "member" },
+    "subtract": { "kind": "computedUserset", "name": "banned" }
+  }
+}</code></pre>
+            </details>
+          </div>
+
+          <details class="version-history">
+            <summary>Version history</summary>
+            <ol class="version-list">
+              <li class="version-entry">
+                <span class="version-tag">v1</span>
+                <span class="version-state"
+                  >currently published — the only version of <code>org</code> published so
+                  far.</span
+                >
+              </li>
+            </ol>
+            <div class="compare-control">
+              <button
+                type="button"
+                disabled
+                aria-disabled="true"
+                aria-describedby="compare-note-org"
+              >
+                Compare versions
+              </button>
+              <p class="compare-note" id="compare-note-org">
+                Inactive — <code>org</code> has one published version (<code>v1</code>). This
+                activates once a <code>v2</code> exists to diff against.
+              </p>
+            </div>
+          </details>
+
+          <details class="dsl-source">
+            <summary>DSL source — <code>schema/example.authz</code></summary>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="org DSL source">
+              <pre><code>namespace org {
+  relation member: user | group#member
+  relation banned: user
+
+  // Anyone in the org can see org-wide content — unless explicitly banned.
+  // A real exclusion: `member` alone is not the answer, `member - banned`
+  // is. See docs/RELATIONS.md for why this is the rewrite rule that
+  // actually needs a subtract, not a second boolean column on `member`.
+  permission view = member - banned
+}</code></pre>
+            </div>
+          </details>
+        </section>
+
+        <!-- ============ group ============ -->
+        <section class="namespace" id="ns-group" aria-labelledby="ns-group-heading">
+          <div class="ns-head">
+            <h2 id="ns-group-heading"><code>group</code></h2>
+            <span class="version-badge">v1</span>
+          </div>
+
+          <h3>Relations</h3>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="group relations">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject types</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>member</code></td>
+                  <td>
+                    <span class="chip chip-subject">user</span>
+                    <span class="chip chip-subject">group#member</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Permissions</h3>
+          <div class="permission" id="perm-group-view" data-kinds="reference">
+            <div class="permission-head">
+              <span class="perm-name">view</span>
+              <span class="rule-kind rule-kind-reference">direct reference</span>
+            </div>
+            <div class="rewrite-expr">
+              <span class="chip chip-ref">member</span>
+            </div>
+            <p class="rewrite-note">
+              No boolean combination — <code>view</code> is exactly <code>member</code>. The
+              recursion that makes nested group membership work (<code>group:eng#member</code>
+              naming another group's member set as its own subject) lives in the
+              <code>member</code> relation's subject types, not in this permission.
+            </p>
+            <details class="raw-json">
+              <summary>Raw compiled rewrite (JSON)</summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "view",
+  "rewrite": { "kind": "computedUserset", "name": "member" }
+}</code></pre>
+            </details>
+          </div>
+
+          <details class="version-history">
+            <summary>Version history</summary>
+            <ol class="version-list">
+              <li class="version-entry">
+                <span class="version-tag">v1</span>
+                <span class="version-state"
+                  >currently published — the only version of <code>group</code> published so
+                  far.</span
+                >
+              </li>
+            </ol>
+            <div class="compare-control">
+              <button
+                type="button"
+                disabled
+                aria-disabled="true"
+                aria-describedby="compare-note-group"
+              >
+                Compare versions
+              </button>
+              <p class="compare-note" id="compare-note-group">
+                Inactive — <code>group</code> has one published version (<code>v1</code>). This
+                activates once a <code>v2</code> exists to diff against.
+              </p>
+            </div>
+          </details>
+
+          <details class="dsl-source">
+            <summary>DSL source — <code>schema/example.authz</code></summary>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="group DSL source">
+              <pre><code>namespace group {
+  // `user | group#member` is what makes nested group membership possible
+  // with zero special-cased recursion: a tuple can name another group's
+  // *member set* as its subject
+  // (`group:eng#member@group:eng-backend#member`), not just a plain user.
+  // See docs/RELATIONS.md's own walkthrough of the seeded graph's
+  // two-level nesting case.
+  relation member: user | group#member
+
+  permission view = member
+}</code></pre>
+            </div>
+          </details>
+        </section>
+
+        <!-- ============ folder ============ -->
+        <section class="namespace" id="ns-folder" aria-labelledby="ns-folder-heading">
+          <div class="ns-head">
+            <h2 id="ns-folder-heading"><code>folder</code></h2>
+            <span class="version-badge">v1</span>
+          </div>
+
+          <h3>Relations</h3>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="folder relations">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject types</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>parent</code></td>
+                  <td><span class="chip chip-subject">folder</span></td>
+                </tr>
+                <tr>
+                  <td><code>owner</code></td>
+                  <td><span class="chip chip-subject">user</span></td>
+                </tr>
+                <tr>
+                  <td><code>editor</code></td>
+                  <td>
+                    <span class="chip chip-subject">user</span>
+                    <span class="chip chip-subject">group#member</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>viewer</code></td>
+                  <td>
+                    <span class="chip chip-subject">user</span>
+                    <span class="chip chip-subject">group#member</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>sensitive_reviewer</code></td>
+                  <td>
+                    <span class="chip chip-subject">user</span>
+                    <span class="chip chip-subject">group#member</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Permissions</h3>
+
+          <div class="permission" id="perm-folder-edit" data-kinds="union tuple-to-userset">
+            <div class="permission-head">
+              <span class="perm-name">edit</span>
+              <span class="rule-kind rule-kind-union">union</span>
+            </div>
+            <div class="rewrite-expr">
+              <span class="chip chip-ref">editor</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-ref">owner</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-hop" aria-label="parent then edit — tuple to userset"
+                >parent <span class="hop-arrow" aria-hidden="true">→</span> edit</span
+              >
+            </div>
+            <p class="rewrite-note">
+              Editing a parent folder implies editing everything nested under it —
+              <code>parent→edit</code>, never <code>parent→view</code> (an edit permission that only
+              required the parent's view would be a privilege-escalation bug, not a convenience).
+              This is the same union that <code>expand(document:eng_handbook, edit)</code> walks
+              into for <code>folder:eng_docs</code> — see the full chain under
+              <code>document</code> below, or <code>.captures/expand-eng_handbook-edit.txt</code>.
+            </p>
+            <details class="raw-json">
+              <summary>Raw compiled rewrite (JSON)</summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "edit",
+  "rewrite": {
+    "kind": "union",
+    "children": [
+      { "kind": "computedUserset", "name": "editor" },
+      { "kind": "computedUserset", "name": "owner" },
+      { "kind": "tupleToUserset", "relation": "parent", "computedUserset": "edit" }
+    ]
+  }
+}</code></pre>
+            </details>
+          </div>
+
+          <div class="permission" id="perm-folder-view" data-kinds="union tuple-to-userset">
+            <div class="permission-head">
+              <span class="perm-name">view</span>
+              <span class="rule-kind rule-kind-union">union</span>
+            </div>
+            <div class="rewrite-expr">
+              <span class="chip chip-ref">viewer</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-ref">edit</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-hop" aria-label="parent then view — tuple to userset"
+                >parent <span class="hop-arrow" aria-hidden="true">→</span> view</span
+              >
+            </div>
+            <p class="rewrite-note">
+              Anyone who can edit can also view; direct viewers can view; and view inherits down the
+              folder tree the same way edit does.
+            </p>
+            <details class="raw-json">
+              <summary>Raw compiled rewrite (JSON)</summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "view",
+  "rewrite": {
+    "kind": "union",
+    "children": [
+      { "kind": "computedUserset", "name": "viewer" },
+      { "kind": "computedUserset", "name": "edit" },
+      { "kind": "tupleToUserset", "relation": "parent", "computedUserset": "view" }
+    ]
+  }
+}</code></pre>
+            </details>
+          </div>
+
+          <div class="permission" id="perm-folder-sensitive_review" data-kinds="intersection union">
+            <div class="permission-head">
+              <span class="perm-name">sensitive_review</span>
+              <span class="rule-kind rule-kind-intersection">intersection</span>
+            </div>
+            <div class="rewrite-expr">
+              <span class="paren" aria-hidden="true">(</span>
+              <span class="group">
+                <span class="chip chip-ref">viewer</span>
+                <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+                <span class="chip chip-ref">edit</span>
+              </span>
+              <span class="paren" aria-hidden="true">)</span>
+              <span class="op op-intersection" aria-hidden="true">&amp;</span
+              ><span class="sr-only">and</span>
+              <span class="chip chip-ref">sensitive_reviewer</span>
+            </div>
+            <p class="rewrite-note">
+              Being able to see this folder at all is necessary but not sufficient — you also need
+              the narrower <code>sensitive_reviewer</code> grant. Two ordinary viewers of the same
+              folder can get different answers here.
+            </p>
+
+            <details class="example real-example">
+              <summary>
+                Real example — same folder, two outcomes (<code>check-carol-…</code>,
+                <code>check-erin-…</code>)
+              </summary>
+              <div class="compare-grid">
+                <div class="compare-case">
+                  <p class="compare-subject">
+                    <code>user:carol sensitive_review folder:finance_docs</code> →
+                    <strong>allowed</strong>
+                  </p>
+                  <ul class="branch-list">
+                    <li>
+                      <span class="branch-mark ok">✓ satisfied</span>
+                      <code>viewer | edit</code> — via
+                      <code>user:carol → group:finance#member → folder:finance_docs#viewer</code>
+                    </li>
+                    <li>
+                      <span class="branch-mark ok">✓ satisfied</span>
+                      <code>sensitive_reviewer</code> — direct grant
+                      <code>user:carol → folder:finance_docs#sensitive_reviewer</code>
+                    </li>
+                  </ul>
+                  <p class="source-cite">.captures/check-carol-sensitive_review-allowed.json</p>
+                </div>
+                <div class="compare-case">
+                  <p class="compare-subject">
+                    <code>user:erin sensitive_review folder:finance_docs</code> →
+                    <strong class="muted-strong">denied</strong>
+                  </p>
+                  <ul class="branch-list">
+                    <li>
+                      <span class="branch-mark ok">✓ satisfied</span>
+                      <code>viewer | edit</code> — via
+                      <code>user:erin → group:finance#member → folder:finance_docs#viewer</code>
+                    </li>
+                    <li>
+                      <span class="branch-mark no">— not satisfied</span>
+                      <code>sensitive_reviewer</code> — no such tuple for <code>erin</code>
+                    </li>
+                  </ul>
+                  <p class="source-cite">
+                    .captures/check-erin-sensitive_review-denied.json — depth <code>1</code>, no
+                    resolution path (denials carry none)
+                  </p>
+                </div>
+              </div>
+              <p class="rewrite-note">
+                Both have ordinary folder access through <code>group:finance#member</code>. Only
+                <code>carol</code> also holds the narrower <code>sensitive_reviewer</code> grant —
+                that one extra tuple is the entire difference between the two outcomes.
+              </p>
+            </details>
+
+            <details class="raw-json">
+              <summary>Raw compiled rewrite (JSON)</summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "sensitive_review",
+  "rewrite": {
+    "kind": "intersection",
+    "children": [
+      {
+        "kind": "union",
+        "children": [
+          { "kind": "computedUserset", "name": "viewer" },
+          { "kind": "computedUserset", "name": "edit" }
+        ]
+      },
+      { "kind": "computedUserset", "name": "sensitive_reviewer" }
+    ]
+  }
+}</code></pre>
+            </details>
+          </div>
+
+          <details class="version-history">
+            <summary>Version history</summary>
+            <ol class="version-list">
+              <li class="version-entry">
+                <span class="version-tag">v1</span>
+                <span class="version-state"
+                  >currently published — the only version of <code>folder</code> published so
+                  far.</span
+                >
+              </li>
+            </ol>
+            <div class="compare-control">
+              <button
+                type="button"
+                disabled
+                aria-disabled="true"
+                aria-describedby="compare-note-folder"
+              >
+                Compare versions
+              </button>
+              <p class="compare-note" id="compare-note-folder">
+                Inactive — <code>folder</code> has one published version (<code>v1</code>). This
+                activates once a <code>v2</code> exists to diff against.
+              </p>
+            </div>
+          </details>
+
+          <details class="dsl-source">
+            <summary>DSL source — <code>schema/example.authz</code></summary>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="folder DSL source">
+              <pre><code>namespace folder {
+  relation parent: folder
+  relation owner: user
+  relation editor: user | group#member
+  relation viewer: user | group#member
+  // Who's specifically cleared to review this folder's sensitive
+  // contents — deliberately a *second*, narrower gate on top of ordinary
+  // access, not a replacement for it. See `sensitive_review` below.
+  relation sensitive_reviewer: user | group#member
+
+  // Editing a parent folder implies editing every folder/document nested
+  // under it — `parent-&gt;edit`, never `parent-&gt;view` (an edit permission
+  // that only required the parent's *view* would be a real privilege-
+  // escalation bug, not a convenience).
+  permission edit = editor | owner | parent-&gt;edit
+  // Anyone who can edit can also view; direct viewers can view; and view
+  // inherits down the folder tree the same way edit does.
+  permission view = viewer | edit | parent-&gt;view
+  // Intersection: being able to see this folder at all is necessary but
+  // not sufficient — you also need the narrower `sensitive_reviewer`
+  // grant. Two people can both be ordinary viewers of the same folder and
+  // get different answers to this one permission.
+  permission sensitive_review = (viewer | edit) &amp; sensitive_reviewer
+}</code></pre>
+            </div>
+          </details>
+        </section>
+
+        <!-- ============ document ============ -->
+        <section class="namespace" id="ns-document" aria-labelledby="ns-document-heading">
+          <div class="ns-head">
+            <h2 id="ns-document-heading"><code>document</code></h2>
+            <span class="version-badge">v1</span>
+          </div>
+
+          <h3>Relations</h3>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="document relations">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject types</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>parent</code></td>
+                  <td><span class="chip chip-subject">folder</span></td>
+                </tr>
+                <tr>
+                  <td><code>owner</code></td>
+                  <td><span class="chip chip-subject">user</span></td>
+                </tr>
+                <tr>
+                  <td><code>editor</code></td>
+                  <td>
+                    <span class="chip chip-subject">user</span>
+                    <span class="chip chip-subject">group#member</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>viewer</code></td>
+                  <td>
+                    <span class="chip chip-subject">user</span>
+                    <span class="chip chip-subject">group#member</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Permissions</h3>
+
+          <div class="permission" id="perm-document-edit" data-kinds="union tuple-to-userset">
+            <div class="permission-head">
+              <span class="perm-name">edit</span>
+              <span class="rule-kind rule-kind-union">union</span>
+            </div>
+            <div class="rewrite-expr">
+              <span class="chip chip-ref">editor</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-ref">owner</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-hop" aria-label="parent then edit — tuple to userset"
+                >parent <span class="hop-arrow" aria-hidden="true">→</span> edit</span
+              >
+            </div>
+
+            <details class="example real-example" open>
+              <summary>
+                Real resolution path — <code>user:dana edit document:eng_handbook</code> →
+                <strong>allowed</strong>
+              </summary>
+              <p class="rewrite-note">
+                The non-obvious case build spec §9 Phase 9 asks for by name: <code>dana</code>'s
+                only route to this permission runs through two levels of group nesting before the
+                <code>parent→edit</code> hop ever fires.
+              </p>
+              <div class="chain" role="group" aria-label="resolution path">
+                <span class="chain-link">user:dana</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">group:eng_backend_interns#member</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">group:eng_backend#member</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">group:eng#member</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">folder:eng_docs#editor</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">document:eng_handbook#edit</span>
+              </div>
+              <p class="rewrite-note">
+                5 hops, depth <code>3</code>, reached via the union's third branch
+                (<code>parent→edit</code>) and two nested <code>usersetMembership</code> steps
+                inside <code>folder:eng_docs</code>'s own <code>editor</code> grant to
+                <code>group:eng#member</code>.
+              </p>
+              <details class="raw-json">
+                <summary>Raw <code>POST /check</code> response</summary>
+                <pre><code>{
+  "allowed": true,
+  "subject": { "ns": "user", "id": "dana" },
+  "relation": "edit",
+  "object": { "ns": "document", "id": "eng_handbook" },
+  "depth": 3,
+  "path": {
+    "kind": "union",
+    "object": { "ns": "document", "id": "eng_handbook" },
+    "branchIndex": 2,
+    "branch": {
+      "kind": "tupleToUserset",
+      "object": { "ns": "document", "id": "eng_handbook" },
+      "relation": "parent",
+      "computedUserset": "edit",
+      "through": { "ns": "folder", "id": "eng_docs" },
+      "member": {
+        "kind": "union",
+        "object": { "ns": "folder", "id": "eng_docs" },
+        "branchIndex": 0,
+        "branch": {
+          "kind": "usersetMembership",
+          "object": { "ns": "folder", "id": "eng_docs" },
+          "relation": "editor",
+          "userset": { "ns": "group", "id": "eng" },
+          "usersetRelation": "member",
+          "member": {
+            "kind": "usersetMembership",
+            "object": { "ns": "group", "id": "eng" },
+            "relation": "member",
+            "userset": { "ns": "group", "id": "eng_backend" },
+            "usersetRelation": "member",
+            "member": {
+              "kind": "usersetMembership",
+              "object": { "ns": "group", "id": "eng_backend" },
+              "relation": "member",
+              "userset": { "ns": "group", "id": "eng_backend_interns" },
+              "usersetRelation": "member",
+              "member": {
+                "kind": "directGrant",
+                "object": { "ns": "group", "id": "eng_backend_interns" },
+                "relation": "member",
+                "subject": { "ns": "user", "id": "dana" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}</code></pre>
+              </details>
+              <p class="source-cite">
+                .captures/check-dana-edit-eng_handbook.json, .captures/expand-eng_handbook-edit.txt
+              </p>
+            </details>
+
+            <details class="raw-json">
+              <summary>Raw compiled rewrite (JSON)</summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "edit",
+  "rewrite": {
+    "kind": "union",
+    "children": [
+      { "kind": "computedUserset", "name": "editor" },
+      { "kind": "computedUserset", "name": "owner" },
+      { "kind": "tupleToUserset", "relation": "parent", "computedUserset": "edit" }
+    ]
+  }
+}</code></pre>
+            </details>
+          </div>
+
+          <div class="permission" id="perm-document-view" data-kinds="union tuple-to-userset">
+            <div class="permission-head">
+              <span class="perm-name">view</span>
+              <span class="rule-kind rule-kind-union">union</span>
+            </div>
+            <div class="rewrite-expr">
+              <span class="chip chip-ref">viewer</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-ref">edit</span>
+              <span class="op op-union" aria-hidden="true">|</span><span class="sr-only">or</span>
+              <span class="chip chip-hop" aria-label="parent then view — tuple to userset"
+                >parent <span class="hop-arrow" aria-hidden="true">→</span> view</span
+              >
+            </div>
+            <p class="rewrite-note">
+              Same shape as <code>folder.view</code>: direct viewers, anyone who can edit, and
+              inheritance from the parent folder's own <code>view</code>.
+            </p>
+            <details class="raw-json">
+              <summary>Raw compiled rewrite (JSON)</summary>
+              <pre><code>{
+  "kind": "permission",
+  "name": "view",
+  "rewrite": {
+    "kind": "union",
+    "children": [
+      { "kind": "computedUserset", "name": "viewer" },
+      { "kind": "computedUserset", "name": "edit" },
+      { "kind": "tupleToUserset", "relation": "parent", "computedUserset": "view" }
+    ]
+  }
+}</code></pre>
+            </details>
+          </div>
+
+          <details class="version-history">
+            <summary>Version history</summary>
+            <ol class="version-list">
+              <li class="version-entry">
+                <span class="version-tag">v1</span>
+                <span class="version-state"
+                  >currently published — the only version of <code>document</code> published so
+                  far.</span
+                >
+              </li>
+            </ol>
+            <div class="compare-control">
+              <button
+                type="button"
+                disabled
+                aria-disabled="true"
+                aria-describedby="compare-note-document"
+              >
+                Compare versions
+              </button>
+              <p class="compare-note" id="compare-note-document">
+                Inactive — <code>document</code> has one published version (<code>v1</code>). This
+                activates once a <code>v2</code> exists to diff against.
+              </p>
+            </div>
+          </details>
+
+          <details class="dsl-source">
+            <summary>DSL source — <code>schema/example.authz</code></summary>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="document DSL source">
+              <pre><code>namespace document {
+  relation parent: folder
+  relation owner: user
+  relation editor: user | group#member
+  relation viewer: user | group#member
+
+  permission edit = editor | owner | parent-&gt;edit
+  permission view = viewer | edit | parent-&gt;view
+}</code></pre>
+            </div>
+          </details>
+        </section>
+      </main>
+
+      <footer>
+        <p>
+          Source of every fact on this page: <code>.captures/compiled-schema.json</code>,
+          <code>.captures/example.authz</code>, <code>.captures/health.json</code>,
+          <code>.captures/check-mallory-view-org.json</code>,
+          <code>.captures/check-carol-sensitive_review-allowed.json</code>,
+          <code>.captures/check-erin-sensitive_review-denied.json</code>,
+          <code>.captures/check-dana-edit-eng_handbook.json</code>, and
+          <code>.captures/expand-eng_handbook-edit.txt</code> — real output captured from this
+          project's own CLI/API against the seeded demo graph
+          (<code>scripts/seed-example.ts</code>). This is a static mockup: no build step, no
+          external requests, no live requests of its own.
+        </p>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        var buttons = document.querySelectorAll('.kind-filter button[data-kind]');
+        var permissions = document.querySelectorAll('.permission[data-kinds]');
+        var active = new Set();
+
+        function apply() {
+          permissions.forEach(function (el) {
+            if (active.size === 0) {
+              el.classList.remove('dimmed');
+              return;
+            }
+            var kinds = el.dataset.kinds.split(' ');
+            var match = kinds.some(function (k) {
+              return active.has(k);
+            });
+            el.classList.toggle('dimmed', !match);
+          });
+        }
+
+        buttons.forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var kind = btn.dataset.kind;
+            var pressed = btn.getAttribute('aria-pressed') === 'true';
+            btn.setAttribute('aria-pressed', String(!pressed));
+            if (pressed) {
+              active.delete(kind);
+            } else {
+              active.add(kind);
+            }
+            apply();
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

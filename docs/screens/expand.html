@@ -1,0 +1,1425 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Expand tree — Relationship-Based Authorization</title>
+    <style>
+      :root {
+        --paper: #f7f2e7;
+        --paper-raised: #efe7d5;
+        --ink: #201d17;
+        --muted: #5a5240;
+        --border: #d9cfb5;
+        --border-strong: #c3b795;
+        --accent-intersection: #2f5d55;
+        --accent-intersection-bg: #e4efec;
+        --accent-exclusion: #6b4119;
+        --accent-exclusion-bg: #f2e6d8;
+        --accent-hop: #4f3d6e;
+        --accent-hop-bg: #ece6f2;
+        --focus: #201d17;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family:
+          ui-monospace, 'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.55;
+        font-size: 15px;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: -999px;
+        top: 0;
+        background: var(--ink);
+        color: var(--paper);
+        padding: 0.5em 1em;
+        z-index: 10;
+      }
+      .skip-link:focus-within {
+        left: 0;
+      }
+
+      a {
+        color: var(--ink);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 1.75rem 1.25rem 4rem;
+      }
+
+      code,
+      pre {
+        font-family: inherit;
+        font-variant-numeric: tabular-nums;
+      }
+
+      pre {
+        margin: 0;
+        padding: 0.85rem 1rem;
+        background: var(--paper-raised);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        overflow-x: auto;
+        font-size: 0.85em;
+        line-height: 1.5;
+      }
+
+      code {
+        background: var(--paper-raised);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.03em 0.35em;
+        font-size: 0.92em;
+      }
+
+      pre code {
+        background: none;
+        border: none;
+        padding: 0;
+      }
+
+      /* ---- header ---- */
+
+      .page-header {
+        border-bottom: 1px solid var(--border-strong);
+        padding-bottom: 1.25rem;
+        margin-bottom: 2rem;
+      }
+
+      .eyebrow {
+        margin: 0 0 0.6rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .screen-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+        margin: 0 0 0.35rem;
+      }
+
+      .screen-tab {
+        font-size: 0.8rem;
+        padding: 0.15rem 0.1rem;
+      }
+      .screen-tab.current {
+        font-weight: 700;
+        border-bottom: 2px solid var(--ink);
+      }
+      .screen-tab.inert {
+        color: var(--muted);
+      }
+      .screen-sep {
+        color: var(--border-strong);
+      }
+
+      .nav-caption {
+        margin: 0.35rem 0 1.1rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.7rem;
+        letter-spacing: -0.01em;
+      }
+
+      .lede {
+        margin: 0 0 0.5rem;
+        max-width: 70ch;
+      }
+
+      .lede-note {
+        margin: 0;
+        font-size: 0.82rem;
+        color: var(--muted);
+        max-width: 70ch;
+      }
+
+      /* ---- shared panel/section chrome ---- */
+
+      section.panel,
+      section.example {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1.25rem 1.4rem 1.5rem;
+        margin-bottom: 2rem;
+        background: var(--paper);
+      }
+
+      section.panel {
+        background: var(--paper-raised);
+      }
+
+      h2 {
+        margin: 0 0 0.5rem;
+        font-size: 1.15rem;
+      }
+
+      h3 {
+        margin: 0 0 0.4rem;
+        font-size: 0.98rem;
+      }
+
+      .panel > p,
+      .section-note {
+        font-size: 0.88rem;
+        color: var(--muted);
+        max-width: 70ch;
+      }
+
+      /* ---- legend ---- */
+
+      .legend-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.7rem 1.4rem;
+        margin: 1rem 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .legend-item {
+        font-size: 0.85rem;
+      }
+
+      .legend-item p {
+        margin: 0.3rem 0 0;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .legend-note {
+        margin: 1rem 0 0;
+        padding: 0.65rem 0.85rem;
+        border-left: 3px solid var(--border-strong);
+        background: var(--paper);
+        font-size: 0.83rem;
+        max-width: 74ch;
+      }
+
+      /* ---- quick jump ---- */
+
+      .jump-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        margin: 1rem 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .jump-nav a {
+        display: inline-block;
+        font-size: 0.82rem;
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.4rem 0.75rem;
+        text-decoration: none;
+        background: var(--paper);
+      }
+      .jump-nav a:hover {
+        background: var(--paper-raised);
+      }
+
+      /* ---- example section head ---- */
+
+      .example-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.3rem;
+      }
+
+      .example-title {
+        font-size: 1.05rem;
+      }
+
+      .cli-line {
+        margin: 0.3rem 0 1rem;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .cli-line pre {
+        margin-top: 0.4rem;
+      }
+
+      .tree-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin: 0 0 1.1rem;
+      }
+
+      .tree-toggle {
+        font-family: inherit;
+        font-size: 0.78rem;
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.35rem 0.7rem;
+        background: var(--paper-raised);
+        color: var(--ink);
+        cursor: pointer;
+      }
+      .tree-toggle:hover {
+        background: var(--paper);
+      }
+
+      .depth-note {
+        font-size: 0.85rem;
+        margin: 0 0 1rem;
+        max-width: 74ch;
+      }
+
+      /* ---- badges / tags shared by every node kind ---- */
+
+      .tag {
+        display: inline-block;
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        border-radius: 999px;
+        padding: 0.06rem 0.55rem;
+        border: 1px solid currentColor;
+        font-weight: 700;
+        margin-right: 0.45em;
+        white-space: nowrap;
+      }
+      .tag-union {
+        color: var(--ink);
+      }
+      .tag-intersection {
+        color: var(--accent-intersection);
+      }
+      .tag-t2u {
+        color: var(--accent-hop);
+      }
+      .tag-relation {
+        color: var(--muted);
+      }
+      .tag-direct {
+        color: var(--ink);
+        border-style: solid;
+      }
+      .tag-userset {
+        color: var(--accent-hop);
+        border-style: dashed;
+      }
+
+      .op-glyph {
+        margin-right: 0.15em;
+      }
+
+      /* ---- tree nodes ---- */
+
+      details.node {
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        padding: 0.7rem 0.9rem 0.85rem;
+        background: var(--paper);
+        margin: 0;
+      }
+      details.node[open] > summary {
+        margin-bottom: 0.65rem;
+      }
+      details.node > summary {
+        cursor: pointer;
+        font-size: 0.92rem;
+      }
+      details.node > summary .summary-text {
+        color: var(--muted);
+        font-size: 0.86rem;
+      }
+
+      details.node-union {
+        border-color: var(--border-strong);
+        background: var(--paper);
+      }
+      details.node-intersection {
+        border-color: var(--accent-intersection);
+        background: var(--accent-intersection-bg);
+      }
+      details.node-t2u {
+        border-color: var(--accent-hop);
+        background: var(--accent-hop-bg);
+      }
+
+      .branch-list-tree {
+        list-style: none;
+        margin: 0;
+        padding: 0 0 0 1.05rem;
+        border-left: 2px solid var(--border);
+        display: grid;
+        gap: 0.7rem;
+      }
+      details.node-intersection > .branch-list-tree {
+        border-left-color: var(--accent-intersection);
+      }
+
+      .branch-label {
+        display: block;
+        font-size: 0.72rem;
+        color: var(--muted);
+        margin: 0 0 0.35rem;
+      }
+
+      .node-relation {
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 0.6rem 0.8rem 0.7rem;
+        background: var(--paper-raised);
+      }
+
+      .node-relation-head {
+        font-size: 0.9rem;
+        margin-bottom: 0.35rem;
+      }
+
+      .subject-list {
+        list-style: none;
+        margin: 0.5rem 0 0;
+        padding: 0 0 0 0.85rem;
+        border-left: 2px dashed var(--border-strong);
+        display: grid;
+        gap: 0.45rem;
+        font-size: 0.87rem;
+      }
+
+      .subject-row summary {
+        cursor: pointer;
+      }
+
+      .nested-expansion {
+        margin: 0.55rem 0 0 0.6rem;
+        padding: 0 0 0 0.85rem;
+        border-left: 2px solid var(--accent-hop);
+      }
+
+      .t2u-body {
+        display: grid;
+        gap: 0.65rem;
+      }
+      .t2u-hop {
+        border-left: 2px dashed var(--accent-hop);
+        padding-left: 0.85rem;
+      }
+      .t2u-through {
+        margin: 0 0 0.5rem;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+
+      .empty-note {
+        margin: 0;
+        font-size: 0.83rem;
+        color: var(--muted);
+      }
+
+      /* ---- outcome / cross-check callouts ---- */
+
+      .outcome-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+        margin: 1rem 0 0;
+      }
+
+      .outcome-card {
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        padding: 0.8rem 0.95rem 0.9rem;
+        background: var(--paper-raised);
+      }
+
+      .verdict-pill {
+        display: inline-block;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        border-radius: 999px;
+        padding: 0.08rem 0.6rem;
+        border: 1px solid currentColor;
+        font-weight: 700;
+      }
+      .verdict-allowed {
+        color: var(--ink);
+      }
+      .verdict-denied {
+        color: var(--muted);
+      }
+
+      .outcome-card h4 {
+        margin: 0.5rem 0 0.35rem;
+        font-size: 0.9rem;
+      }
+
+      .outcome-card p {
+        margin: 0 0 0.4rem;
+        font-size: 0.83rem;
+      }
+
+      .chain {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.3rem;
+        font-size: 0.83rem;
+        margin: 0.5rem 0;
+      }
+
+      .chain-link {
+        border: 1px solid var(--accent-hop);
+        background: var(--paper);
+        border-radius: 3px;
+        padding: 0.18rem 0.5rem;
+      }
+
+      .chain-arrow {
+        color: var(--accent-hop);
+      }
+
+      details.raw-json {
+        margin-top: 0.75rem;
+      }
+      details.raw-json summary {
+        cursor: pointer;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      details.raw-json pre {
+        margin-top: 0.5rem;
+      }
+
+      .source-cite {
+        display: block;
+        margin-top: 0.6rem;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      footer {
+        border-top: 1px solid var(--border-strong);
+        padding-top: 1rem;
+        margin-top: 2.5rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      footer p {
+        max-width: 72ch;
+      }
+
+      @media (max-width: 640px) {
+        .wrap {
+          padding: 1.25rem 0.9rem 3rem;
+        }
+        h1 {
+          font-size: 1.4rem;
+        }
+        section.panel,
+        section.example {
+          padding: 1rem;
+        }
+        .legend-grid {
+          grid-template-columns: 1fr;
+        }
+        .outcome-grid {
+          grid-template-columns: 1fr;
+        }
+        .branch-list-tree {
+          padding-left: 0.75rem;
+        }
+        .subject-list {
+          padding-left: 0.6rem;
+        }
+        .nested-expansion {
+          margin-left: 0.2rem;
+          padding-left: 0.6rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="skip-link"><a href="#main">Skip to content</a></div>
+    <div class="wrap">
+      <header class="page-header">
+        <p class="eyebrow">relationship-based-authorization · expand tree instrument panel</p>
+        <nav class="screen-nav" aria-label="Screens in this report UI">
+          <span class="screen-tab inert">Namespaces</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Tuple browser</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Check playground</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Soundness runs</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab current" aria-current="page">Expand tree</span>
+        </nav>
+        <p class="nav-caption">
+          Five screens per the design direction (build spec §8). This file renders only
+          <strong>Expand tree</strong> — the other four are separate static files in this set, not
+          linked from here.
+        </p>
+        <h1>Expand tree</h1>
+        <p class="lede">
+          The full subject tree for one <code>object#relation</code> — mirrors
+          <code>authz expand &lt;object&gt; &lt;relation&gt;</code> (build spec §7). Where the check
+          playground shows the single path one subject actually walked, this shows every route to
+          the relation at once: every union branch, every intersection requirement, every
+          tuple-to-userset hop, and every nested group membership that contributes a subject —
+          including the ones that contribute none.
+        </p>
+        <p class="lede-note">
+          Two real trees below, captured from this project's own <code>expand()</code> against the
+          seeded demo graph: <code>document:eng_handbook#edit</code> — union and tuple-to-userset,
+          with a group nested two levels deep — and
+          <code>folder:finance_docs#sensitive_review</code> — an intersection, the one shape where
+          both branches have to independently produce a member for it to matter. Per build spec §9
+          Phase 9, the first exists so the demo proves tuple-to-userset actually works, not just
+          direct grants.
+        </p>
+      </header>
+
+      <main id="main">
+        <!-- ============ legend ============ -->
+        <section class="panel" aria-labelledby="legend-heading" id="legend">
+          <h2 id="legend-heading">How to read this tree</h2>
+          <p>
+            Five things appear in the trees below. Each is marked by a text label first — color is
+            never the only signal.
+          </p>
+          <ul class="legend-grid">
+            <li class="legend-item">
+              <span class="tag tag-union"
+                ><span class="op-glyph" aria-hidden="true">∪</span>union</span
+              >
+              <p>
+                Rewrite rule <code>|</code> in the DSL (§5). Any one child branch producing a
+                subject is enough — <code>editor | owner | parent→edit</code>.
+              </p>
+            </li>
+            <li class="legend-item">
+              <span class="tag tag-intersection"
+                ><span class="op-glyph" aria-hidden="true">∩</span>intersection</span
+              >
+              <p>
+                Rewrite rule <code>&amp;</code> in the DSL (§5). Every child branch must
+                independently produce the same subject —
+                <code>(viewer | edit) &amp; sensitive_reviewer</code>.
+              </p>
+            </li>
+            <li class="legend-item">
+              <span class="tag tag-t2u">tupleToUserset</span>
+              <p>
+                Rewrite rule <code>parent-&gt;edit</code> in the DSL (§5). Follow a stored relation
+                tuple to a different object, then recurse into a permission or relation there.
+              </p>
+            </li>
+            <li class="legend-item">
+              <span class="tag tag-relation">relation</span>
+              <p>
+                A leaf lookup: which subjects actually hold this exact relation on this exact
+                object, right now, as stored tuples — either direct, or because a tuple's subject is
+                itself another object's userset.
+              </p>
+            </li>
+            <li class="legend-item">
+              <span class="tag tag-direct">direct</span>
+              <p>A plain tuple subject — <code>user:alice</code>, not a userset.</p>
+            </li>
+            <li class="legend-item">
+              <span class="tag tag-userset">userset subject</span>
+              <p>
+                Not a rewrite rule — a fact about one tuple's own subject field (<code
+                  >group:eng#member</code
+                >
+                naming another relation as the subject). This is what makes nested group membership
+                work with zero special-cased recursion (§5).
+              </p>
+            </li>
+          </ul>
+          <p class="legend-note">
+            Exclusion (<code>a - b</code>, e.g. <code>org.view = member - banned</code>) does not
+            appear in either tree on this screen — neither
+            <code>document:eng_handbook#edit</code> nor
+            <code>folder:finance_docs#sensitive_review</code> is built from one. The demo's one real
+            exclusion case is the Check playground screen's
+            <code>user:mallory view org:acme</code> result (denied: banned overrides membership).
+            Rather than fabricate an exclusion node here, this page shows honestly that neither
+            captured tree exercises one.
+          </p>
+          <ul class="jump-nav">
+            <li><a href="#example-union">Jump to: union + tuple-to-userset example</a></li>
+            <li><a href="#example-intersection">Jump to: intersection example</a></li>
+          </ul>
+        </section>
+
+        <!-- ============ example 1: document:eng_handbook#edit ============ -->
+        <section class="example" aria-labelledby="example-union-heading" id="example-union">
+          <div class="example-head">
+            <h2 id="example-union-heading" class="example-title">
+              <code>document:eng_handbook#edit</code>
+            </h2>
+            <span class="tag tag-union"
+              ><span class="op-glyph" aria-hidden="true">∪</span>union</span
+            >
+            <span class="tag tag-t2u">tupleToUserset</span>
+          </div>
+          <p class="cli-line">
+            <code>authz expand document:eng_handbook edit</code>
+          </p>
+          <p class="depth-note">
+            <code>user:dana</code>'s only route into this permission runs through two levels of
+            group nesting — <code>group:eng_backend_interns</code> nested inside
+            <code>group:eng_backend</code>, nested inside <code>group:eng</code> — reached after one
+            tuple-to-userset hop from <code>document:eng_handbook</code> into its parent,
+            <code>folder:eng_docs</code>. Every node below is open by default so that depth is
+            visible immediately, not hidden behind a click.
+          </p>
+
+          <div class="tree-controls">
+            <button
+              type="button"
+              class="tree-toggle"
+              data-scope="tree-example-union"
+              data-action="collapse"
+            >
+              Collapse all nodes
+            </button>
+            <button
+              type="button"
+              class="tree-toggle"
+              data-scope="tree-example-union"
+              data-action="expand"
+            >
+              Expand all nodes
+            </button>
+          </div>
+
+          <div class="tree-container" id="tree-example-union">
+            <!-- root: union (document.edit = editor | owner | parent->edit) -->
+            <details class="node node-union" open>
+              <summary>
+                <span class="tag tag-union"
+                  ><span class="op-glyph" aria-hidden="true">∪</span>union</span
+                >
+                <span class="summary-text"
+                  >any one branch below grants <code>edit</code> on
+                  <code>document:eng_handbook</code></span
+                >
+              </summary>
+              <ol class="branch-list-tree">
+                <li>
+                  <span class="branch-label">branch 1 of 3</span>
+                  <div class="node-relation">
+                    <p class="node-relation-head">
+                      <span class="tag tag-relation">relation</span>
+                      <code>editor</code> on <code>document:eng_handbook</code>
+                    </p>
+                    <p class="empty-note">
+                      No <code>document:eng_handbook#editor</code> tuples exist. This branch
+                      contributes no subjects.
+                    </p>
+                  </div>
+                </li>
+                <li>
+                  <span class="branch-label">branch 2 of 3</span>
+                  <div class="node-relation">
+                    <p class="node-relation-head">
+                      <span class="tag tag-relation">relation</span>
+                      <code>owner</code> on <code>document:eng_handbook</code>
+                    </p>
+                    <p class="empty-note">
+                      No <code>document:eng_handbook#owner</code> tuples exist. This branch
+                      contributes no subjects.
+                    </p>
+                  </div>
+                </li>
+                <li>
+                  <span class="branch-label">branch 3 of 3</span>
+                  <!-- tupleToUserset: parent -> edit -->
+                  <details class="node node-t2u" open>
+                    <summary>
+                      <span class="tag tag-t2u">tupleToUserset</span>
+                      <span class="summary-text"
+                        >follow <code>parent</code> on <code>document:eng_handbook</code>, recurse
+                        into <code>edit</code> on whatever it points to</span
+                      >
+                    </summary>
+                    <div class="t2u-body">
+                      <div class="t2u-hop">
+                        <p class="t2u-through">through <code>folder:eng_docs</code>:</p>
+
+                        <!-- nested: union (folder.edit = editor | owner | parent->edit) -->
+                        <details class="node node-union" open>
+                          <summary>
+                            <span class="tag tag-union"
+                              ><span class="op-glyph" aria-hidden="true">∪</span>union</span
+                            >
+                            <span class="summary-text"
+                              >any one branch below grants <code>edit</code> on
+                              <code>folder:eng_docs</code></span
+                            >
+                          </summary>
+                          <ol class="branch-list-tree">
+                            <li>
+                              <span class="branch-label">branch 1 of 3</span>
+                              <div class="node-relation">
+                                <p class="node-relation-head">
+                                  <span class="tag tag-relation">relation</span>
+                                  <code>editor</code> on <code>folder:eng_docs</code>
+                                </p>
+                                <ul class="subject-list">
+                                  <li class="subject-row subject-userset">
+                                    <details open>
+                                      <summary>
+                                        <span class="tag tag-userset">userset subject</span>
+                                        <code>group:eng#member</code>
+                                        <span class="summary-text"
+                                          >— recurse into <code>member</code> on
+                                          <code>group:eng</code></span
+                                        >
+                                      </summary>
+                                      <div class="nested-expansion">
+                                        <div class="node-relation">
+                                          <p class="node-relation-head">
+                                            <span class="tag tag-relation">relation</span>
+                                            <code>member</code> on <code>group:eng</code>
+                                          </p>
+                                          <ul class="subject-list">
+                                            <li class="subject-row subject-direct">
+                                              <span class="tag tag-direct">direct</span>
+                                              <code>user:alice</code>
+                                            </li>
+                                            <li class="subject-row subject-userset">
+                                              <details open>
+                                                <summary>
+                                                  <span class="tag tag-userset"
+                                                    >userset subject</span
+                                                  >
+                                                  <code>group:eng_backend#member</code>
+                                                  <span class="summary-text"
+                                                    >— recurse into <code>member</code> on
+                                                    <code>group:eng_backend</code></span
+                                                  >
+                                                </summary>
+                                                <div class="nested-expansion">
+                                                  <div class="node-relation">
+                                                    <p class="node-relation-head">
+                                                      <span class="tag tag-relation">relation</span>
+                                                      <code>member</code> on
+                                                      <code>group:eng_backend</code>
+                                                    </p>
+                                                    <p class="empty-note">
+                                                      No direct <code>user</code> tuples on
+                                                      <code>group:eng_backend#member</code> — its
+                                                      only member is another userset, below.
+                                                    </p>
+                                                    <ul class="subject-list">
+                                                      <li class="subject-row subject-userset">
+                                                        <details open>
+                                                          <summary>
+                                                            <span class="tag tag-userset"
+                                                              >userset subject</span
+                                                            >
+                                                            <code
+                                                              >group:eng_backend_interns#member</code
+                                                            >
+                                                            <span class="summary-text"
+                                                              >— recurse into <code>member</code> on
+                                                              <code
+                                                                >group:eng_backend_interns</code
+                                                              ></span
+                                                            >
+                                                          </summary>
+                                                          <div class="nested-expansion">
+                                                            <div class="node-relation">
+                                                              <p class="node-relation-head">
+                                                                <span class="tag tag-relation"
+                                                                  >relation</span
+                                                                >
+                                                                <code>member</code> on
+                                                                <code
+                                                                  >group:eng_backend_interns</code
+                                                                >
+                                                              </p>
+                                                              <ul class="subject-list">
+                                                                <li
+                                                                  class="subject-row subject-direct"
+                                                                >
+                                                                  <span class="tag tag-direct"
+                                                                    >direct</span
+                                                                  >
+                                                                  <code>user:dana</code>
+                                                                </li>
+                                                              </ul>
+                                                            </div>
+                                                          </div>
+                                                        </details>
+                                                      </li>
+                                                    </ul>
+                                                  </div>
+                                                </div>
+                                              </details>
+                                            </li>
+                                          </ul>
+                                        </div>
+                                      </div>
+                                    </details>
+                                  </li>
+                                </ul>
+                              </div>
+                            </li>
+                            <li>
+                              <span class="branch-label">branch 2 of 3</span>
+                              <div class="node-relation">
+                                <p class="node-relation-head">
+                                  <span class="tag tag-relation">relation</span>
+                                  <code>owner</code> on <code>folder:eng_docs</code>
+                                </p>
+                                <p class="empty-note">
+                                  No <code>folder:eng_docs#owner</code> tuples exist. This branch
+                                  contributes no subjects.
+                                </p>
+                              </div>
+                            </li>
+                            <li>
+                              <span class="branch-label">branch 3 of 3</span>
+                              <details class="node node-t2u" open>
+                                <summary>
+                                  <span class="tag tag-t2u">tupleToUserset</span>
+                                  <span class="summary-text"
+                                    >follow <code>parent</code> on <code>folder:eng_docs</code>,
+                                    recurse into <code>edit</code> on whatever it points to</span
+                                  >
+                                </summary>
+                                <p class="empty-note">
+                                  No <code>folder:eng_docs#parent</code> tuple exists. There is
+                                  nothing to follow — this branch contributes no subjects.
+                                </p>
+                              </details>
+                            </li>
+                          </ol>
+                        </details>
+                      </div>
+                    </div>
+                  </details>
+                </li>
+              </ol>
+            </details>
+          </div>
+
+          <details class="raw-json">
+            <summary>Raw <code>authz expand</code> output — plain-text tree</summary>
+            <pre><code>document:eng_handbook#edit:
+  union
+    relation editor on document:eng_handbook
+    relation owner on document:eng_handbook
+    parent->edit
+      through folder:eng_docs:
+        union
+          relation editor on folder:eng_docs
+            group:eng#member
+              relation member on group:eng
+                user:alice
+                group:eng_backend#member
+                  relation member on group:eng_backend
+                    group:eng_backend_interns#member
+                      relation member on group:eng_backend_interns
+                        user:dana
+          relation owner on folder:eng_docs
+          parent->edit</code></pre>
+          </details>
+
+          <details class="raw-json">
+            <summary>Raw <code>authz expand</code> output — JSON</summary>
+            <pre><code>{
+  "object": { "ns": "document", "id": "eng_handbook" },
+  "relation": "edit",
+  "tree": {
+    "kind": "union",
+    "object": { "ns": "document", "id": "eng_handbook" },
+    "children": [
+      {
+        "kind": "relation",
+        "object": { "ns": "document", "id": "eng_handbook" },
+        "relation": "editor",
+        "directSubjects": [],
+        "usersets": []
+      },
+      {
+        "kind": "relation",
+        "object": { "ns": "document", "id": "eng_handbook" },
+        "relation": "owner",
+        "directSubjects": [],
+        "usersets": []
+      },
+      {
+        "kind": "tupleToUserset",
+        "object": { "ns": "document", "id": "eng_handbook" },
+        "relation": "parent",
+        "computedUserset": "edit",
+        "children": [
+          {
+            "through": { "ns": "folder", "id": "eng_docs" },
+            "expansion": {
+              "kind": "union",
+              "object": { "ns": "folder", "id": "eng_docs" },
+              "children": [
+                {
+                  "kind": "relation",
+                  "object": { "ns": "folder", "id": "eng_docs" },
+                  "relation": "editor",
+                  "directSubjects": [],
+                  "usersets": [
+                    {
+                      "userset": { "ns": "group", "id": "eng" },
+                      "relation": "member",
+                      "expansion": {
+                        "kind": "relation",
+                        "object": { "ns": "group", "id": "eng" },
+                        "relation": "member",
+                        "directSubjects": [{ "ns": "user", "id": "alice" }],
+                        "usersets": [
+                          {
+                            "userset": { "ns": "group", "id": "eng_backend" },
+                            "relation": "member",
+                            "expansion": {
+                              "kind": "relation",
+                              "object": { "ns": "group", "id": "eng_backend" },
+                              "relation": "member",
+                              "directSubjects": [],
+                              "usersets": [
+                                {
+                                  "userset": { "ns": "group", "id": "eng_backend_interns" },
+                                  "relation": "member",
+                                  "expansion": {
+                                    "kind": "relation",
+                                    "object": { "ns": "group", "id": "eng_backend_interns" },
+                                    "relation": "member",
+                                    "directSubjects": [{ "ns": "user", "id": "dana" }],
+                                    "usersets": []
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "kind": "relation",
+                  "object": { "ns": "folder", "id": "eng_docs" },
+                  "relation": "owner",
+                  "directSubjects": [],
+                  "usersets": []
+                },
+                {
+                  "kind": "tupleToUserset",
+                  "object": { "ns": "folder", "id": "eng_docs" },
+                  "relation": "parent",
+                  "computedUserset": "edit",
+                  "children": []
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}</code></pre>
+          </details>
+
+          <p class="source-cite">
+            .captures/expand-eng_handbook-edit.json, .captures/expand-eng_handbook-edit.txt
+          </p>
+        </section>
+
+        <!-- ============ example 2: folder:finance_docs#sensitive_review ============ -->
+        <section
+          class="example"
+          aria-labelledby="example-intersection-heading"
+          id="example-intersection"
+        >
+          <div class="example-head">
+            <h2 id="example-intersection-heading" class="example-title">
+              <code>folder:finance_docs#sensitive_review</code>
+            </h2>
+            <span class="tag tag-intersection"
+              ><span class="op-glyph" aria-hidden="true">∩</span>intersection</span
+            >
+          </div>
+          <p class="cli-line">
+            <code>authz expand folder:finance_docs sensitive_review</code>
+          </p>
+          <p class="depth-note">
+            Compiled from <code>sensitive_review = (viewer | edit) &amp; sensitive_reviewer</code>
+            (<code>.captures/compiled-schema.json</code>). Both branches below have to independently
+            produce the same subject for the intersection to grant anything — being an ordinary
+            viewer of this folder is necessary but not sufficient.
+          </p>
+
+          <div class="tree-controls">
+            <button
+              type="button"
+              class="tree-toggle"
+              data-scope="tree-example-intersection"
+              data-action="collapse"
+            >
+              Collapse all nodes
+            </button>
+            <button
+              type="button"
+              class="tree-toggle"
+              data-scope="tree-example-intersection"
+              data-action="expand"
+            >
+              Expand all nodes
+            </button>
+          </div>
+
+          <div class="tree-container" id="tree-example-intersection">
+            <!-- root: intersection -->
+            <details class="node node-intersection" open>
+              <summary>
+                <span class="tag tag-intersection"
+                  ><span class="op-glyph" aria-hidden="true">∩</span>intersection</span
+                >
+                <span class="summary-text"
+                  >both branches below must independently produce a subject for
+                  <code>sensitive_review</code> on <code>folder:finance_docs</code></span
+                >
+              </summary>
+              <ol class="branch-list-tree">
+                <li>
+                  <span class="branch-label">branch 1 of 2 (required) — (viewer | edit)</span>
+                  <details class="node node-union" open>
+                    <summary>
+                      <span class="tag tag-union"
+                        ><span class="op-glyph" aria-hidden="true">∪</span>union</span
+                      >
+                      <span class="summary-text"
+                        >either branch below satisfies this side of the intersection</span
+                      >
+                    </summary>
+                    <ol class="branch-list-tree">
+                      <li>
+                        <span class="branch-label">branch 1 of 2</span>
+                        <div class="node-relation">
+                          <p class="node-relation-head">
+                            <span class="tag tag-relation">relation</span>
+                            <code>viewer</code> on <code>folder:finance_docs</code>
+                          </p>
+                          <ul class="subject-list">
+                            <li class="subject-row subject-userset">
+                              <details open>
+                                <summary>
+                                  <span class="tag tag-userset">userset subject</span>
+                                  <code>group:finance#member</code>
+                                  <span class="summary-text"
+                                    >— recurse into <code>member</code> on
+                                    <code>group:finance</code></span
+                                  >
+                                </summary>
+                                <div class="nested-expansion">
+                                  <div class="node-relation">
+                                    <p class="node-relation-head">
+                                      <span class="tag tag-relation">relation</span>
+                                      <code>member</code> on <code>group:finance</code>
+                                    </p>
+                                    <ul class="subject-list">
+                                      <li class="subject-row subject-direct">
+                                        <span class="tag tag-direct">direct</span>
+                                        <code>user:carol</code>
+                                      </li>
+                                      <li class="subject-row subject-direct">
+                                        <span class="tag tag-direct">direct</span>
+                                        <code>user:erin</code>
+                                      </li>
+                                    </ul>
+                                  </div>
+                                </div>
+                              </details>
+                            </li>
+                          </ul>
+                        </div>
+                      </li>
+                      <li>
+                        <span class="branch-label"
+                          >branch 2 of 2 — edit (editor | owner | parent→edit)</span
+                        >
+                        <details class="node node-union" open>
+                          <summary>
+                            <span class="tag tag-union"
+                              ><span class="op-glyph" aria-hidden="true">∪</span>union</span
+                            >
+                            <span class="summary-text"
+                              >any one branch below grants <code>edit</code> on
+                              <code>folder:finance_docs</code></span
+                            >
+                          </summary>
+                          <ol class="branch-list-tree">
+                            <li>
+                              <span class="branch-label">branch 1 of 3</span>
+                              <div class="node-relation">
+                                <p class="node-relation-head">
+                                  <span class="tag tag-relation">relation</span>
+                                  <code>editor</code> on <code>folder:finance_docs</code>
+                                </p>
+                                <p class="empty-note">
+                                  No <code>folder:finance_docs#editor</code> tuples exist. This
+                                  branch contributes no subjects.
+                                </p>
+                              </div>
+                            </li>
+                            <li>
+                              <span class="branch-label">branch 2 of 3</span>
+                              <div class="node-relation">
+                                <p class="node-relation-head">
+                                  <span class="tag tag-relation">relation</span>
+                                  <code>owner</code> on <code>folder:finance_docs</code>
+                                </p>
+                                <p class="empty-note">
+                                  No <code>folder:finance_docs#owner</code> tuples exist. This
+                                  branch contributes no subjects.
+                                </p>
+                              </div>
+                            </li>
+                            <li>
+                              <span class="branch-label">branch 3 of 3</span>
+                              <details class="node node-t2u" open>
+                                <summary>
+                                  <span class="tag tag-t2u">tupleToUserset</span>
+                                  <span class="summary-text"
+                                    >follow <code>parent</code> on <code>folder:finance_docs</code>,
+                                    recurse into <code>edit</code> on whatever it points to</span
+                                  >
+                                </summary>
+                                <p class="empty-note">
+                                  No <code>folder:finance_docs#parent</code> tuple exists. There is
+                                  nothing to follow — this branch contributes no subjects.
+                                </p>
+                              </details>
+                            </li>
+                          </ol>
+                        </details>
+                      </li>
+                    </ol>
+                  </details>
+                </li>
+                <li>
+                  <span class="branch-label">branch 2 of 2 (required)</span>
+                  <div class="node-relation">
+                    <p class="node-relation-head">
+                      <span class="tag tag-relation">relation</span>
+                      <code>sensitive_reviewer</code> on <code>folder:finance_docs</code>
+                    </p>
+                    <ul class="subject-list">
+                      <li class="subject-row subject-direct">
+                        <span class="tag tag-direct">direct</span>
+                        <code>user:carol</code>
+                      </li>
+                    </ul>
+                  </div>
+                </li>
+              </ol>
+            </details>
+          </div>
+
+          <details class="raw-json">
+            <summary>Raw <code>authz expand</code> output — plain-text tree</summary>
+            <pre><code>folder:finance_docs#sensitive_review:
+  intersection (all required)
+    union
+      relation viewer on folder:finance_docs
+        group:finance#member
+          relation member on group:finance
+            user:carol
+            user:erin
+      union
+        relation editor on folder:finance_docs
+        relation owner on folder:finance_docs
+        parent->edit
+    relation sensitive_reviewer on folder:finance_docs
+      user:carol</code></pre>
+          </details>
+
+          <p class="section-note" style="margin-top: 1.5rem">
+            Reading the tree above against two real checks against this same object and relation:
+            <code>carol</code> appears as a direct subject in <strong>both</strong> required
+            branches — <code>group:finance#member</code> (via branch 1) and
+            <code>sensitive_reviewer</code> directly (branch 2) — so the intersection resolves
+            <code>allowed</code> for her. <code>erin</code> appears only in branch 1
+            (<code>group:finance#member</code>); she holds no <code>sensitive_reviewer</code> tuple
+            on <code>folder:finance_docs</code>, so branch 2 produces nothing for her and the
+            intersection resolves <code>denied</code> — the two-people, one-tree case the DSL note
+            in <code>schema/example.authz</code> names directly: "two people can both be ordinary
+            viewers of the same folder and get different answers to this one permission."
+          </p>
+
+          <div class="outcome-grid">
+            <div class="outcome-card">
+              <span class="verdict-pill verdict-allowed">allowed</span>
+              <h4><code>user:carol sensitive_review folder:finance_docs</code></h4>
+              <p>In both required branches — the intersection nets to <code>allowed</code>.</p>
+              <div class="chain" role="group" aria-label="resolution path">
+                <span class="chain-link">user:carol</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">group:finance#member</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">folder:finance_docs#viewer</span>
+                <span class="chain-arrow" aria-hidden="true">∩</span>
+                <span class="chain-link">folder:finance_docs#sensitive_reviewer</span>
+                <span class="chain-arrow" aria-hidden="true">→</span>
+                <span class="chain-link">folder:finance_docs#sensitive_review</span>
+              </div>
+              <details class="raw-json">
+                <summary>Raw <code>POST /check</code> response</summary>
+                <pre><code>{
+  "allowed": true,
+  "subject": { "ns": "user", "id": "carol" },
+  "relation": "sensitive_review",
+  "object": { "ns": "folder", "id": "finance_docs" },
+  "depth": 1,
+  "path": {
+    "kind": "intersection",
+    "object": { "ns": "folder", "id": "finance_docs" },
+    "branches": [
+      {
+        "kind": "union",
+        "object": { "ns": "folder", "id": "finance_docs" },
+        "branchIndex": 0,
+        "branch": {
+          "kind": "usersetMembership",
+          "object": { "ns": "folder", "id": "finance_docs" },
+          "relation": "viewer",
+          "userset": { "ns": "group", "id": "finance" },
+          "usersetRelation": "member",
+          "member": {
+            "kind": "directGrant",
+            "object": { "ns": "group", "id": "finance" },
+            "relation": "member",
+            "subject": { "ns": "user", "id": "carol" }
+          }
+        }
+      },
+      {
+        "kind": "directGrant",
+        "object": { "ns": "folder", "id": "finance_docs" },
+        "relation": "sensitive_reviewer",
+        "subject": { "ns": "user", "id": "carol" }
+      }
+    ]
+  }
+}</code></pre>
+              </details>
+              <p class="source-cite">.captures/check-carol-sensitive_review-allowed.json</p>
+            </div>
+            <div class="outcome-card">
+              <span class="verdict-pill verdict-denied">denied</span>
+              <h4><code>user:erin sensitive_review folder:finance_docs</code></h4>
+              <p>
+                In branch 1 only — no resolution path is produced for a denial (§6.7:
+                <code>resolution_path</code> is populated only when <code>allowed</code> is
+                <code>true</code>).
+              </p>
+              <details class="raw-json">
+                <summary>Raw <code>POST /check</code> response</summary>
+                <pre><code>{
+  "allowed": false,
+  "subject": { "ns": "user", "id": "erin" },
+  "relation": "sensitive_review",
+  "object": { "ns": "folder", "id": "finance_docs" },
+  "depth": 1
+}</code></pre>
+              </details>
+              <p class="source-cite">.captures/check-erin-sensitive_review-denied.json</p>
+            </div>
+          </div>
+
+          <p class="source-cite">
+            .captures/expand-finance_docs-sensitive_review.json,
+            .captures/expand-finance_docs-sensitive_review.txt, .captures/compiled-schema.json,
+            schema/example.authz
+          </p>
+        </section>
+      </main>
+
+      <footer>
+        <p>
+          Source of every fact on this page: <code>.captures/expand-eng_handbook-edit.json</code>,
+          <code>.captures/expand-eng_handbook-edit.txt</code>,
+          <code>.captures/expand-finance_docs-sensitive_review.json</code>,
+          <code>.captures/expand-finance_docs-sensitive_review.txt</code>,
+          <code>.captures/check-carol-sensitive_review-allowed.json</code>,
+          <code>.captures/check-erin-sensitive_review-denied.json</code>,
+          <code>.captures/compiled-schema.json</code>, and <code>schema/example.authz</code> — real
+          output captured from this project's own CLI/API against the seeded demo graph. This is a
+          static mockup: no build step, no external requests, no live requests of its own. The
+          "Collapse all nodes" / "Expand all nodes" controls above each tree operate purely on the
+          markup already in this file.
+        </p>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        var buttons = document.querySelectorAll('.tree-toggle');
+        buttons.forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var scopeId = btn.getAttribute('data-scope');
+            var scope = document.getElementById(scopeId);
+            if (!scope) return;
+            var open = btn.getAttribute('data-action') === 'expand';
+            var nodes = scope.querySelectorAll('details');
+            nodes.forEach(function (node) {
+              node.open = open;
+            });
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>
