@@ -248,3 +248,103 @@ publish <file>` commands (§7) — Phase 1 built the DSL layer only; wiring
 it to the CLI is still open, deferred to whichever later phase first
 needs it from the command line (likely Phase 2, once there's a
 `namespace_configs` table to publish into).
+
+## Phase 2 — Tuple store
+
+**Owner:** main agent (tuple store is explicitly main-agent territory per
+`.claude/commands/build-authz-service.md` §14's delegation table). Test
+suite delegated to `test-author`, reviewed and independently re-verified
+by the main agent before accepting.
+
+**Files touched:**
+
+- `src/store/migrations/0001_relation_tuples_and_write_log.sql`,
+  `0002_namespace_configs.sql` — §4's tables, with two real deviations from
+  the literal SQL given (see `docs/DECISIONS.md` D-014, D-015). `checks`
+  and `soundness_runs` stay deferred to Phase 5/6 (D-016).
+- `src/schema/publish.ts` (new) — `publishSchema`/`getLatestNamespaceConfig`,
+  the one place a schema file actually reaches Postgres.
+- `src/store/tuples.ts` (new) — `writeTuple`/`deleteTuple`/
+  `listTuplesByObject`/`listTuplesBySubject`. Writes validate against the
+  latest published namespace config (relation must exist, must be a
+  relation and not a permission, subject type must be declared); deletes
+  deliberately don't (D-017).
+- `src/store/tokens.ts` (new) — `currentToken`/`assertTokenObserved`, the
+  concrete mechanism behind §6.3's consistency-token pin.
+- `src/cli/commands/{schema,tuple}.ts` (new), `src/cli/index.ts` (wired) —
+  `authz schema compile/publish`, `authz tuple write/delete` per §7.
+
+**Main-agent verification against a real local Postgres, not by
+inspection:** every rejection path (undeclared relation, permission-as-
+relation, disallowed subject type, malformed identifier, unpublished
+namespace), idempotent write/delete with strictly increasing tokens, and
+the full CLI surface — all run for real before committing. Also verified
+directly (not just documented from the spec): the NULL-safe unique index
+actually de-duplicates a plain-subject tuple written twice, the `token`
+generated column actually mirrors `id`, and `ON CONFLICT` against the
+expression index actually works.
+
+**`test-author`'s delegation — a real bug found:** `write_log.token` and
+`relation_tuples.id` are Postgres `bigint`, which `pg` returns as a
+string, never coerced to `number` on its own. `assertTokenObserved`'s
+plain `token > observed` comparison was therefore comparing strings, not
+numbers — silently correct whenever both tokens have the same digit
+count, and silently **wrong** the moment they don't: a token that was
+genuinely already observed could be rejected as unobserved once the
+write counter crossed a digit boundary (9→10, 99→100, ...). Found and
+deterministically reproduced (not a flaky "wait for a digit boundary"
+test) in `test/unit/store/tuple-store.integration.test.ts`. Fixed by the
+main agent (test-author correctly left it unfixed, per its own
+instructions, so the finding stayed visible rather than papered over):
+explicit `Number(...)` coercion at every bigint-column read site, not a
+global `pg.types.setTypeParser` registration — see `docs/DECISIONS.md`
+D-018 for why the explicit form was chosen over the implicit one.
+
+**Test suite:** `test/unit/store/tuple-store.integration.test.ts` (14
+tests, real Postgres, `npm run test:integration`) plus three `test/
+isolation/identifier-and-tuple-validation.fuzz.test.ts` `.todo()`s
+un-skipped in the fast suite (proven DB-free via an intentionally
+unreachable pool). Every test fail-checked by the delegating agent
+(mutate the real code, confirm red, restore) except the two
+"unreachable database fails rather than passes" tests, which have no
+plausible mutation to fail-check against — validated by construction
+instead (a real `ECONNREFUSED` is unambiguous).
+
+**Final state, after the bigint fix:** `npm test` — 27 passed, 15
+`.todo()`. `npm run test:integration` — 14 passed, 15 `.todo()` (the
+remaining 15 are all in `permission-resolution.integration.test.ts`,
+correctly still open — Phase 3/4 territory), verified against the local
+Postgres dev fixture before a second, real problem was found and fixed
+(see next paragraph). Lint/typecheck/format all clean. Local dev database
+left truncated and empty.
+
+**A second real problem, caught before it reached a PR:** as originally
+delegated, `tuple-store.integration.test.ts` hardcoded this session's own
+local dev Postgres connection string. That's exactly the fast, real-DB
+loop the whole phase was developed against — but `.github/workflows/
+ci.yml`'s `test-integration` job provisions no Postgres of its own; the
+job's own comment says the intended mechanism is a container the suite
+starts itself. Left as delegated, this suite would have failed every test
+with `ECONNREFUSED` on the first real CI run. Rewritten to start its own
+`PostgreSqlContainer` (`@testcontainers/postgresql`) and apply migrations
+via `runMigrations`, matching the pattern `vitest.integration.config.ts`
+already anticipated — see `docs/DECISIONS.md` D-019. Could not be run to
+completion in this session's own sandbox either (the same network policy
+blocking a direct Railway connection, D-010, also blocks this sandbox's
+Docker daemon from pulling images) — verified by typecheck, by matching
+an established working pattern exactly, and by watching real GitHub
+Actions CI on the opened PR, not by a local pass in this environment.
+
+**Exit criteria met (build spec §9 Phase 2 — no formal CHECKPOINT for
+this phase, but reported before starting Phase 3, which has one):**
+writing and reading round-trip; a write returns a strictly increasing
+token, now actually verified as a real `number` end to end; deleting a
+tuple is immediately invisible to a read pinned to a post-delete token.
+
+**Open question carried forward, unchanged from Phase 0/1:** Phase 3+'s
+own reference/production resolvers will want the same kind of real-
+Postgres verification this phase got — this session's own shell still
+can't reach Railway's `DATABASE_URL` directly (network-policy-restricted,
+see D-010), but the local Postgres dev fixture used throughout Phase 2
+remains available and is what later phases should keep using for
+interactive verification in this environment.
