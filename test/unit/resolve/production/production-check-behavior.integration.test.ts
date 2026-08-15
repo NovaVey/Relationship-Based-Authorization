@@ -9,30 +9,34 @@
  * `src/resolve/production/resolver.ts` (read as an interface only, per this
  * task's constraint — not the function body).
  *
- * Runs against the real local Postgres instance provided for this task,
- * same connection convention as `cross-resolver-agreement.integration
- * .test.ts` in this directory — see that file's own header for why this
- * departs from `test/unit/store/tuple-store.integration.test.ts`'s
- * `testcontainers` pattern.
+ * Runs against a real, ephemeral Postgres container, same convention as
+ * `cross-resolver-agreement.integration.test.ts` in this directory — see
+ * that file's own header and `docs/DECISIONS.md` D-019 for why.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import { writeTuple, deleteTuple, type TupleKey } from '../../../../src/store/tuples.js';
 import { currentToken } from '../../../../src/store/tokens.js';
 import { publishSchema } from '../../../../src/schema/publish.js';
 import { productionCheck } from '../../../../src/resolve/production/resolver.js';
+import { runMigrations } from '../../../../src/store/migrate.js';
 
-const CONNECTION_STRING = 'postgres://authz:authz_dev_password@127.0.0.1:5432/authz_dev';
+const MIGRATIONS_DIR = new URL('../../../../src/store/migrations', import.meta.url).pathname;
 
+let container: StartedPostgreSqlContainer;
 let pool: Pool;
 
-beforeAll(() => {
-  pool = new Pool({ connectionString: CONNECTION_STRING });
-});
+beforeAll(async () => {
+  container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  pool = new Pool({ connectionString: container.getConnectionUri() });
+  await runMigrations(pool, MIGRATIONS_DIR);
+}, 120_000);
 
 afterAll(async () => {
   await pool.end();
+  await container.stop();
 });
 
 let uniqueCounter = 0;

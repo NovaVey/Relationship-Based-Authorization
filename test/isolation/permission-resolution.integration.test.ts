@@ -24,39 +24,44 @@
  * rule: "a `.todo()` staying red past its phase's exit criteria is a sign
  * the phase isn't actually done."
  *
- * Setup deviates from the plan sketched in the original `.todo()`-only
- * version of this file (a fresh `PostgreSqlContainer` per run, `@test
- * containers/postgresql`, matching `test/unit/store/tuple-store.integration
- * .test.ts`): this suite was told explicitly to run against the real local
- * Postgres instance already provisioned for this task
- * (`postgres://authz:...@127.0.0.1:5432/authz_dev`, migrations already
- * applied) rather than starting a fresh container or touching `.env`/
- * Railway. The "seeded as an admin connection" plan this file's own
- * original comment anticipated still holds — every fixture below writes
- * its tuples through the same `writeTuple`/`deleteTuple` any caller would
- * use, on a plain `Pool` pointed at that database, with no special
- * privilege. Every fixture uses a `uniqueName`-generated namespace/object/
- * subject id (matching `tuple-store.integration.test.ts`'s own convention)
- * so tests are safe to run in any order against a database that is never
- * truncated between them.
+ * Setup matches the plan sketched in the original `.todo()`-only version
+ * of this file: a fresh `PostgreSqlContainer` per run (`@testcontainers/
+ * postgresql`, already a devDependency), migrations applied via this
+ * project's own `runMigrations` — the same mechanism `test/unit/store/
+ * tuple-store.integration.test.ts` uses (see `docs/DECISIONS.md` D-019 for
+ * why a hardcoded local connection string doesn't work in CI). The "seeded
+ * as an admin connection" plan this file's own original comment
+ * anticipated still holds — every fixture below writes its tuples through
+ * the same `writeTuple`/`deleteTuple` any caller would use, on a plain
+ * `Pool` pointed at the container, with no special privilege. Every
+ * fixture uses a `uniqueName`-generated namespace/object/subject id
+ * (matching `tuple-store.integration.test.ts`'s own convention) so tests
+ * are safe to run in any order against a database that is never truncated
+ * between them.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import { writeTuple, deleteTuple, type TupleKey } from '../../src/store/tuples.js';
 import { publishSchema } from '../../src/schema/publish.js';
 import { productionCheck } from '../../src/resolve/production/resolver.js';
+import { runMigrations } from '../../src/store/migrate.js';
 
-const CONNECTION_STRING = 'postgres://authz:authz_dev_password@127.0.0.1:5432/authz_dev';
+const MIGRATIONS_DIR = new URL('../../src/store/migrations', import.meta.url).pathname;
 
+let container: StartedPostgreSqlContainer;
 let pool: Pool;
 
-beforeAll(() => {
-  pool = new Pool({ connectionString: CONNECTION_STRING });
-});
+beforeAll(async () => {
+  container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  pool = new Pool({ connectionString: container.getConnectionUri() });
+  await runMigrations(pool, MIGRATIONS_DIR);
+}, 120_000);
 
 afterAll(async () => {
   await pool.end();
+  await container.stop();
 });
 
 let uniqueCounter = 0;

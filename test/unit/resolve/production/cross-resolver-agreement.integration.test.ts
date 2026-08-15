@@ -24,18 +24,23 @@
  * directly attached to them) — never their private helpers, SQL bodies, or
  * recursion structure.
  *
- * Runs against the real local Postgres instance provided for this task
- * (`postgres://authz:...@127.0.0.1:5432/authz_dev`, migrations already
- * applied) rather than spinning up a `testcontainers` instance the way
- * `test/unit/store/tuple-store.integration.test.ts` does — this file was
- * told explicitly to use that database directly, not to touch `.env` or
- * start a fresh container. The shared-database, no-truncation-between-tests
- * discipline that file established still applies: every fixture uses a
- * `uniqueName`-generated namespace/object/subject so tests are safe in any
- * order and never see another test's tuples.
+ * Runs against a real, ephemeral Postgres container (`@testcontainers/
+ * postgresql`, already a devDependency), with the Phase 2 migrations
+ * applied via this project's own `runMigrations` — the same mechanism
+ * `test/unit/store/tuple-store.integration.test.ts` uses (see
+ * `docs/DECISIONS.md` D-019 for why: a connection string hardcoded to any
+ * one development sandbox's own local Postgres doesn't exist in
+ * `.github/workflows/ci.yml`'s `test-integration` job, which provisions no
+ * Postgres of its own and expects the suite to start one itself).
+ * `ubuntu-latest` GitHub Actions runners have Docker preinstalled, so this
+ * needs no extra CI setup. The shared-database, no-truncation-between-tests
+ * discipline `tuple-store.integration.test.ts` established still applies:
+ * every fixture uses a `uniqueName`-generated namespace/object/subject so
+ * tests are safe in any order and never see another test's tuples.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import { writeTuple, type TupleKey } from '../../../../src/store/tuples.js';
 import { publishSchema } from '../../../../src/schema/publish.js';
@@ -44,17 +49,22 @@ import { formatSchemaError } from '../../../../src/schema/dsl/errors.js';
 import type { CompiledSchema } from '../../../../src/schema/dsl/types.js';
 import { referenceCheck } from '../../../../src/resolve/reference/resolver.js';
 import { productionCheck } from '../../../../src/resolve/production/resolver.js';
+import { runMigrations } from '../../../../src/store/migrate.js';
 
-const CONNECTION_STRING = 'postgres://authz:authz_dev_password@127.0.0.1:5432/authz_dev';
+const MIGRATIONS_DIR = new URL('../../../../src/store/migrations', import.meta.url).pathname;
 
+let container: StartedPostgreSqlContainer;
 let pool: Pool;
 
-beforeAll(() => {
-  pool = new Pool({ connectionString: CONNECTION_STRING });
-});
+beforeAll(async () => {
+  container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  pool = new Pool({ connectionString: container.getConnectionUri() });
+  await runMigrations(pool, MIGRATIONS_DIR);
+}, 120_000);
 
 afterAll(async () => {
   await pool.end();
+  await container.stop();
 });
 
 let uniqueCounter = 0;
