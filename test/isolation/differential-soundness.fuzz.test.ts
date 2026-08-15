@@ -63,15 +63,16 @@
  *   (`.fuzz.test.ts`) is matched by the fast, Docker-free default suite
  *   (see `vitest.config.ts`'s `exclude`), and that test needs a real
  *   `PostgreSqlContainer` per `docs/DECISIONS.md` D-019/D-030.
- * - `a run that finds any false_grant records the full resolution path both
- *   resolvers took, not just "disagreed"` stays `.todo()` — see the comment
- *   directly above it below. Not a shortfall: `DivergenceRecord`
- *   (`src/soundness/runner.ts`) has no resolution-path field yet, by a
- *   deliberate Phase 3/4 design choice (`docs/DECISIONS.md` D-020) that
- *   Phase 5 inherited rather than reopened. Satisfying this honestly needs
- *   Phase 6's resolution-path work; weakening the assertion to fit the
- *   current shape would be exactly the kind of self-reported-but-unverified
- *   claim this project's own rule 9 warns against.
+ * - **(Phase 6)** `a run that finds any false_grant records the full
+ *   resolution path both resolvers took, not just "disagreed"` is now
+ *   un-skipped: `DivergenceRecord` (`src/soundness/runner.ts`) carries
+ *   `referencePath`/`productionPath` (§6.7), each present exactly when that
+ *   resolver's own boolean was `true`, via `buildDivergenceRecord` (a pure
+ *   function extracted from `runSoundnessFuzz`'s own loop specifically so
+ *   this is testable here — no real Postgres, no real fuzz run, and no
+ *   unsafe live mutation of a shipped resolver file). See the test's own
+ *   doc comment immediately above it for exactly what is and isn't proven
+ *   here versus in the resolver-specific resolution-path test files.
  * - The "cycle detection deliberately removed" fuzz-power test is
  *   un-skipped but *renamed* — see the comment directly above it below for
  *   why its original wording cannot be honestly satisfied at any depth
@@ -86,10 +87,12 @@ import {
   type GeneratedTuple,
 } from '../../src/soundness/generators.js';
 import { classifyResult, computeVerdict } from '../../src/soundness/classify.js';
+import { buildDivergenceRecord } from '../../src/soundness/runner.js';
 import { compileSchema } from '../../src/schema/dsl/compiler.js';
 import { formatSchemaError } from '../../src/schema/dsl/errors.js';
 import { referenceCheck } from '../../src/resolve/reference/resolver.js';
 import type { CompiledSchema, RewriteRule } from '../../src/schema/dsl/types.js';
+import type { ResolutionStep as ProductionResolutionStep } from '../../src/resolve/production/resolver.js';
 
 /** Compiles `source` and fails the test (with the formatted errors) if it doesn't compile. */
 function compileOk(source: string): CompiledSchema {
@@ -148,25 +151,128 @@ describe('differential fuzzing — production check engine vs. the naive referen
   });
 
   /**
-   * `DivergenceRecord` (`src/soundness/runner.ts`) is `{ query, expected,
-   * actual, kind, critical }` — no resolution-path field. Both resolvers
-   * currently return only `{ allowed: boolean }` (`docs/DECISIONS.md`
-   * D-020, a deliberate Phase 3 choice carried forward through Phase 4 and
-   * into Phase 5 rather than reopened under this phase's own time
-   * pressure — see `PROGRESS.md`'s Phase 5 "open question"). There is
-   * nothing in this codebase today for a test to call that would produce a
-   * real resolution path to assert against; writing one anyway would mean
-   * either inventing a path-shaped return value nothing else in the repo
-   * produces (testing a fiction) or silently weakening "records the full
-   * resolution path" into "records that a divergence happened," which is
-   * exactly the kind of quiet downgrade this project's own discipline
-   * (build spec rule against loosening an assertion to make a test pass)
-   * forbids. Stays `.todo()` until Phase 6 gives `checks.resolution_path`
-   * (§6.7) a real shape both resolvers can produce.
+   * `DivergenceRecord` (`src/soundness/runner.ts`) now carries
+   * `referencePath`/`productionPath` (Phase 6, §6.7) — each present exactly
+   * when that resolver's own boolean was `true`. `buildDivergenceRecord`
+   * (extracted from `runSoundnessFuzz`'s own loop specifically so this is
+   * testable without a real Postgres, a real 5,000-query fuzz run, or
+   * unsafely mutating a shipped resolver file at test time — see that
+   * function's own doc comment) is exercised here with the REAL fixture
+   * generator and the REAL reference resolver for the "denied, no path"
+   * half of a `false_grant` and the "allowed, real path" half of a
+   * `false_deny`; the *production* side of each case is a hand-supplied
+   * `ProductionResolutionStep`/absent value, standing in for what a real
+   * (here, deliberately non-Postgres) production engine call would have
+   * returned — the point under test is `runner.ts`'s own plumbing (does it
+   * carry a resolver's path through into the persisted record, present iff
+   * that resolver said allowed), not re-proving either resolver's own path
+   * construction, which `test/unit/resolve/reference-resolver.resolution-
+   * path.test.ts` and `test/unit/resolve/production/production-resolution-
+   * path.integration.test.ts` already cover directly against real data.
    */
-  it.todo(
-    'a run that finds any false_grant records the full resolution path both resolvers took, not just "disagreed" — the same "show the diff, not the score" principle the build spec\'s §5.8 names for its own sibling project\'s PR comment',
-  );
+  it('a run that finds any false_grant records the full resolution path both resolvers took, not just "disagreed" — the same "show the diff, not the score" principle the build spec\'s §5.8 names for its own sibling project\'s PR comment', () => {
+    const seed = 'isolation-resolution-path-plumbing-seed';
+    const fixture = generateFixture(seed, 50);
+    const schema = compileOk(fixture.schemaSource);
+    const criticalNamespaces = new Set(
+      fixture.namespaces.filter((n) => n.critical).map((n) => n.namespace),
+    );
+
+    // A real query the reference resolver genuinely denies — no tuple
+    // anywhere names this subject, so this is denied on the graph's own
+    // merits, not a coincidence of the query sampler.
+    const deniedQuery = {
+      subject: { ns: 'user', id: 'ghost_no_real_edges_anywhere' } satisfies GeneratedEntityRef,
+      object: fixture.queries[1]?.object ?? {
+        ns: fixture.namespaces[0]?.namespace ?? '',
+        id: 'cycle_a',
+      },
+      relationOrPermission: fixture.queries[1]?.relationOrPermission ?? 'view',
+    };
+    const deniedReference = referenceCheck(
+      schema,
+      fixture.tuples,
+      deniedQuery.subject,
+      deniedQuery.object,
+      deniedQuery.relationOrPermission,
+    );
+    expect(deniedReference.allowed).toBe(false);
+    expect(deniedReference.path).toBeUndefined();
+
+    // A hand-supplied stand-in for "the bogus chain a broken production
+    // engine thought it found" — a well-typed ProductionResolutionStep
+    // naming a tuple that provably does not exist in this fixture (the
+    // fixture's own generated namespace/object names are used so the shape
+    // reads like a real claim, not just placeholder strings).
+    const bogusProductionPath: ProductionResolutionStep = {
+      kind: 'directGrant',
+      object: deniedQuery.object,
+      relation: deniedQuery.relationOrPermission,
+      subject: deniedQuery.subject,
+    };
+
+    const falseGrantRecord = buildDivergenceRecord({
+      query: deniedQuery,
+      referenceAllowed: deniedReference.allowed,
+      productionAllowed: true, // the (hypothetical) broken engine's own claim
+      productionPath: bogusProductionPath,
+      criticalNamespaces,
+    });
+    expect(falseGrantRecord).not.toBeNull();
+    expect(falseGrantRecord?.kind).toBe('false_grant');
+    // The reference resolver found no path — none is recorded.
+    expect(falseGrantRecord?.referencePath).toBeUndefined();
+    // The production engine's own (bogus) claim IS recorded, in full —
+    // this is "the exact bogus chain the engine thought it found," not
+    // just the fact that a disagreement happened.
+    expect(falseGrantRecord?.productionPath).toEqual(bogusProductionPath);
+
+    // The reverse case: a real query the reference resolver genuinely
+    // allows (query 1 — the unconditional direct grant on the cyclic
+    // object, per generators.ts's own guarantee), paired with a
+    // hand-supplied `productionAllowed: false` standing in for a real
+    // engine's denial.
+    const allowedQuery = fixture.queries[1];
+    expect(allowedQuery).toBeDefined();
+    if (!allowedQuery) return;
+    const allowedReference = referenceCheck(
+      schema,
+      fixture.tuples,
+      allowedQuery.subject,
+      allowedQuery.object,
+      allowedQuery.relationOrPermission,
+    );
+    expect(allowedReference.allowed).toBe(true);
+    const allowedReferencePath = allowedReference.path;
+    expect(allowedReferencePath).toBeDefined();
+    if (!allowedReferencePath) return;
+
+    const falseDenyRecord = buildDivergenceRecord({
+      query: allowedQuery,
+      referenceAllowed: allowedReference.allowed,
+      referencePath: allowedReferencePath,
+      productionAllowed: false,
+      criticalNamespaces,
+    });
+    expect(falseDenyRecord).not.toBeNull();
+    expect(falseDenyRecord?.kind).toBe('false_deny');
+    // The real chain the reference resolver walked IS recorded.
+    expect(falseDenyRecord?.referencePath).toEqual(allowedReferencePath);
+    // The production engine found nothing — none is recorded for it.
+    expect(falseDenyRecord?.productionPath).toBeUndefined();
+
+    // Control: agreement never produces a record at all, path or no path —
+    // classify.ts's own equality-first check is untouched by this.
+    const agreement = buildDivergenceRecord({
+      query: allowedQuery,
+      referenceAllowed: true,
+      referencePath: allowedReferencePath,
+      productionAllowed: true,
+      productionPath: bogusProductionPath,
+      criticalNamespaces,
+    });
+    expect(agreement).toBeNull();
+  });
 
   it('a false_grant on a namespace flagged critical fails the run even when the aggregate false_grant rate across the whole graph is otherwise zero', () => {
     const criticalNamespaces = new Set(['critical_ns']);
