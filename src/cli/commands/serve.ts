@@ -23,7 +23,7 @@ export async function serve(): Promise<void> {
   }
 
   const pool = getPool();
-  const app = buildServer(pool);
+  const app = await buildServer(pool);
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

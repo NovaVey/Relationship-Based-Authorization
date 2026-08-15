@@ -43,6 +43,7 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 
@@ -67,6 +68,7 @@ import {
   invalidRequestError,
   infrastructureUnavailableError,
   internalError,
+  rateLimitedError,
   type ApiErrorResponse,
 } from './errors.js';
 
@@ -150,14 +152,38 @@ async function runOrInfrastructureError<T>(
   }
 }
 
-export function buildServer(pool: Pool): FastifyInstance {
+/**
+ * Async — the one await in this function's own body is load-bearing, not
+ * cosmetic. `app.register(rateLimit, ...)` must be awaited *before* any
+ * route is declared: Fastify only attaches a plugin's `onRoute` hook (how
+ * `@fastify/rate-limit` wires itself into each route) once that plugin's
+ * own registration has actually resolved — a fire-and-forget
+ * `void app.register(...)` immediately followed by synchronous route
+ * declarations races the plugin's own setup and silently loses every route
+ * to the plugin's hook (confirmed live: without this `await`, `max`/
+ * `timeWindow` are accepted with no error, but no route is ever actually
+ * rate-limited — no `x-ratelimit-*` headers, no `429`, at any request
+ * count). See `docs/DECISIONS.md` D-056 and this file's own doc comment on
+ * the plugin registration below.
+ */
+export async function buildServer(pool: Pool): Promise<FastifyInstance> {
   const app = Fastify({ logger: { level: env.LOG_LEVEL } });
 
-  // Framework-level errors (malformed JSON body, etc.) and anything an
-  // individual route handler didn't already catch — the one place
-  // `internalError` (src/api/errors.ts) is actually used, exactly the role
-  // its own doc comment reserves for it.
+  // Framework-level errors (malformed JSON body, etc.), the rate-limit
+  // plugin's own thrown rejection (see the `retryAfterSeconds` marker below
+  // — `@fastify/rate-limit` communicates a limit hit by *throwing* from its
+  // `errorResponseBuilder`, not by returning a body directly, so it has to
+  // be recognized and reshaped here like any other framework-level error),
+  // and anything an individual route handler didn't already catch — the
+  // one place `internalError` (src/api/errors.ts) is actually used, exactly
+  // the role its own doc comment reserves for it.
   app.setErrorHandler((error: FastifyError, request, reply) => {
+    const retryAfterSeconds = (error as { retryAfterSeconds?: number }).retryAfterSeconds;
+    if (typeof retryAfterSeconds === 'number') {
+      const resp = rateLimitedError(retryAfterSeconds);
+      void reply.code(resp.status).send(resp.body);
+      return;
+    }
     if (typeof error.statusCode === 'number' && error.statusCode < 500) {
       const resp = invalidRequestError(error.message);
       void reply.code(resp.status).send(resp.body);
@@ -166,6 +192,46 @@ export function buildServer(pool: Pool): FastifyInstance {
     request.log.error(error);
     const resp = internalError();
     void reply.code(resp.status).send(resp.body);
+  });
+
+  /**
+   * A per-IP request budget on every route, closing a real CodeQL finding
+   * (`js/missing-rate-limiting`, high severity) on `/health`: an
+   * unauthenticated route that queries Postgres on every call has no
+   * barrier at all against a caller hammering it — see `docs/DECISIONS.md`.
+   * Registered globally (not per-route) so every current and future route
+   * gets a floor by default, never something a new route can accidentally
+   * launch without; individual routes below override the default via their
+   * own `config.rateLimit` where a different budget is actually warranted
+   * (`/health` needs headroom for legitimate load-balancer polling; the
+   * `ADMIN_API_KEY`-gated write routes get a stricter budget as
+   * defense-in-depth against key-guessing and write-flooding even from a
+   * caller who does hold a valid key).
+   *
+   * `errorResponseBuilder` cannot return `rateLimitedError`'s body
+   * directly — the plugin's own `applyRateLimit` does
+   * `throw params.errorResponseBuilder(...)`, treating the return value as
+   * the thing to throw, not the response to send (its own default
+   * implementation returns a real `Error` with `.statusCode` set, never a
+   * plain object). So this returns an `Error` carrying a
+   * `retryAfterSeconds` marker instead, and the `setErrorHandler` above
+   * recognizes that marker and produces `rateLimitedError`'s own envelope
+   * from it — a caller still sees the identical `{error:{code,message}}`
+   * shape every other rejection in this API uses, never the plugin's own
+   * default error body; only the plumbing to get there differs from every
+   * other error path in this file.
+   */
+  await app.register(rateLimit, {
+    max: 100,
+    timeWindow: '1 minute',
+    errorResponseBuilder: (_request, context) => {
+      const retryAfterSeconds = Math.max(1, Math.ceil(context.ttl / 1000));
+      const err = new Error(
+        `rate limit exceeded — retry after ${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}`,
+      ) as Error & { retryAfterSeconds: number };
+      err.retryAfterSeconds = retryAfterSeconds;
+      return err;
+    },
   });
 
   /**
@@ -223,31 +289,44 @@ export function buildServer(pool: Pool): FastifyInstance {
     await reply.code(resp.status).send(resp.body);
   });
 
-  app.post('/tuples', { preHandler: requireAdminAuth }, async (request, reply) => {
-    const parsed = tupleBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
-      return;
-    }
-    const tuple = toTupleKey(parsed.data);
-    const result = await runOrInfrastructureError(reply, () => writeTuple(pool, tuple));
-    if (result === undefined) return;
-    const resp = tupleWriteResponse(result);
-    await reply.code(resp.status).send(resp.body);
-  });
+  // A stricter budget than the global default (D-056): defense-in-depth
+  // against ADMIN_API_KEY-guessing and write-flooding, even from a caller
+  // who does hold a valid key.
+  const writeRateLimit = { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } };
 
-  app.delete('/tuples', { preHandler: requireAdminAuth }, async (request, reply) => {
-    const parsed = tupleBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
-      return;
-    }
-    const tuple = toTupleKey(parsed.data);
-    const result = await runOrInfrastructureError(reply, () => deleteTuple(pool, tuple));
-    if (result === undefined) return;
-    const resp = tupleDeleteResponse(result);
-    await reply.code(resp.status).send(resp.body);
-  });
+  app.post(
+    '/tuples',
+    { preHandler: requireAdminAuth, ...writeRateLimit },
+    async (request, reply) => {
+      const parsed = tupleBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const tuple = toTupleKey(parsed.data);
+      const result = await runOrInfrastructureError(reply, () => writeTuple(pool, tuple));
+      if (result === undefined) return;
+      const resp = tupleWriteResponse(result);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
+
+  app.delete(
+    '/tuples',
+    { preHandler: requireAdminAuth, ...writeRateLimit },
+    async (request, reply) => {
+      const parsed = tupleBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const tuple = toTupleKey(parsed.data);
+      const result = await runOrInfrastructureError(reply, () => deleteTuple(pool, tuple));
+      if (result === undefined) return;
+      const resp = tupleDeleteResponse(result);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
 
   app.post('/schema/compile', async (request, reply) => {
     const parsed = schemaSourceBodySchema.safeParse(request.body);
@@ -260,36 +339,46 @@ export function buildServer(pool: Pool): FastifyInstance {
     await reply.code(resp.status).send(resp.body);
   });
 
-  app.post('/schema/publish', { preHandler: requireAdminAuth }, async (request, reply) => {
-    const parsed = schemaSourceBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
-      return;
-    }
-    const result = await runOrInfrastructureError(reply, () =>
-      publishSchema(pool, parsed.data.source),
-    );
-    if (result === undefined) return;
-    const resp = schemaPublishResponse(result);
-    await reply.code(resp.status).send(resp.body);
-  });
+  app.post(
+    '/schema/publish',
+    { preHandler: requireAdminAuth, ...writeRateLimit },
+    async (request, reply) => {
+      const parsed = schemaSourceBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const result = await runOrInfrastructureError(reply, () =>
+        publishSchema(pool, parsed.data.source),
+      );
+      if (result === undefined) return;
+      const resp = schemaPublishResponse(result);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
 
   // Deliberately unauthenticated — see docs/DECISIONS.md. Load-balancer /
   // uptime-monitor convention (this is the endpoint that decides whether an
   // instance stays in rotation), and nothing in the response is a
   // permission decision or a secret: namespace names/versions are schema
-  // metadata, not tuple data.
-  app.get('/health', async (_request, reply) => {
-    try {
-      await pool.query('select 1');
-      const namespaces = await listLatestNamespaceVersions(pool);
-      const resp = healthResponse({ reachable: true }, namespaces);
-      await reply.code(resp.status).send(resp.body);
-    } catch (err) {
-      const resp = healthResponse({ reachable: false, error: (err as Error).message }, []);
-      await reply.code(resp.status).send(resp.body);
-    }
-  });
+  // metadata, not tuple data. A higher rate-limit budget than the global
+  // default — real load-balancer/uptime polling can legitimately hit this
+  // far more often than a normal API caller hits any other route.
+  app.get(
+    '/health',
+    { config: { rateLimit: { max: 300, timeWindow: '1 minute' } } },
+    async (_request, reply) => {
+      try {
+        await pool.query('select 1');
+        const namespaces = await listLatestNamespaceVersions(pool);
+        const resp = healthResponse({ reachable: true }, namespaces);
+        await reply.code(resp.status).send(resp.body);
+      } catch (err) {
+        const resp = healthResponse({ reachable: false, error: (err as Error).message }, []);
+        await reply.code(resp.status).send(resp.body);
+      }
+    },
+  );
 
   return app;
 }

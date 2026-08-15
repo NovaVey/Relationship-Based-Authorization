@@ -52,6 +52,7 @@ export type ApiErrorCode =
   | 'tuple_validation_failed'
   | 'schema_compile_failed'
   | 'unauthorized'
+  | 'rate_limited'
   | 'infrastructure_unavailable'
   | 'internal_error';
 
@@ -98,6 +99,14 @@ export interface ApiErrorResponse {
  *   than splitting some codes into a 404-shaped response.
  * - `unauthorized` — 401. A missing/wrong `ADMIN_API_KEY` on a gated write
  *   route.
+ * - `rate_limited` — 429. Added by `src/api/server.ts` (main agent, Phase 8,
+ *   alongside the `@fastify/rate-limit` registration — see that file's own
+ *   doc comment and `docs/DECISIONS.md`): a caller exceeded the per-route
+ *   request budget. Never produced by any function in this file directly —
+ *   `@fastify/rate-limit`'s own `errorResponseBuilder` calls
+ *   `rateLimitedError` to keep this one response shape even for a limit the
+ *   plugin itself enforces, the same reason `invalid_request` exists for
+ *   Zod's own framework-level rejections.
  * - `infrastructure_unavailable` — 503, not 500. See
  *   `infrastructureUnavailableError`'s own doc comment: this is Postgres
  *   being unreachable, the same condition the CLI reports as exit code 3
@@ -113,6 +122,7 @@ export const API_ERROR_STATUS: Readonly<Record<ApiErrorCode, number>> = {
   tuple_validation_failed: 400,
   schema_compile_failed: 400,
   unauthorized: 401,
+  rate_limited: 429,
   infrastructure_unavailable: 503,
   internal_error: 500,
 };
@@ -251,6 +261,23 @@ export function schemaPublishError(errors: readonly string[]): ApiErrorResponse 
  */
 export function unauthorizedError(detail = 'missing or invalid admin API key'): ApiErrorResponse {
   return apiError('unauthorized', `unauthorized — ${detail}`);
+}
+
+/**
+ * A caller exceeded a route's request budget — `@fastify/rate-limit`'s own
+ * `errorResponseBuilder` hook calls this (see `src/api/server.ts`) so a
+ * rate-limited response carries the exact same envelope shape as every
+ * other error this API produces, rather than the plugin's own default body.
+ * `retryAfterSeconds` is always present (never optional) — unlike
+ * `unauthorizedError`'s free-text `detail`, a rate-limit response without a
+ * concrete retry time isn't actionable: a caller needs a number to back off
+ * by, not just a description of what went wrong.
+ */
+export function rateLimitedError(retryAfterSeconds: number): ApiErrorResponse {
+  return apiError(
+    'rate_limited',
+    `rate limit exceeded — retry after ${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}`,
+  );
 }
 
 /**

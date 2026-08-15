@@ -50,7 +50,7 @@ beforeAll(async () => {
   pool = new Pool({ connectionString: container.getConnectionUri() });
   await runMigrations(pool, MIGRATIONS_DIR);
   env.ADMIN_API_KEY = ADMIN_KEY;
-  app = buildServer(pool);
+  app = await buildServer(pool);
 }, 120_000);
 
 afterAll(async () => {

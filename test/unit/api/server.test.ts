@@ -74,10 +74,10 @@ const CORRECT_KEY = 'server-test-correct-admin-key';
 let app: FastifyInstance;
 let poolQuery: ReturnType<typeof vi.fn<(...args: unknown[]) => Promise<unknown>>>;
 
-beforeEach(() => {
+beforeEach(async () => {
   poolQuery = vi.fn<(...args: unknown[]) => Promise<unknown>>();
   const pool = { query: poolQuery } as unknown as Pool;
-  app = buildServer(pool);
+  app = await buildServer(pool);
 });
 
 afterEach(async () => {

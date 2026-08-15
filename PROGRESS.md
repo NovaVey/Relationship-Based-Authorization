@@ -1005,14 +1005,25 @@ see D-048 and the session's own concurrent-agent discipline.
 - `src/schema/publish.ts` — gains `listLatestNamespaceVersions(pool)`:
   every namespace's latest version in one query (`distinct on
 (namespace) ... order by namespace, version desc`), for `/health`.
-- `package.json` — `fastify` added (pre-approved, §2's stack).
+- `package.json` — `fastify` added (pre-approved, §2's stack);
+  `@fastify/rate-limit` added later in this same phase, outside §2's
+  stack — asked first (rule 6), approved (D-056).
+- `src/api/server.ts`/`errors.ts` — `@fastify/rate-limit` registered
+  globally (100/min default), overridden per-route (300/min `/health`,
+  20/min on the three `ADMIN_API_KEY`-gated write routes), closing a
+  real CodeQL finding (`js/missing-rate-limiting`, high severity) on
+  `/health` found by CI on this phase's own PR. `buildServer` became
+  `async` as part of this fix — see D-056 for the real integration bug
+  (an un-awaited plugin registration silently rate-limited nothing) this
+  surfaced and fixed. New `rate_limited` `ApiErrorCode` (429).
 - Tests (new): `test/unit/api/auth.test.ts` (10), `server.test.ts` (22,
   fast/DB-free, mocked `pool` + `vi.spyOn` on every domain module),
   `server.integration.test.ts` (4, real `PostgreSqlContainer`, no
   mocks — the genuine end-to-end proof of both of this phase's own exit
-  criterion clauses), `errors.test.ts` (22), `responses.test.ts` (34) —
-  88 new tests total.
-- `docs/DECISIONS.md`: D-048 through D-055.
+  criterion clauses), `errors.test.ts` (22), `responses.test.ts` (34),
+  `rate-limit.test.ts` (2, written directly by the main agent, not
+  delegated) — 90 new tests total.
+- `docs/DECISIONS.md`: D-048 through D-056.
 
 **A real, self-identified gap, closed within this same phase rather than
 carried forward:** the first `test-author` delegation (server/auth
@@ -1082,9 +1093,11 @@ than deferring; the owner worked through `docs/github-governance.md`'s
 Steps 1-4 in the GitHub UI and confirmed completion.
 
 **Final state:** `npm run verify`-equivalent (format:check, lint,
-typecheck, test, build) clean throughout; fast suite 211 passed (up from
+typecheck, test, build) clean throughout; fast suite 215 passed (up from
 123 before this phase), 6 `.todo()` remaining (all pre-existing,
-unrelated to Phase 8).
+unrelated to Phase 8). Real built-CLI smoke test confirmed real
+`x-ratelimit-limit`/`x-ratelimit-remaining` headers on `/health` against
+real local Postgres.
 
 **Open questions carried forward:**
 

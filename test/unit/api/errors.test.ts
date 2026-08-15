@@ -24,6 +24,7 @@ import {
   schemaCompileError,
   schemaPublishError,
   unauthorizedError,
+  rateLimitedError,
   infrastructureUnavailableError,
   internalError,
 } from '../../../src/api/errors.js';
@@ -40,14 +41,17 @@ const ERRORS_SOURCE_PATH = fileURLToPath(new URL('../../../src/api/errors.ts', i
 // ---------------------------------------------------------------------------
 
 // Hand-derived from API_ERROR_STATUS's own doc comment
-// (`400/400/400/401/503/500` for `invalid_request`/`tuple_validation_failed`/
-// `schema_compile_failed`/`unauthorized`/`infrastructure_unavailable`/
-// `internal_error`), not read off the table itself.
+// (`400/400/400/401/429/503/500` for `invalid_request`/
+// `tuple_validation_failed`/`schema_compile_failed`/`unauthorized`/
+// `rate_limited`/`infrastructure_unavailable`/`internal_error`), not read
+// off the table itself. `rate_limited` (429) was added after this table
+// alongside `@fastify/rate-limit` — see `docs/DECISIONS.md` D-056.
 const DOCUMENTED_STATUS: Record<ApiErrorCode, number> = {
   invalid_request: 400,
   tuple_validation_failed: 400,
   schema_compile_failed: 400,
   unauthorized: 401,
+  rate_limited: 429,
   infrastructure_unavailable: 503,
   internal_error: 500,
 };
@@ -66,6 +70,7 @@ describe("every constructor's returned status matches API_ERROR_STATUS for its o
       { expectedCode: 'schema_compile_failed', response: schemaCompileError([]) },
       { expectedCode: 'schema_compile_failed', response: schemaPublishError([]) },
       { expectedCode: 'unauthorized', response: unauthorizedError() },
+      { expectedCode: 'rate_limited', response: rateLimitedError(60) },
       {
         expectedCode: 'infrastructure_unavailable',
         response: infrastructureUnavailableError('down'),
@@ -234,6 +239,23 @@ describe('unauthorizedError — default detail text vs. a caller-supplied detail
     expect(response.body.error.message).toBe(
       'unauthorized — Authorization header missing entirely',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5b. rateLimitedError — added alongside @fastify/rate-limit (D-056), not
+//     part of report-designer's original brief; see its own doc comment.
+// ---------------------------------------------------------------------------
+
+describe('rateLimitedError — message names a concrete retry time and pluralizes correctly', () => {
+  it('ratelimitederror-message-says-1-second-singular-for-exactly-one-second', () => {
+    const response = rateLimitedError(1);
+    expect(response.body.error.message).toBe('rate limit exceeded — retry after 1 second');
+  });
+
+  it('ratelimitederror-message-says-n-seconds-plural-for-more-than-one-second', () => {
+    const response = rateLimitedError(60);
+    expect(response.body.error.message).toBe('rate limit exceeded — retry after 60 seconds');
   });
 });
 
