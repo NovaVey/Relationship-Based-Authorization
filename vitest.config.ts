@@ -4,32 +4,29 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
-    // Integration tests (currently just RLS-against-real-Postgres) need
-    // Docker and live in their own vitest project — see
+    // Integration tests (currently the isolation suite's real-Postgres
+    // proof, see test/isolation/permission-resolution.integration.test.ts)
+    // need Docker and live in their own vitest project — see
     // vitest.integration.config.ts / `npm run test:integration` — so
     // contributors without Docker aren't blocked on the fast unit suite,
     // and this suite's coverage numbers aren't skewed by a slow outlier.
-    exclude: ['test/integration/**'],
+    // Matched by suffix rather than by directory, since integration tests
+    // now live alongside the fuzz/unit tests they're related to inside
+    // test/isolation/, not in a separate test/integration/ tree.
+    exclude: ['**/*.integration.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
       include: ['src/**/*.ts'],
       exclude: ['src/**/index.ts', 'src/**/types.ts'],
-      // Regression (LOW): these sat at 80/80/75/80 while actual coverage
-      // was ~98.5/99/96.5/99 (stmt/func/branch/line) — a threshold gate
-      // that loose wouldn't catch a real coverage regression until it lost
-      // roughly 20 points, which is not a meaningful safety net for a
-      // security-focused package. Raised to sit a few points below actual,
-      // close enough to catch a real regression, with enough headroom that
-      // legitimate new code (which is rarely 100% branch-covered on day
-      // one) doesn't fail CI outright — re-measure and adjust these when
-      // they drift too far from real coverage in either direction.
-      thresholds: {
-        lines: 95,
-        functions: 95,
-        branches: 90,
-        statements: 95,
-      },
+      // No thresholds yet: src/ is currently just Phase 0's env loader, and
+      // the isolation suite is intentionally all `.todo()` until the
+      // phases in .claude/commands/build-authz-service.md that implement
+      // what it tests land — see docs/DECISIONS.md. Restore thresholds
+      // (this repo's previous identity ran 95/95/90/95 stmt/func/branch/
+      // line) once there's real implementation coverage to hold a floor
+      // under; a threshold gate against near-zero coverage would either
+      // fail immediately or be set so low it catches nothing.
     },
   },
 });
