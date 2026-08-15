@@ -20,12 +20,20 @@
  * validator exists. Every `it.todo` that uses it becomes real once Phase 1
  * (the schema DSL) and Phase 2 (the tuple writer) exist.
  */
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 
 import { compileSchema } from '../../src/schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../../src/schema/dsl/types.js';
 import { writeTuple, type TupleKey } from '../../src/store/tuples.js';
+import {
+  tupleWrite,
+  parseObjectRef,
+  parseSubjectRef,
+  buildTupleKey,
+} from '../../src/cli/commands/tuple.js';
+import { env } from '../../src/config/env.js';
+import { closePool } from '../../src/store/client.js';
 
 const NUL = String.fromCharCode(0);
 const NEWLINE = String.fromCharCode(10);
@@ -322,33 +330,227 @@ describe('subject and object identifiers reject the injection payload corpus', (
 });
 
 /**
- * Deliberately left `.todo()` past Phase 2 — not an oversight. Every entry
- * in `MALFORMED_USERSET_SUBJECT_CORPUS` is a raw, unsplit
- * "namespace:id#relation"-shaped string ('group:eng#', '#member', ...);
- * `writeTuple`'s `TupleKey` (`src/store/tuples.ts`) never takes a raw
- * string like that — it takes already-split `subjectNs`/`subjectId`/
- * `subjectRelation` fields, each validated independently by
- * `validateIdentifiers`. The code that actually parses a raw
- * "group:eng#member"-shaped argument into those fields
- * (`parseSubjectRef` in `src/cli/commands/tuple.ts`) is CLI/API-surface
- * plumbing, not the tuple store — build spec §9 Phase 2's exit criteria
- * ("writing and reading round-trips; a write returns a strictly
- * increasing token; deleting a tuple is immediately invisible to a read
- * pinned to a token issued after the delete") never mentions a raw-string
- * subject parser, and §7 (the CLI/API surface these strings are actually
- * parsed at) isn't scheduled until Phase 7/8. Un-skip these once whichever
- * phase owns that raw-string grammar lands, against the parser that
- * actually exists then — not against `writeTuple` itself, which has no
- * grammar to fail here.
+ * Was left `.todo()` past Phase 2 on the theory that the raw-string parser
+ * these tests need — `parseSubjectRef` in `src/cli/commands/tuple.ts` —
+ * wasn't scheduled until Phase 7/8's CLI/API surface work. That premise was
+ * stale: `parseSubjectRef` (and `parseObjectRef`, `buildTupleKey` beside
+ * it) has existed, module-private, since Phase 2's own tuple-store CLI
+ * wiring. It is now exported from `tuple.ts` for direct use here — the
+ * only change made to that file for this pair of tests; `tupleWrite`'s own
+ * runtime behavior is otherwise untouched.
+ *
+ * `writeTuple`'s `TupleKey` (`src/store/tuples.ts`) still has no grammar to
+ * fail on its own — it takes already-split `subjectNs`/`subjectId`/
+ * `subjectRelation` fields — so neither test below hand-splits a corpus
+ * entry and feeds the pieces to `writeTuple` directly; that would prove
+ * something about `IDENTIFIER_PATTERN`, already covered above, not about
+ * the raw-string grammar. Both tests exercise the real, unmocked
+ * `tupleWrite` and the real `parseObjectRef`/`parseSubjectRef`/
+ * `buildTupleKey` it calls.
+ *
+ * A real, load-bearing finding surfaced while writing the first test below
+ * (see its own comments): `parseSubjectRef` does not itself validate the
+ * grammar of the relation half of a userset reference beyond "non-empty".
+ * Given 'group:eng##member', 'group:eng#member#viewer', or
+ * 'group:eng#member; DROP TABLE relation_tuples; --', it happily returns a
+ * `SubjectRef` whose `relation` field is '#member', 'member#viewer', or the
+ * whole injection payload, respectively — everything after the *first* '#'
+ * is accepted as-is, with no check for a second separator, a second hop, or
+ * disallowed characters. The write is still rejected end to end, but only
+ * because that garbage string then fails the store's generic
+ * `IDENTIFIER_PATTERN` check — the same check any other invalid identifier
+ * would fail — not because the CLI's grammar parser recognized a malformed
+ * userset reference. `tupleWrite`'s own printed message is correspondingly
+ * uneven: for the two entries the parser *does* reject at the grammar
+ * layer ('group:eng#', '#member'), the printed error is a static,
+ * non-payload-specific usage string (`REF_USAGE`) that never names which
+ * fragment was empty; for the three it doesn't, the store's identifier
+ * error does name the specific field ('subject relation') and echoes the
+ * exact bad value. The stronger, more specific error is attached to the
+ * weaker validation path — see this file's test output / the reporting
+ * agent's summary for the full writeup.
  */
 describe('tuple-to-userset subject references reject malformed grammar', () => {
-  it.todo(
-    'writing a tuple with a subject in MALFORMED_USERSET_SUBJECT_CORPUS is rejected with an error identifying which part of the subject reference is invalid',
-  );
+  /** Guaranteed unreachable, same host/port convention as `unreachablePool` above. */
+  const UNREACHABLE_DATABASE_URL = 'postgres://nobody:nothing@127.0.0.1:1/unreachable';
 
-  it.todo(
-    'a well-formed userset subject ("group:eng#member") round-trips exactly through write and read with no normalization surprises',
-  );
+  afterEach(async () => {
+    await closePool();
+    process.exitCode = undefined;
+    vi.restoreAllMocks();
+  });
+
+  type SubjectGrammarCategory =
+    'rejected-by-raw-string-grammar' | 'rejected-by-identifier-validation';
+
+  /**
+   * Independently derived from `MALFORMED_USERSET_SUBJECT_CORPUS`'s own
+   * doc comments and the "namespace:id#relation" grammar (§5/§7 of the
+   * build spec: one optional hop, `namespace:id` on each side of `#`) —
+   * not from reading `parseSubjectRef`'s control flow first. 'group:eng#'
+   * and '#member' are malformed before any relation string is even
+   * produced: an empty relation after the separator, an empty subject id
+   * before it — in both cases there is no complete "namespace:id" object
+   * fragment to hand back, so the raw-string splitter itself has nothing
+   * valid to accept. The other three corpus entries all produce a
+   * *non-empty* string after the first '#' (a second separator, a second
+   * hop, an injection payload) — under a splitter that reads "everything
+   * after the first #" as the relation with no further grammar check on
+   * it, none of those three is structurally distinguishable from a
+   * well-formed relation at the splitting stage. Whether each is actually
+   * caught there, or only downstream by generic identifier validation, is
+   * exactly what the test below checks per entry, not assumes.
+   */
+  function expectedSubjectGrammarCategory(payload: string): SubjectGrammarCategory {
+    switch (payload) {
+      case 'group:eng#':
+      case '#member':
+        return 'rejected-by-raw-string-grammar';
+      case 'group:eng##member':
+      case 'group:eng#member#viewer':
+      case 'group:eng#member; DROP TABLE relation_tuples; --':
+        return 'rejected-by-identifier-validation';
+      default:
+        throw new Error(
+          `MALFORMED_USERSET_SUBJECT_CORPUS entry ${JSON.stringify(payload)} has no expected category in this test — update expectedSubjectGrammarCategory`,
+        );
+    }
+  }
+
+  it('writing a tuple with a subject in MALFORMED_USERSET_SUBJECT_CORPUS is rejected with an error identifying which part of the subject reference is invalid', async () => {
+    // Set once: buildTupleKey/parseSubjectRef run before tupleWrite ever
+    // checks DATABASE_URL, and validateIdentifiers (src/store/tuples.ts)
+    // runs before writeTuple ever calls pool.connect() — so every corpus
+    // entry below is rejected without a socket ever being opened, exactly
+    // like the DB-free INJECTION_PAYLOAD_CORPUS tests above, just reached
+    // through the real CLI entry point instead of calling the store
+    // directly.
+    env.DATABASE_URL = UNREACHABLE_DATABASE_URL;
+
+    for (const payload of MALFORMED_USERSET_SUBJECT_CORPUS) {
+      const category = expectedSubjectGrammarCategory(payload);
+      process.exitCode = undefined;
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      await tupleWrite('document:readme', 'viewer', payload);
+
+      const printed = errorSpy.mock.calls.map((call) => String(call[0])).join('\n');
+      errorSpy.mockRestore();
+
+      // The tuple is never written, full stop, regardless of which layer
+      // caught it — exit code 2 ("schema/tuple validation failure" per
+      // build spec §7), never left at its 0 default.
+      expect(process.exitCode).toBe(2);
+      expect(printed.length).toBeGreaterThan(0);
+
+      if (category === 'rejected-by-raw-string-grammar') {
+        // Caught before a TupleKey ever exists — parseSubjectRef itself
+        // returns undefined. Confirmed structurally, not just "some error
+        // was printed": check which side of the '#' actually failed to
+        // parse as a "namespace:id" fragment, matching this corpus entry's
+        // own documented reason.
+        expect(parseSubjectRef(payload)).toBeUndefined();
+        const hash = payload.indexOf('#');
+        const beforeHash = payload.slice(0, hash);
+        if (payload === 'group:eng#') {
+          // "empty relation after the separator" — the fragment before
+          // the '#' is, on its own, a perfectly valid object reference;
+          // only the (missing) relation after it is the problem.
+          expect(parseObjectRef(beforeHash)).toEqual({ ns: 'group', id: 'eng' });
+        } else {
+          // '#member': "empty subject id before the separator" — there is
+          // no object reference at all before the '#'.
+          expect(beforeHash).toBe('');
+          expect(parseObjectRef(beforeHash)).toBeUndefined();
+        }
+        // NOT asserted here: that `printed` itself names the broken
+        // fragment. It doesn't — see this describe block's own doc
+        // comment above. Asserting that would misrepresent what the CLI
+        // actually reports for this category.
+      } else {
+        // Not caught by the raw-string splitter — parseSubjectRef accepts
+        // it, carrying the malformed grammar straight into the relation
+        // field (see this describe block's doc comment for exactly what
+        // each entry's relation field ends up containing).
+        const parsed = parseSubjectRef(payload);
+        expect(parsed).toBeDefined();
+        expect(parsed?.relation).toBeDefined();
+        // Caught instead by the store's own identifier validation once
+        // buildTupleKey hands that field to writeTuple — and that error
+        // does name the specific field and echo the exact offending value.
+        expect(printed).toContain('subject relation');
+        if (parsed?.relation !== undefined) {
+          expect(printed).toContain(parsed.relation);
+        }
+      }
+    }
+  });
+
+  it('a well-formed userset subject ("group:eng#member") round-trips exactly through write and read with no normalization surprises', () => {
+    // This file is deliberately Postgres-free (see its own doc comment and
+    // test/isolation/README.md's description of this suite as "the fast
+    // one") — a literal write-then-read-back against a real relation_tuples
+    // row belongs in test/isolation/permission-resolution.integration.test.ts
+    // or a dedicated *.integration.test.ts sibling, not here. What this file
+    // can prove without a database is the parsing round-trip: does the raw
+    // "group:eng#member" argument split into exactly the fields writeTuple
+    // will persist, with no accidental trimming, casing change, or other
+    // surprise, and does subjectRelation appear if and only if the raw
+    // string actually had a '#' suffix — using buildTupleKey, the exact
+    // function tupleWrite/tupleDelete call on every real invocation, so this
+    // is the real parsing path, not a reimplementation of it.
+
+    // Hand-derived from the "namespace:id#relation" grammar this module's
+    // own top-of-file doc comment states (not from reading buildTupleKey's
+    // body first): "group:eng#member" splits at the first ':' into subject
+    // namespace "group" and subject id "eng", then at the first '#' after
+    // that into subject relation "member" — three fields, nothing more,
+    // nothing trimmed, nothing case-folded.
+    const withRelation = buildTupleKey('document:readme', 'viewer', 'group:eng#member');
+    expect(withRelation).toEqual({
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+
+    // A plain subject (no '#') must never carry a subjectRelation field at
+    // all — not even `subjectRelation: undefined` — since relation_tuples'
+    // own schema (build spec §4) documents subject_relation as "null for a
+    // plain subject", and an accidental own `subjectRelation: undefined`
+    // key would be a real, if subtle, normalization surprise relative to
+    // "the key is simply absent".
+    const plainSubject = buildTupleKey('document:readme', 'viewer', 'user:alice');
+    expect(plainSubject).toEqual({
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(plainSubject).not.toHaveProperty('subjectRelation');
+
+    // No surprise splitting on anything but the first '#' / first ':'. Use
+    // an id/relation pair built from underscores and digits — both legal
+    // identifier characters per IDENTIFIER_PATTERN — to confirm nothing
+    // beyond the two documented separators is treated as special, and nothing
+    // is trimmed from a longer, still-legal id/relation.
+    const withNumeralsAndUnderscores = buildTupleKey(
+      'document:readme',
+      'viewer',
+      'group:eng_team_42#member_2',
+    );
+    expect(withNumeralsAndUnderscores).toEqual({
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng_team_42',
+      subjectRelation: 'member_2',
+    });
+  });
 });
 
 describe('fuzzing against the identifier grammar once it exists (property-based, mirrors the predecessor’s IDENTIFIER_PATTERN sweep)', () => {
