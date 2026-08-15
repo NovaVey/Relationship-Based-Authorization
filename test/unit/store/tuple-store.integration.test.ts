@@ -3,38 +3,41 @@
  * (data model), §6.1 (tuples are facts), §6.3 (consistency tokens), §9
  * Phase 2's exit criteria, and §10's "Tuple store (Phase 2)" test list.
  *
- * Needs a real, reachable Postgres with the Phase 2 migrations already
- * applied (`relation_tuples`, `write_log`, `namespace_configs`). Kept out
- * of `npm test` (see `vitest.config.ts`'s `exclude`) by the
- * `.integration.test.ts` suffix, matching the existing convention set by
- * `test/isolation/permission-resolution.integration.test.ts` — run via
- * `npm run test:integration`.
+ * Runs against a real, ephemeral Postgres container (`@testcontainers/
+ * postgresql`, already a devDependency) with the Phase 2 migrations
+ * applied via this project's own `runMigrations` — the same mechanism
+ * `vitest.integration.config.ts`'s own doc comment and `test/isolation/
+ * permission-resolution.integration.test.ts`'s setup note both anticipate,
+ * not a connection string hardcoded to any one environment's local
+ * fixture. `ubuntu-latest` GitHub Actions runners have Docker preinstalled
+ * (see `.github/workflows/ci.yml`'s `test-integration` job comment), so
+ * this needs no extra CI setup; locally it needs a running Docker daemon.
+ * Kept out of `npm test` (see `vitest.config.ts`'s `exclude`) by the
+ * `.integration.test.ts` suffix — run via `npm run test:integration`.
  *
  * On `getPool()`/`src/store/client.ts`: that module reads
  * `env.DATABASE_URL` at import time (`src/config/env.ts`'s `export const
  * env = loadEnv()` runs once, the first time anything imports it, and
  * `client.ts`'s pool is a module-level singleton) — so pointing it at a
- * different `DATABASE_URL` than whatever `.env` (or another already-loaded
- * module in the same worker) resolved first is exactly the ordering
- * hazard the delegating brief asked this suite to check for. Every
+ * container whose connection details aren't known until `beforeAll` runs
+ * is exactly the ordering hazard that singleton can't accommodate. Every
  * function this file actually exercises — `writeTuple`, `deleteTuple`,
  * `listTuplesByObject`, `listTuplesBySubject` (`src/store/tuples.ts`),
  * `currentToken`, `assertTokenObserved` (`src/store/tokens.ts`),
  * `publishSchema`, `getLatestNamespaceConfig` (`src/schema/publish.ts`) —
  * takes a `pg.Pool` as an explicit argument rather than reaching for that
  * singleton, so this file sidesteps the hazard entirely by constructing
- * its own dedicated `Pool` against the local Postgres given for this
- * environment, never importing `src/store/client.ts` or `src/config/
- * env.ts` at all. See the report back to the delegating agent for the
- * full note.
+ * its own dedicated `Pool` against the container it starts, never
+ * importing `src/store/client.ts` or `src/config/env.ts` at all.
  *
  * Every fixture below uses a namespace/object/subject id unique to that
  * test (see `uniqueName`) rather than a shared fixed name — tests share
- * one live database with no truncation between them and must be safe to
- * run concurrently and in any order, per the delegating brief.
+ * one container's database with no truncation between them and must be
+ * safe to run concurrently and in any order.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import {
   writeTuple,
@@ -45,17 +48,22 @@ import {
 } from '../../../src/store/tuples.js';
 import { currentToken, assertTokenObserved } from '../../../src/store/tokens.js';
 import { publishSchema } from '../../../src/schema/publish.js';
+import { runMigrations } from '../../../src/store/migrate.js';
 
-const LOCAL_DATABASE_URL = 'postgres://authz:authz_dev_password@127.0.0.1:5432/authz_dev';
+const MIGRATIONS_DIR = new URL('../../../src/store/migrations', import.meta.url).pathname;
 
+let container: StartedPostgreSqlContainer;
 let pool: Pool;
 
-beforeAll(() => {
-  pool = new Pool({ connectionString: LOCAL_DATABASE_URL });
-});
+beforeAll(async () => {
+  container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  pool = new Pool({ connectionString: container.getConnectionUri() });
+  await runMigrations(pool, MIGRATIONS_DIR);
+}, 120_000);
 
 afterAll(async () => {
   await pool.end();
+  await container.stop();
 });
 
 let uniqueCounter = 0;

@@ -313,8 +313,27 @@ instead (a real `ECONNREFUSED` is unambiguous).
 **Final state, after the bigint fix:** `npm test` — 27 passed, 15
 `.todo()`. `npm run test:integration` — 14 passed, 15 `.todo()` (the
 remaining 15 are all in `permission-resolution.integration.test.ts`,
-correctly still open — Phase 3/4 territory). Lint/typecheck/format all
-clean. Local dev database left truncated and empty.
+correctly still open — Phase 3/4 territory), verified against the local
+Postgres dev fixture before a second, real problem was found and fixed
+(see next paragraph). Lint/typecheck/format all clean. Local dev database
+left truncated and empty.
+
+**A second real problem, caught before it reached a PR:** as originally
+delegated, `tuple-store.integration.test.ts` hardcoded this session's own
+local dev Postgres connection string. That's exactly the fast, real-DB
+loop the whole phase was developed against — but `.github/workflows/
+ci.yml`'s `test-integration` job provisions no Postgres of its own; the
+job's own comment says the intended mechanism is a container the suite
+starts itself. Left as delegated, this suite would have failed every test
+with `ECONNREFUSED` on the first real CI run. Rewritten to start its own
+`PostgreSqlContainer` (`@testcontainers/postgresql`) and apply migrations
+via `runMigrations`, matching the pattern `vitest.integration.config.ts`
+already anticipated — see `docs/DECISIONS.md` D-019. Could not be run to
+completion in this session's own sandbox either (the same network policy
+blocking a direct Railway connection, D-010, also blocks this sandbox's
+Docker daemon from pulling images) — verified by typecheck, by matching
+an established working pattern exactly, and by watching real GitHub
+Actions CI on the opened PR, not by a local pass in this environment.
 
 **Exit criteria met (build spec §9 Phase 2 — no formal CHECKPOINT for
 this phase, but reported before starting Phase 3, which has one):**
