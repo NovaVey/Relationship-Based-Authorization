@@ -421,3 +421,88 @@ deliberately does not return a resolution path (`docs/DECISIONS.md`
 D-020) — confirm whether Phase 4's production resolver needs to agree on a
 path-shaped return value before Phase 5's divergence reporting is built
 around whatever shape exists at that point.
+
+## Phase 4 — Production check engine
+
+**Owner:** `soundness-engineer` (the resolver), main agent (`authz check`
+CLI wiring — main-agent territory per §14, matching Phase 2's schema/tuple
+CLI precedent), `test-author` (the test suite, cross-resolver-agreement
+tests especially — this phase's actual exit criterion). All reviewed and
+independently re-verified by the main agent before accepting.
+
+**Files touched:**
+
+- `src/resolve/production/resolver.ts` (new) — `productionCheck`, backed
+  by real Postgres, hand-written SQL. Splits the walk across two
+  genuinely different implementation strategies from the reference
+  resolver (D-025): TypeScript-orchestrated recursion for rewrite-rule
+  tuple-to-userset and the union/intersection/exclusion combinators
+  (schema-driven, can't be one static SQL query); a single `WITH
+RECURSIVE` query per relation-level check for stored-tuple userset-subject
+  membership (nested group-style closures — schema-agnostic edge shape,
+  exactly what recursive CTEs are for). Two independent cycle-safety
+  mechanisms, deliberately not unified (D-026). Reuses `src/store/
+tokens.ts`'s `assertTokenObserved` directly for consistency-token pinning
+  — a deliberate carve-out from resolver isolation, since the token
+  mechanism is store infrastructure, not resolver logic. `cache.ts` not
+  built this phase (D-028 — out of scope per §6.6).
+- `src/cli/commands/check.ts` (new), `src/cli/index.ts` (wired) —
+  `authz check <subject> <relation> <object> [--at-token <n>]` per §7.
+- `test/unit/resolve/production/{cross-resolver-agreement,
+production-check-behavior}.integration.test.ts` (new, 20 tests) — every
+  hand-derived example checked against **both** resolvers on identical
+  fixtures (the actual Phase 4 exit criterion), plus production-only
+  behavior (token pinning both directions, impossible-token/unreachable-DB
+  rejection, undeclared-namespace/relation fail-closed-as-deny).
+- `test/isolation/permission-resolution.integration.test.ts` — all 15
+  `.todo()`s un-skipped (not explicitly requested; `test-author`'s own
+  judgment call, since the file's own header said it was blocked on
+  exactly Phase 2 + Phase 4, both of which now exist — correct per this
+  project's standing "don't leave a satisfiable `.todo()` stale" rule).
+
+**Two real problems found and independently reproduced by the main agent,
+not just trusted from either subagent's report:**
+
+1. **The cyclic-hang claim itself** — before accepting the resolver, the
+   main agent deliberately removed the SQL path-array cycle guard and
+   confirmed, with a hard OS-level timeout, that `productionCheck` really
+   does hang against a real seeded cycle (killed after 6s). Restored and
+   re-verified clean before committing.
+2. **A third instance of the "termination test proves nothing unless it
+   can fail" lesson** (D-029, after D-024 and D-027): with the SQL cycle
+   guard removed but the independent depth cap left in place (bounded to
+   20,000), the query still eventually returned the _correct_ boolean —
+   just ~49 seconds instead of milliseconds. A boolean-only assertion,
+   however generous its timeout, cannot tell "cycle detection works" apart
+   from "the depth ceiling alone silently paid for its absence at 10,000x
+   the cost." Every cyclic-termination test in this repo now asserts
+   elapsed time, not just the returned value.
+
+**Main-agent independent verification beyond both subagents' own reports:**
+15 hand-run checks (all 5 CHECKPOINT-style examples checked against both
+resolvers directly on identical fixtures, token pinning, unreachable-DB
+behavior) before accepting the resolver; full CLI verification against
+real Postgres (allowed/denied, both pinning directions, impossible-token
+and unreachable-DB exit-3 paths, malformed-argument exit-2 paths) before
+committing the CLI wiring.
+
+**Final state:** `npm run test:integration` — 35 of this phase's own new
+tests pass (plus the 15 newly-real isolation tests), 0 failed among
+anything this phase touches. (`test/unit/store/tuple-store.integration
+.test.ts` — Phase 2's own testcontainers-based file — fails in this
+session's sandbox because its Docker daemon isn't reachable right now;
+unrelated to this phase, consistent with D-019's already-documented
+limitation, not a regression.) `npm test`, lint, typecheck, format all
+clean.
+
+**Exit criteria met (build spec §9 Phase 4 — no formal CHECKPOINT, but
+reported before starting Phase 5, which has one):** the production
+resolver agrees with the Phase 3 reference resolver on every hand-derived
+example, including a cyclic case that terminates within a bounded budget
+and resolves denied.
+
+**Open question carried forward, still unresolved:** whether Phase 4's
+return shape (`{ allowed: boolean }`, matching D-020's choice for Phase 3)
+needs to grow a resolution path before Phase 5's divergence reporting is
+designed around it — flagged again by this phase's own delegation, not
+yet settled.

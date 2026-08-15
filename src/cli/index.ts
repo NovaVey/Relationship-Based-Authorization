@@ -12,6 +12,7 @@ import { Command } from 'commander';
 import { doctor } from './commands/doctor.js';
 import { compileSchemaFile, publishSchemaFile } from './commands/schema.js';
 import { tupleWrite, tupleDelete } from './commands/tuple.js';
+import { check } from './commands/check.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -75,5 +76,21 @@ tuple
   .action(async (object: string, relation: string, subject: string) => {
     await tupleDelete(object, relation, subject);
   });
+
+program
+  .command('check')
+  .description('Check whether a subject has a relation or permission on an object')
+  .argument('<subject>', "namespace:id, e.g. 'user:alice'")
+  .argument('<relation>', 'relation or permission name')
+  .argument('<object>', "namespace:id, e.g. 'document:readme'")
+  .option(
+    '--at-token <n>',
+    'pin the check to a consistency token returned by an earlier write/delete',
+  )
+  .action(
+    async (subject: string, relation: string, object: string, options: { atToken?: string }) => {
+      await check(subject, relation, object, options);
+    },
+  );
 
 await program.parseAsync(process.argv);
