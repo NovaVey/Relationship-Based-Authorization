@@ -941,4 +941,158 @@ since Phase 2. Stale since then; found by `test-author` during this
 phase's own delegation, flagged rather than silently fixed since it's
 unrelated to Phase 7's own scope (report/CI surface, not tuple
 validation grammar) — worth a deliberate, separate pass, not a drive-by
-fix bundled into an unrelated phase's commit.
+fix bundled into an unrelated phase's commit. (Fixed separately: see
+`fix/tuple-validation-todo-gap`, PR #17, not part of any numbered phase.)
+
+## Phase 8 — API + GitHub checks-and-balances
+
+**Owner:** `report-designer` (`src/api/responses.ts`/`errors.ts` — pure
+response/error-shape design) + main agent (`src/api/server.ts`/`auth.ts`,
+`src/cli/commands/serve.ts`, `listLatestNamespaceVersions`, independent
+verification, the GitHub-governance exit criterion) + `test-author` (two
+separate delegations: server/auth wiring tests, then a follow-up for the
+`responses.ts`/`errors.ts` gap the first delegation itself flagged). No
+CHECKPOINT required for this phase (confirmed from §9's own text).
+
+Built in a separate git worktree (`feat/phase-8-api-surface`, off
+`origin/main`) rather than the main checkout, specifically so this
+phase's work never collided with two other background agents still
+writing files in the main checkout at the same time (the pre-existing
+`.todo()` gap fix, and this phase's own `report-designer` delegation) —
+see D-048 and the session's own concurrent-agent discipline.
+
+**Files touched:**
+
+- `src/api/errors.ts` (`report-designer`, extended by main agent) — the
+  one error envelope every route returns: `ApiErrorCode`
+  (`invalid_request`/`tuple_validation_failed`/`schema_compile_failed`/
+  `unauthorized`/`infrastructure_unavailable`/`internal_error`),
+  `API_ERROR_STATUS`, and one constructor per code. `invalid_request`
+  (400) was added by the main agent (D-052) for a case outside
+  `report-designer`'s original brief: a raw HTTP body that fails Zod
+  validation before it ever becomes a domain result their other
+  constructors know how to fail.
+- `src/api/responses.ts` (`report-designer`, untouched by main agent) —
+  pure response-shape builders for all five operations:
+  `checkResponse`/`expandResponse`/`tupleWriteResponse`/
+  `tupleDeleteResponse`/`schemaCompileResponse`/`schemaPublishResponse`/
+  `healthResponse`. `path`/`tree` pass through the real
+  `ResolutionStep`/`ExpandNode` verbatim, never reshaped (same D-036/
+  D-043 evidence-tree discipline extended to this layer); every status
+  is a literal, never derived from the body; no route ever returns 404
+  (D-049, D-053 — the one call `report-designer` flagged as genuinely
+  debatable, reviewed and signed off by the main agent).
+- `src/api/auth.ts` (new, main agent) — `checkAdminAuth`, the pure
+  `Authorization: Bearer <key>` check. `crypto.timingSafeEqual`, not
+  `===` (D-054). An unconfigured `ADMIN_API_KEY` fails every write
+  closed, never open (D-050).
+- `src/api/server.ts` (new, main agent) — `buildServer(pool)`: `POST
+/check`, `POST /expand`, `POST /tuples` (write, admin-gated), `DELETE
+/tuples` (delete, admin-gated), `POST /schema/compile` (no auth),
+  `POST /schema/publish` (admin-gated), `GET /health` (no auth,
+  deliberately — D-051). Unversioned, flat, RPC-shaped routes named
+  after the CLI operation, not a REST resource model (D-049). Zod
+  request-body validation inline; a malformed body never reaches a
+  domain function. Auth is a per-route Fastify `preHandler` option, not
+  a global URL-string-matched hook — declared right next to each gated
+  route, not in a separately-maintained list. A framework-level
+  `setErrorHandler` maps malformed JSON and any genuinely unanticipated
+  error to the same `invalid_request`/`internal_error` shapes every
+  other route uses.
+- `src/cli/commands/serve.ts` (new) — `authz serve`; binds `0.0.0.0`
+  (not Fastify's loopback-only default) since this command exists to be
+  reached from outside the process. Registered in `src/cli/index.ts`.
+- `src/schema/publish.ts` — gains `listLatestNamespaceVersions(pool)`:
+  every namespace's latest version in one query (`distinct on
+(namespace) ... order by namespace, version desc`), for `/health`.
+- `package.json` — `fastify` added (pre-approved, §2's stack).
+- Tests (new): `test/unit/api/auth.test.ts` (10), `server.test.ts` (22,
+  fast/DB-free, mocked `pool` + `vi.spyOn` on every domain module),
+  `server.integration.test.ts` (4, real `PostgreSqlContainer`, no
+  mocks — the genuine end-to-end proof of both of this phase's own exit
+  criterion clauses), `errors.test.ts` (22), `responses.test.ts` (34) —
+  88 new tests total.
+- `docs/DECISIONS.md`: D-048 through D-055.
+
+**A real, self-identified gap, closed within this same phase rather than
+carried forward:** the first `test-author` delegation (server/auth
+wiring) explicitly flagged that `src/api/responses.ts`/`errors.ts` — the
+`report-designer`-authored pure response-shape modules — had no unit
+tests of their own anywhere in the repo, since `server.test.ts`
+deliberately only tests `server.ts`'s _wiring_ of them. A second,
+narrowly-scoped `test-author` delegation closed this immediately (56
+tests: `errors.test.ts` + `responses.test.ts`), rather than letting it
+sit as a documented-but-open gap the way the tuple-validation `.todo()`s
+did across Phases 2-7.
+
+**A real gap this session could not close, honestly reported rather than
+worked around:** `server.integration.test.ts` — the file proving both of
+this phase's own literal exit-criterion clauses ("`/health` reports
+green", "an unauthenticated write attempt is rejected") against a real
+database — could not run inside `test-author`'s own sandbox: Docker's
+registry CDN is egress-blocked there (confirmed environment-wide, not
+file-specific, by reproducing the identical failure against an
+already-passing sibling integration test). The main agent independently
+ran it for real via this project's own established LOCALVERIFY
+technique — copied to a `LOCALVERIFY-`-prefixed sibling, swapped
+`PostgreSqlContainer` for this sandbox's real local Postgres fixture,
+ran all 4 cases for real (all passed, including the real
+unauthenticated-write-writes-nothing and real-`/health`-reflects-a-real-
+publish assertions), then deleted the copy — never committed. The
+committed file itself is untouched and identical to what `test-author`
+wrote; only this session's local verification method differed from what
+CI will actually do (CI's own `test-integration` job runs in an
+environment with real Docker access, per `.github/workflows/ci.yml`'s
+existing job, so the committed file is expected to run for real there).
+
+**Independent verification beyond both subagents' own reports:** read
+`report-designer`'s `responses.ts`/`errors.ts` in full and verified
+every type they import against the real, current exported shape of
+`src/audit/checks.ts`, `src/audit/expand.ts`, `src/store/tuples.ts`,
+`src/schema/dsl/errors.ts`, `src/schema/dsl/types.ts`, and
+`src/schema/publish.ts` — no mismatch found; ran the full built server
+for real against real local Postgres (not mocks) and hit every route
+with `curl`: schema compile/publish, tuple write/delete, `check` (a real
+multi-hop resolution path through a group membership, structurally
+verified), `expand`, confirmed unauthenticated and wrong-key writes are
+rejected with the underlying database showing zero new rows (checked
+directly via `psql`, not inferred from the HTTP response alone), and
+confirmed `/health` goes `503` with an empty namespace list when
+`DATABASE_URL` is unset entirely, `200` with the real, current namespace
+list otherwise; independently fail-checked two claims myself beyond
+what either `test-author` delegation already fail-checked on its own —
+removed the `preHandler` auth gate from the `POST /schema/publish` route
+registration itself (not the auth function — the route _wiring_),
+confirmed exactly the two expected "never called" tests failed for the
+right reason (the route actually reached `publishSchema`), restored,
+confirmed byte-identical; and independently broke `healthResponse`'s
+defensive-copy behavior (`namespaces: [...namespaces]` → `namespaces`),
+confirmed exactly the one expected "mutating the input array after the
+call has no effect" test failed, restored, confirmed byte-identical.
+
+**GitHub governance — Phase 8's other exit criterion (D-055):**
+confirmed applied. No available tool can read branch-protection-rule/
+ruleset, Dependabot auto-merge, or Code-security-and-analysis settings
+directly (confirmed via a real `ToolSearch` — genuine gap, not assumed).
+One piece was independently, directly confirmed by this session's own
+tooling regardless: "require conversation resolution before merging" is
+genuinely active, proven by a real blocked-merge `405` error encountered
+on PR #16 in Phase 7. For the rest, asked the repo owner directly rather
+than deferring; the owner worked through `docs/github-governance.md`'s
+Steps 1-4 in the GitHub UI and confirmed completion.
+
+**Final state:** `npm run verify`-equivalent (format:check, lint,
+typecheck, test, build) clean throughout; fast suite 211 passed (up from
+123 before this phase), 6 `.todo()` remaining (all pre-existing,
+unrelated to Phase 8).
+
+**Open questions carried forward:**
+
+- The one genuinely debatable design call this phase made
+  (`no_published_schema` → 400, never 404) is recorded and signed off
+  (D-053), but revisit if a future phase adds a real
+  resource-fetch-shaped endpoint (e.g. `GET /namespaces/:ns`).
+- `server.integration.test.ts` has run for real in this session (via
+  LOCALVERIFY) but not yet inside actual CI — first CI run on this
+  phase's PR is the first time it runs in the environment it was
+  actually written for (a real Docker-backed `test-integration` job).

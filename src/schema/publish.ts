@@ -95,3 +95,29 @@ export async function getLatestNamespaceConfig(
   );
   return rows[0]?.config;
 }
+
+/**
+ * Every namespace that has ever been published, each at its own latest
+ * version — the Phase 8 `/health` route's own requirement (build spec §9
+ * Phase 8: "reports ... current namespace config versions"), and the reason
+ * this exists alongside `getLatestNamespaceConfig`: that function only ever
+ * answers for one namespace named in advance (what a tuple write validates
+ * against), while `/health` needs to enumerate every namespace this
+ * deployment actually knows about, with no namespace named up front.
+ *
+ * `distinct on (namespace) ... order by namespace, version desc` picks
+ * exactly one row per namespace — its highest version — in one query
+ * rather than N (one `getLatestNamespaceConfig` call per known namespace),
+ * which would also require already knowing every namespace name to ask
+ * for. Ordered by namespace name for deterministic, stable output (a
+ * health payload that reorders itself between two calls with no
+ * underlying change would be a spurious diff for anything diffing it).
+ */
+export async function listLatestNamespaceVersions(pool: Pool): Promise<PublishedNamespace[]> {
+  const { rows } = await pool.query<{ namespace: string; version: number }>(
+    `select distinct on (namespace) namespace, version
+     from namespace_configs
+     order by namespace, version desc`,
+  );
+  return rows.map((row) => ({ namespace: row.namespace, version: row.version }));
+}
