@@ -38,13 +38,21 @@ const reportPath = process.env.SOUNDNESS_REPORT_PATH ?? 'soundness-report.md';
 // a parameter rather than hardcoding it.
 const botLogin = process.env.SOUNDNESS_BOT_LOGIN ?? 'github-actions[bot]';
 
+// `event` is file data (GITHUB_EVENT_PATH) — everything pulled out of it and
+// used to build a request URL below is validated to a narrow, safe type
+// immediately here, not trusted as-is. CodeQL's "file data in outbound
+// network request" check flags exactly this kind of unvalidated
+// file-to-URL flow; a strict integer/range check is what actually closes
+// it (not merely a truthy check, which still lets a non-numeric or
+// negative value flow through unchanged).
 const event = JSON.parse(readFileSync(eventPath, 'utf8'));
-const prNumber = event.pull_request?.number;
-if (!prNumber) {
+const prNumberRaw = event.pull_request?.number;
+if (typeof prNumberRaw !== 'number' || !Number.isInteger(prNumberRaw) || prNumberRaw <= 0) {
   throw new Error(
-    'no pull_request.number in the GitHub event payload — this script only runs in a pull_request-triggered job',
+    'no valid pull_request.number in the GitHub event payload — this script only runs in a pull_request-triggered job',
   );
 }
+const prNumber = prNumberRaw;
 
 const body = readFileSync(reportPath, 'utf8');
 
