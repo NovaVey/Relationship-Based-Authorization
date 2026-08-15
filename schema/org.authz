@@ -1,0 +1,12 @@
+// Namespace DSL example — see .claude/commands/build-authz-service.md §5.
+// `member` accepts `group#member` too (an org's membership can include
+// whole groups, not just individual users), directly analogous to
+// document/folder referencing `group#member`. `admin` is user-only — kept
+// simple, and there's no requirement that every relation accept a userset.
+namespace org {
+  relation member: user | group#member
+  relation admin: user
+
+  permission view = member | admin
+  permission manage = admin
+}

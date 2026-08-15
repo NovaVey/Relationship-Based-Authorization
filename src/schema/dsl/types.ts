@@ -118,11 +118,7 @@ export interface TupleToUsersetRule {
  * compile time rather than at 2am in a resolver.
  */
 export type RewriteRule =
-  | ComputedUsersetRule
-  | UnionRule
-  | IntersectionRule
-  | ExclusionRule
-  | TupleToUsersetRule;
+  ComputedUsersetRule | UnionRule | IntersectionRule | ExclusionRule | TupleToUsersetRule;
 
 /** A computed relation — never a valid tuple-write target. See `CompiledRelation`. */
 export interface CompiledPermission {

@@ -1,0 +1,12 @@
+// Deliberately malformed — for Phase 1's own exit criterion (see
+// .claude/commands/build-authz-service.md §9 Phase 1): a malformed schema
+// must be rejected with an error naming the exact line/construct, never a
+// generic "invalid schema". Two permissions here each reference a relation
+// that was never declared on `document`.
+namespace document {
+  relation owner: user
+  relation editor: user | group#member
+
+  permission view = viewer | editor | owner
+  permission edit = editor | admin
+}

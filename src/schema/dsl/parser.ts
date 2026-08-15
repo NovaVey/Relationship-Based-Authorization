@@ -69,8 +69,7 @@ export interface ParsedNamespace {
 }
 
 export type ParseResult =
-  | { ok: true; namespaces: ParsedNamespace[] }
-  | { ok: false; error: SchemaError };
+  { ok: true; namespaces: ParsedNamespace[] } | { ok: false; error: SchemaError };
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -305,7 +304,7 @@ function parseSubjectType(state: ParserState): ParsedSubjectType {
   validateIdentifier(nsToken, 'subject type namespace');
   if (peek(state).type === 'hash') {
     consume(state);
-    const relToken = expectWord(state, 'subject type relation (after \'#\')');
+    const relToken = expectWord(state, "subject type relation (after '#')");
     validateIdentifier(relToken, 'subject type relation');
     return { namespace: nsToken.value, relation: relToken.value, line: nsToken.line };
   }
@@ -478,7 +477,11 @@ export function parseSchema(source: string): ParseResult {
     if (namespaces.length === 0) {
       return {
         ok: false,
-        error: makeSchemaError('no_namespaces_declared', 'schema source declares no namespace blocks', 1),
+        error: makeSchemaError(
+          'no_namespaces_declared',
+          'schema source declares no namespace blocks',
+          1,
+        ),
       };
     }
     return { ok: true, namespaces };

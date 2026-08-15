@@ -51,8 +51,7 @@ export interface SchemaError {
 }
 
 export type SchemaCompileResult =
-  | { ok: true; schema: CompiledSchema }
-  | { ok: false; errors: SchemaError[] };
+  { ok: true; schema: CompiledSchema } | { ok: false; errors: SchemaError[] };
 
 /**
  * Thrown internally by the lexer/parser to unwind to `parseSchema`'s single

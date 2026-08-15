@@ -159,3 +159,50 @@ that directly — confirm before Phase 2's CHECKPOINT that GitHub Actions CI
 `yamanote.proxy.rlwy.net:36306`, or find another execution path (e.g. a
 Railway sandbox exec, matching how `DATABASE_URL` itself was verified here)
 for any integration test that needs to run from this session specifically.
+
+## Phase 1 — Schema DSL
+
+**Owner:** `schema-compiler` subagent (parser/compiler/types/errors + the
+four example schemas), delegated per `.claude/commands/build-authz-service.md`
+§14. `test-author` subagent dispatched separately, after `schema-compiler`
+finished, given only the compiled interface (`types.ts`/`errors.ts`'s
+exported shapes) — explicitly barred from reading `parser.ts`/`compiler.ts`
+so its tests prove agreement with §5/§10 of the spec, not with the
+implementation's own behavior (delegation rule 5).
+
+**Files touched:**
+
+- Added: `src/schema/dsl/{types.ts,errors.ts,parser.ts,compiler.ts}` — a
+  pure, zero-I/O lexer/recursive-descent parser + semantic compiler for the
+  §5 grammar. `schema/{document,folder,group,org}.authz` (the four example
+  namespaces — `document`/`folder` verbatim from §5, `group`/`org`
+  designed to match) and `schema/malformed-example.authz` (Phase 1's own
+  exit-criteria fixture).
+- Test suite: see below, added by `test-author` once its delegation
+  completes.
+
+**Main-agent review before accepting (delegation rule 4):** read every
+file `schema-compiler` produced, then independently re-ran the compiler
+myself — not just the subagent's own transcript — against all four
+example schemas compiled together (confirmed idempotent), the malformed
+example, and two adversarial cases beyond what the subagent reported on
+its own (a relation subject type targeting another namespace's
+*permission* instead of a relation, and a self-referential `permission
+view = view`). Both correctly rejected with a specific, located error.
+`npm run lint`/`typecheck`/`format:check` re-run and confirmed clean
+myself, not just trusted from the subagent's report.
+
+**Judgment calls the subagent flagged, now recorded:** `docs/DECISIONS.md`
+D-011 (rewrite-rule operator precedence — `&` binds tighter than `|`/`-`),
+D-012 (tuple-to-userset's target-namespace check is strict; a plain
+relation subject type's is soft — and why those are different, not
+inconsistent), D-013 (circular-permission detection is a static
+compile-time graph check over permission-to-permission edges only, not a
+per-branch liveness proof).
+
+**Not yet done:** `test-author`'s test suite (in progress at time of this
+commit — Phase 1's CHECKPOINT isn't reported until that's back and
+reviewed too). The CLI's `authz schema compile <file>` command (§7) —
+Phase 1 built the DSL layer only; wiring it to the CLI is still open,
+possibly folded into this phase's completion or deferred to whichever
+later phase first needs it from the command line.
