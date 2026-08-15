@@ -1,0 +1,18 @@
+{
+  // Separate from tsconfig.json (used for `typecheck`, and deliberately
+  // covers test/**/*.ts too so tests get full type-checking) — this one is
+  // for `build` specifically, and only ever emits src/. Without an explicit
+  // rootDir, tsc infers the common root across every *included* file; once
+  // test/**/*.ts is in the mix that common root becomes the repo root
+  // itself, so output lands at dist/src/... and dist/test/... instead of
+  // dist/... — and the CLI's own package.json `bin` entry, plus anything
+  // that imports the built package, breaks. Caught live running the built
+  // CLI during Phase 0's doctor CHECKPOINT.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "test"]
+}

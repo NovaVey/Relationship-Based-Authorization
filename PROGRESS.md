@@ -76,3 +76,64 @@ repurposed isolation suite, 0 failures), `npm run test:integration` (15
   to this repo's GitHub settings yet (branch protection, required status
   checks, Dependabot auto-merge, CODEOWNERS) — none of that is visible from
   the git tree; confirm before treating Phase 8's exit criteria as met.
+
+## Phase 0 — CLI + migration runner wiring
+
+**Owner:** main agent (not delegated — CLI/scaffolding is explicitly main-agent
+work per `.claude/commands/build-authz-service.md` §14, and this phase has
+no §10 test-plan entries of its own for `test-author` to write from).
+
+**Files touched:**
+
+- Added: `src/cli/index.ts` (commander entry point — only `doctor` is
+  registered; no stubs for later phases' commands), `src/cli/commands/doctor.ts`,
+  `src/store/client.ts` (singleton `pg.Pool`, 5s connection timeout so
+  `doctor` fails fast rather than hanging), `src/store/migrate.ts` (migration
+  runner + `discoverMigrations()`, pure and unit-tested; a missing
+  `migrations/` directory is zero migrations, not an error), `test/unit/migrate.test.ts`
+  (5 tests against `discoverMigrations()`), `tsconfig.build.json` (see
+  `docs/DECISIONS.md` D-009).
+- Rewritten: `src/config/env.ts` (`DATABASE_URL`/`ADMIN_API_KEY`/`SOUNDNESS_FUZZ_SEED`
+  now optional-if-blank via `optionalString()`, `dotenv.config({ quiet: true })`
+  — see `docs/DECISIONS.md` D-008), `package.json` (`commander` + `pg` moved
+  to real `dependencies`, `tsx` added for `npm run cli`, `bin.authz` entry,
+  `build` now runs `tsconfig.build.json`).
+
+**Two real bugs found and fixed by actually running the CLI, not by
+inspection** (both recorded in `docs/DECISIONS.md`, D-008 and D-009):
+
+1. Eager env validation crashed `authz --help` on a fresh clone with no
+   `.env` — fixed by making `DATABASE_URL` optional at the schema layer,
+   required at the point of use (`doctor` itself, before touching Postgres).
+2. `npm run build` had no `rootDir`, so once `test/**/*.ts` shared a
+   tsconfig with `src/**/*.ts` the inferred common root became the repo
+   root — `dist/cli/index.js` (the `bin` target) never existed, the real
+   file was at `dist/src/cli/index.js`, and the entire test suite was being
+   compiled into the distributable output. Fixed with a dedicated
+   `tsconfig.build.json`.
+
+**Verification, against a real local Postgres 16 (not a mock):**
+
+- `authz --help` — works with zero `.env` present, exit 0.
+- `authz doctor` with no `DATABASE_URL` — specific message, exit 3, no hang.
+- `authz doctor` with bad credentials — `password authentication failed for
+user "baduser"`, exit 3.
+- `authz doctor` with an unreachable host — `connect ECONNREFUSED`, exit 3,
+  fails within the 5s connection timeout rather than hanging.
+- `authz doctor` against a real, reachable Postgres — reports the database
+  name and server version, creates `schema_migrations`, reports `0/0`
+  applied (correct — Phase 2 hasn't added real migrations yet), and is
+  idempotent on a second run.
+- Built CLI (`node dist/cli/index.js`) verified identical to `tsx`-run
+  source for both `--help` and `doctor`.
+- Full local `npm run verify` equivalent (format:check, lint, typecheck,
+  test, test:integration, build) — all clean; unit suite now 5 passed + 20
+  `.todo()` (was 0 passed + 20 `.todo()`), integration suite unchanged at 15
+  `.todo()`.
+
+**CHECKPOINT reached — see build spec §9 Phase 0:** exit criteria met
+(`authz --help` runs; `authz doctor` reports reachable or a specific error).
+Waiting on Postgres hosting choice for the connection string Phase 2's
+actual migrations will run against — the local Postgres used above is a
+throwaway dev fixture (`authz` / `authz_dev` on `127.0.0.1`), not anything
+this project depends on going forward.
