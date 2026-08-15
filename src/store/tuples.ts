@@ -153,19 +153,24 @@ async function insertWriteLog(
   operation: 'write' | 'delete',
   tuple: TupleKey,
 ): Promise<number> {
-  const { rows } = await client.query<{ token: number }>(
+  // write_log.token is a Postgres `bigint`, which `pg` returns as a string,
+  // never coerced on its own — see src/store/tokens.ts's doc comment for
+  // the real, reproduced bug this caused before `Number(...)` was added
+  // here. Query typed as `string`, not `number`, so this stays honest
+  // about what `pg` actually hands back.
+  const { rows } = await client.query<{ token: string }>(
     `insert into write_log (operation, tuple) values ($1, $2) returning token`,
     [operation, JSON.stringify(tuple)],
   );
-  const token = rows[0]?.token;
-  if (token === undefined) {
+  const raw = rows[0]?.token;
+  if (raw === undefined) {
     // write_log.token is a NOT NULL generated column — reaching this means
     // the insert itself didn't return a row, which should be impossible
     // for a successful single-row INSERT ... RETURNING. Fail loudly rather
     // than let a caller receive an unusable token.
     throw new Error('write_log insert did not return a token');
   }
-  return token;
+  return Number(raw);
 }
 
 /**
@@ -262,6 +267,25 @@ export interface TupleFilter {
   relation?: string;
 }
 
+/**
+ * The raw shape a `select ... from relation_tuples` row actually arrives
+ * as. `id` is typed `string`, not `number`: `relation_tuples.id` is a
+ * Postgres `bigint`, and `pg` never coerces a `bigint` to `number` on its
+ * own — see `src/store/tokens.ts`'s doc comment for the real bug this
+ * caused elsewhere before every bigint-column read in this file was
+ * audited and explicitly coerced with `Number(...)`.
+ */
+interface RawTupleRow {
+  id: string;
+  object_ns: string;
+  object_id: string;
+  relation: string;
+  subject_ns: string;
+  subject_id: string;
+  subject_relation: string | null;
+  created_at: Date;
+}
+
 /** Every stored tuple on one object, optionally narrowed to one relation — "who has R on O". */
 export async function listTuplesByObject(pool: Pool, filter: TupleFilter): Promise<TupleRow[]> {
   const conditions = ['object_ns = $1', 'object_id = $2'];
@@ -270,16 +294,7 @@ export async function listTuplesByObject(pool: Pool, filter: TupleFilter): Promi
     conditions.push(`relation = $${params.length + 1}`);
     params.push(filter.relation);
   }
-  const { rows } = await pool.query<{
-    id: number;
-    object_ns: string;
-    object_id: string;
-    relation: string;
-    subject_ns: string;
-    subject_id: string;
-    subject_relation: string | null;
-    created_at: Date;
-  }>(
+  const { rows } = await pool.query<RawTupleRow>(
     `select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at
      from relation_tuples where ${conditions.join(' and ')}
      order by id`,
@@ -294,16 +309,7 @@ export async function listTuplesBySubject(
   subjectNs: string,
   subjectId: string,
 ): Promise<TupleRow[]> {
-  const { rows } = await pool.query<{
-    id: number;
-    object_ns: string;
-    object_id: string;
-    relation: string;
-    subject_ns: string;
-    subject_id: string;
-    subject_relation: string | null;
-    created_at: Date;
-  }>(
+  const { rows } = await pool.query<RawTupleRow>(
     `select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at
      from relation_tuples where subject_ns = $1 and subject_id = $2
      order by id`,
@@ -312,18 +318,9 @@ export async function listTuplesBySubject(
   return rows.map(rowToTuple);
 }
 
-function rowToTuple(row: {
-  id: number;
-  object_ns: string;
-  object_id: string;
-  relation: string;
-  subject_ns: string;
-  subject_id: string;
-  subject_relation: string | null;
-  created_at: Date;
-}): TupleRow {
+function rowToTuple(row: RawTupleRow): TupleRow {
   return {
-    id: row.id,
+    id: Number(row.id),
     objectNs: row.object_ns,
     objectId: row.object_id,
     relation: row.relation,

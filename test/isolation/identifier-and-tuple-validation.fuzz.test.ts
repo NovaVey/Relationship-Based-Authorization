@@ -20,10 +20,12 @@
  * validator exists. Every `it.todo` that uses it becomes real once Phase 1
  * (the schema DSL) and Phase 2 (the tuple writer) exist.
  */
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
+import { Pool } from 'pg';
 
 import { compileSchema } from '../../src/schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../../src/schema/dsl/types.js';
+import { writeTuple, type TupleKey } from '../../src/store/tuples.js';
 
 const NUL = String.fromCharCode(0);
 const NEWLINE = String.fromCharCode(10);
@@ -250,19 +252,95 @@ describe('namespace and relation identifiers reject the injection payload corpus
 });
 
 describe('subject and object identifiers reject the injection payload corpus', () => {
-  it.todo(
-    'writing a tuple rejects every payload in INJECTION_PAYLOAD_CORPUS as a subject id, before the write reaches the tuple store',
-  );
+  /**
+   * `writeTuple` (Phase 2, `src/store/tuples.ts`) takes a `Pool` as an
+   * explicit argument rather than reaching for a module-level singleton —
+   * so proving "before the write reaches the tuple store" doesn't need a
+   * real, reachable Postgres at all. This pool points at a port nothing on
+   * this host listens on, with a short connect timeout: if `writeTuple`
+   * ever tried to actually query it, the attempt would fail fast with a
+   * connection error and this test would fail loudly (a thrown/rejected
+   * promise, not the expected `{ ok: false }` return) — proving the claim
+   * for real, not just that the returned shape looks like a rejection.
+   * Keeping this file DB-free (see its own doc comment and
+   * `test/isolation/README.md`, which describes this suite as the fast
+   * one) is a deliberate side effect of the same proof, not a compromise.
+   */
+  const unreachablePool = new Pool({
+    connectionString: 'postgres://nobody:nothing@127.0.0.1:1/unreachable',
+    connectionTimeoutMillis: 300,
+  });
 
-  it.todo(
-    'writing a tuple rejects every payload in INJECTION_PAYLOAD_CORPUS as an object id, before the write reaches the tuple store',
-  );
+  afterAll(async () => {
+    await unreachablePool.end();
+  });
 
-  it.todo(
-    "an empty subject or object id is rejected, never silently treated as a wildcard or 'any subject' — the fails-closed default carried over from the predecessor's own 'empty header treated as absent, never as a match'",
-  );
+  function tupleWith(overrides: Partial<TupleKey>): TupleKey {
+    return {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+      ...overrides,
+    };
+  }
+
+  it('writing a tuple rejects every payload in INJECTION_PAYLOAD_CORPUS as a subject id, before the write reaches the tuple store', async () => {
+    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+      const result = await writeTuple(unreachablePool, tupleWith({ subjectId: payload }));
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+    }
+  });
+
+  it('writing a tuple rejects every payload in INJECTION_PAYLOAD_CORPUS as an object id, before the write reaches the tuple store', async () => {
+    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+      const result = await writeTuple(unreachablePool, tupleWith({ objectId: payload }));
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+    }
+  });
+
+  it("an empty subject or object id is rejected, never silently treated as a wildcard or 'any subject' — the fails-closed default carried over from the predecessor's own 'empty header treated as absent, never as a match'", async () => {
+    const subjectEmpty = await writeTuple(unreachablePool, tupleWith({ subjectId: '' }));
+    expect(subjectEmpty.ok).toBe(false);
+    if (!subjectEmpty.ok) {
+      expect(subjectEmpty.errors.some((e) => e.code === 'invalid_identifier')).toBe(true);
+    }
+
+    const objectEmpty = await writeTuple(unreachablePool, tupleWith({ objectId: '' }));
+    expect(objectEmpty.ok).toBe(false);
+    if (!objectEmpty.ok) {
+      expect(objectEmpty.errors.some((e) => e.code === 'invalid_identifier')).toBe(true);
+    }
+  });
 });
 
+/**
+ * Deliberately left `.todo()` past Phase 2 — not an oversight. Every entry
+ * in `MALFORMED_USERSET_SUBJECT_CORPUS` is a raw, unsplit
+ * "namespace:id#relation"-shaped string ('group:eng#', '#member', ...);
+ * `writeTuple`'s `TupleKey` (`src/store/tuples.ts`) never takes a raw
+ * string like that — it takes already-split `subjectNs`/`subjectId`/
+ * `subjectRelation` fields, each validated independently by
+ * `validateIdentifiers`. The code that actually parses a raw
+ * "group:eng#member"-shaped argument into those fields
+ * (`parseSubjectRef` in `src/cli/commands/tuple.ts`) is CLI/API-surface
+ * plumbing, not the tuple store — build spec §9 Phase 2's exit criteria
+ * ("writing and reading round-trips; a write returns a strictly
+ * increasing token; deleting a tuple is immediately invisible to a read
+ * pinned to a token issued after the delete") never mentions a raw-string
+ * subject parser, and §7 (the CLI/API surface these strings are actually
+ * parsed at) isn't scheduled until Phase 7/8. Un-skip these once whichever
+ * phase owns that raw-string grammar lands, against the parser that
+ * actually exists then — not against `writeTuple` itself, which has no
+ * grammar to fail here.
+ */
 describe('tuple-to-userset subject references reject malformed grammar', () => {
   it.todo(
     'writing a tuple with a subject in MALFORMED_USERSET_SUBJECT_CORPUS is rejected with an error identifying which part of the subject reference is invalid',
