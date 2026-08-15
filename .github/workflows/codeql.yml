@@ -4,9 +4,14 @@ name: CodeQL
 # ci.yml (which only checks known-CVE *dependencies*, not code patterns).
 # Results land under the repo's Security -> Code scanning alerts tab, not as
 # a PR status check — this workflow is intentionally not wired into required
-# status checks (see docs/github-governance.md Step 6), matching this repo's
+# status checks (see docs/github-governance.md Step 5), matching this repo's
 # Standard governance tier. Promoting it to a required check is one of that
 # step's stricter-tier options, left to the maintainer to opt into.
+#
+# `init` and `analyze` below must stay on the same codeql-action major
+# version — they're two steps of one job in the same monorepo release, and
+# mismatching them (e.g. bumping one to v4 while the other stays on v3) fails
+# the Analyze step outright. Bump both together, in the same commit, always.
 
 on:
   push:
@@ -32,11 +37,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3
+      - uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           languages: javascript-typescript
           queries: security-extended
 
-      - uses: github/codeql-action/analyze@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3
+      - uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           category: '/language:javascript-typescript'
