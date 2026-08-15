@@ -2,10 +2,9 @@
 /**
  * `authz` — the CLI surface described in
  * .claude/commands/build-authz-service.md §7. Only commands that actually
- * exist are registered; a stub for `schema`/`tuple`/`check`/etc. before
- * their phases land would be exactly the "half-finished implementation"
- * this project's own rules warn against. `doctor` is the one real command
- * so far (Phase 0) — everything else appears here as its phase lands.
+ * exist are registered; a stub for a command before its phase lands would
+ * be exactly the "half-finished implementation" this project's own rules
+ * warn against. Not yet registered: `expand` (Phase 6), `serve` (Phase 8).
  */
 import { Command } from 'commander';
 
@@ -13,6 +12,7 @@ import { doctor } from './commands/doctor.js';
 import { compileSchemaFile, publishSchemaFile } from './commands/schema.js';
 import { tupleWrite, tupleDelete } from './commands/tuple.js';
 import { check } from './commands/check.js';
+import { soundnessRun } from './commands/soundness.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -92,5 +92,18 @@ program
       await check(subject, relation, object, options);
     },
   );
+
+const soundness = program.command('soundness').description('Differential-soundness fuzzing');
+
+soundness
+  .command('run')
+  .description(
+    "Run Phase 5's differential fuzz against both resolvers; print and persist the report",
+  )
+  .option('--queries <n>', 'number of random queries to run (defaults to SOUNDNESS_FUZZ_QUERIES)')
+  .option('--seed <s>', 'reproduce a specific run (defaults to SOUNDNESS_FUZZ_SEED, else random)')
+  .action(async (options: { queries?: string; seed?: string }) => {
+    await soundnessRun(options);
+  });
 
 await program.parseAsync(process.argv);

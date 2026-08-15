@@ -506,3 +506,186 @@ return shape (`{ allowed: boolean }`, matching D-020's choice for Phase 3)
 needs to grow a resolution path before Phase 5's divergence reporting is
 designed around it — flagged again by this phase's own delegation, not
 yet settled.
+
+## Phase 5 — Differential-soundness fuzz harness
+
+**Owner:** `soundness-engineer` (harness core) + main agent (migration,
+CLI wiring, independent verification, CHECKPOINT) + `test-author` (§10
+suite, not yet dispatched as of this section being written).
+
+**Files touched so far:**
+
+- `src/store/migrations/0003_soundness_runs.sql` (new, committed
+  separately as `02a1617`) — the `soundness_runs` table from §4, verified
+  against real local Postgres (CHECK constraint, jsonb/count defaults)
+  before committing.
+- `src/soundness/generators.ts` (new, 941 lines) — random schema, tuple
+  graph, and query generator. Fixed-role namespace sources
+  (group/hierarchical/resource) hand-place all four `RewriteRule` kinds
+  and exactly one guaranteed userset-subject cycle in every fixture,
+  regardless of the seed's random draws elsewhere; `computeCoverageReport`
+  independently re-audits this against the _compiled_ schema and the
+  _actual_ tuple array rather than trusting construction intent (D-032).
+  Every generated namespace name is seed-salted (D-033) to prevent a
+  cross-run tuple collision from producing a spurious `false_grant`.
+  `critical` is fuzz-harness-only metadata (D-031), not a DSL feature.
+  `fast-check` is used only as a seeded integer-stream PRNG source
+  (D-034), never via composed arbitraries/shrinking.
+- `src/soundness/classify.ts` (new, 100 lines) — `classifyResult`
+  (agreement → `null`, else `false_grant`/`false_deny` per §6.5, tagging
+  `critical` from the generator's metadata) and `computeVerdict`
+  (`falseGrantCount > 0` → `unsound` unconditionally, checked before the
+  coverage check so a real finding is never masked by
+  `insufficient_coverage`).
+- `src/soundness/runner.ts` (new) — `runSoundnessFuzz(pool, options)`:
+  generates a fixture, compiles + publishes the schema, writes every
+  tuple for real, checks every query against both resolvers, classifies,
+  computes the verdict, persists one `soundness_runs` row. Includes a
+  `maxDepth` override option for replay/reproduction — explicitly
+  documented as _not_ a fix for the cycle-guard-detection gap below
+  (D-035).
+
+**Two things built by `soundness-engineer` and caught/fixed before they
+became a problem, not after — both self-reported in their own final
+report, independently re-verified by the main agent:**
+
+1. The generator's first draft reproduced D-023's raw-NUL-byte bug
+   independently (same `\0`-separator idiom in a cycle-detection key,
+   landing as a literal `0x00` byte instead of the two-character escape).
+   Found via `file`/byte inspection, fixed, re-verified.
+2. The cross-run stale-tuple hazard behind D-033 — found and fixed before
+   it could ever produce a false finding, not discovered via a bad run.
+
+**Main-agent independent verification, beyond `soundness-engineer`'s own
+report:** typecheck/lint/format/unit tests all clean; a clean 5000-query
+run with an independently-chosen seed (`sound`, 0/0); reproducibility
+confirmed directly (`generateFixture` called twice with the same seed →
+identical fixture); coverage confirmed directly (all four rewrite-rule
+kinds + a cycle present in the compiled artifact); the
+intersection-as-union deliberately-broken-engine proof reproduced with an
+independently-chosen seed (89 false grants, `verdict: "unsound"`),
+`src/resolve/production/resolver.ts` restored and confirmed byte-identical
+(`md5sum` match, empty `git diff`) afterward.
+
+**A real finding, confirmed empirically, not just theorized (D-035):**
+differential fuzzing at any depth setting cannot catch a missing SQL
+cycle guard, because that bug class corrupts only a query's latency, never
+its returned boolean. Confirmed twice, independently: by
+`soundness-engineer` at the standard production-realistic depth, and by
+the main agent attempting a forced-depth workaround (`maxDepth: 20_000`,
+500 queries, SQL path-array guard removed) — which did not even finish,
+timing out past 300 seconds, because forcing a large depth cap inflates
+the cost of _every_ query in the batch, not just the one that would
+demonstrate the bug. This is a deliberate, stated division of labor, not
+a gap: that bug class stays covered by the existing elapsed-time-asserting
+Phase 3/4 termination tests (D-024, D-027, D-029), not by this fuzzer —
+see D-035 for the full reasoning, and the Phase 5 CHECKPOINT for how this
+gets reported to the user.
+
+**`authz soundness run [--queries N] [--seed S]` (§7)** —
+`src/cli/commands/soundness.ts`, wired into `src/cli/index.ts`. Maps a
+`SoundnessRunResult` onto §7's exit-code table (`0` sound, `1` unsound,
+`2` insufficient_coverage or a malformed argument, `3` infrastructure
+failure). `--seed` falls back to `env.SOUNDNESS_FUZZ_SEED`, then to a
+fresh random seed. Independently verified against real local Postgres,
+not just read: a sound run persists a row and exits 0; a malformed
+`--queries` exits 2; an unreachable `DATABASE_URL` exits 3; and — after
+deliberately re-breaking the production resolver's intersection handling
+a second time — an unsound run exits 1 and prints every divergence with
+its critical flag. Resolver mutation reverted and confirmed
+byte-identical each time.
+
+**§10 test suite (`test-author`):**
+
+- `test/isolation/differential-soundness.fuzz.test.ts` — 7 of its 9
+  pre-existing `.todo()`s un-skipped in place (reproducibility, both
+  asymmetric-verdict tests, rewrite-rule/cycle coverage, the reference
+  resolver's own cyclic termination, and both "fuzz harness has power"
+  tests). 1 stays `.todo()` (resolution path — blocked on Phase 6,
+  `DivergenceRecord` has no path field yet). 1 moved out (see below).
+- `test/isolation/differential-soundness.fuzz.integration.test.ts` (new)
+  — the literal §9/§10 exit criterion at the real 5,000-query standard
+  budget against a real `PostgreSqlContainer`. Split out of the `.fuzz
+.test.ts` file specifically because that file's suffix is matched by
+  the fast, Docker-free `npm test` suite (`vitest.config.ts`'s `exclude`
+  only drops `**/*.integration.test.ts`), and this is the one test that
+  needs the real production engine against real Postgres to mean
+  anything.
+- `test/unit/cli/soundness.test.ts` (new) — the two §10 "CI" exit-code
+  bullets now implementable given the CLI command above. DB-free by
+  design: the `false_grant → exit 1` half stands in a canned
+  `SoundnessRunResult` via `vi.spyOn(runnerModule, 'runSoundnessFuzz')`
+  (detection power is already proven elsewhere; this isolates only the
+  CLI's own exit-code mapping), the unreachable-DB half runs the real,
+  unmocked `soundnessRun` against a guaranteed-closed port.
+- The "cycle detection deliberately removed" `.todo()` is un-skipped but
+  **renamed**, not weakened: its original wording ("times out ... or
+  reports the resulting false state — it never silently passes") is not
+  achievable as an honest passing assertion at any depth, per D-035. It
+  now asserts the real, verified boundary — a synthetic double with the
+  userset-subject cycle guard removed but the depth cap left in place
+  returns the _same_ classification as the guarded version, proving the
+  fuzzer is structurally blind to this bug class by design, and that real
+  coverage lives in the Phase 3/4 termination tests instead.
+
+**Two real things `test-author` found and fixed, independently verified
+by the main agent, not just trusted from the report:**
+
+1. Independently reproduced D-023's raw-NUL-byte bug a second time (a
+   `\0`-separator idiom in the synthetic test double's own cycle-key,
+   same as generators.ts's own earlier instance) — found via byte-level
+   inspection, fixed by switching to a `|` separator. Confirmed via `file`
+   on the committed files: all render as text, none as `data`.
+2. A misleading doc comment in `generators.ts`: the reserved seed query 0
+   ("touches the cyclic construct, expected denied") is **not actually
+   guaranteed denied by construction** — its subject (`lonelyUser`) is
+   drawn from the same pool `assignRandomTuples` freely assigns elsewhere,
+   so an unrelated random tuple can coincidentally grant it a real path
+   for some seeds. Only query 1 (the direct grant) is truly
+   unconditional. `test-author` caught this before it caused a flaky
+   test (an early draft of the cyclic-termination test trusted query 0's
+   boolean and would have been seed-dependent-flaky) and derived its own
+   guaranteed-absent witness instead. The main agent independently
+   confirmed the root cause (`lonelyUser = userIds[userIds.length - 1]`,
+   same pool as `assignRandomTuples`'s own `rng.pick(userIds)`) and fixed
+   the misleading comment in `generators.ts` to state the real guarantee.
+
+**Main-agent independent verification beyond `test-author`'s own report:**
+typecheck/lint/format/`npm test` clean (66 passed, 7 todo — the todo count
+checked line-for-line against the pre-existing baseline, no test silently
+dropped); a from-scratch, independently-written synthetic intersection-bug
+script run with an independently-chosen seed (66 false grants, `unsound`,
+32ms) reproducing the fuzz-power claim without reusing any of
+`test-author`'s own code; a real 5,000-query standard-budget run against
+real local Postgres and the real production resolver with a fresh seed
+(`sound`, 0/0, exit 0, ~3s); the same real 5,000-query run repeated with
+the production resolver's intersection handling deliberately broken a
+third time this phase (68 false grants, all critical, `UNSOUND`, exit 1),
+resolver reverted and confirmed byte-identical afterward; a direct
+fail-check of the new CLI exit-code test (broke `soundness.ts`'s own
+`unsound → 1` mapping, confirmed the test goes red with the exact expected
+diff, reverted, confirmed byte-identical and green again).
+
+**Not yet done as of this section being written:** a PR, and the
+CHECKPOINT report itself.
+
+**Gap `test-author` could not close, not yet independently closed
+either:** the actual pass/fail and elapsed time of the new real-Postgres
+integration test (`differential-soundness.fuzz.integration.test.ts`) via
+`npm run test:integration` — this sandbox's Docker daemon cannot pull
+`postgres:16-alpine` from the registry (same limitation as D-019/D-030;
+confirmed again via the proxy's own status endpoint). The main agent's own
+5,000-query real-Postgres runs above used this sandbox's local dev
+Postgres fixture directly (bypassing `testcontainers` entirely), which
+independently confirms the _exit criterion itself_ holds against the real
+system, but does not confirm the _committed test file_ runs green — that
+still needs real GitHub Actions CI, same as every other testcontainers-based
+file in this repo.
+
+**Open question carried forward:** Phase 4's resolution-path question
+(above) still stands, now sharpened by the fact that `DivergenceRecord`
+currently stores only the query and the two booleans, not either
+resolver's resolution path; a `false_grant` report is actionable today (it
+names the exact query), but showing the bogus chain the production
+resolver _thought_ it found (§6.7) would make it more so — deferred, not
+forgotten, likely Phase 6's concern.
