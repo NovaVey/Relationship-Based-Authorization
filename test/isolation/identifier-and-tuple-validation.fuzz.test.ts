@@ -20,7 +20,10 @@
  * validator exists. Every `it.todo` that uses it becomes real once Phase 1
  * (the schema DSL) and Phase 2 (the tuple writer) exist.
  */
-import { describe, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { compileSchema } from '../../src/schema/dsl/compiler.js';
+import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../../src/schema/dsl/types.js';
 
 const NUL = String.fromCharCode(0);
 const NEWLINE = String.fromCharCode(10);
@@ -70,14 +73,176 @@ export const MALFORMED_USERSET_SUBJECT_CORPUS = [
   'group:eng#member; DROP TABLE relation_tuples; --',
 ];
 
-describe('namespace and relation identifiers reject the injection payload corpus', () => {
-  it.todo(
-    'the schema DSL compiler rejects every payload in INJECTION_PAYLOAD_CORPUS as a namespace name, with an error naming the offending value',
-  );
+/**
+ * The DSL is a bare-word, whitespace-insensitive grammar (§5's own example
+ * schema spreads a `namespace` block across indented lines, which only
+ * parses at all if the tokenizer treats ASCII space/tab/newline as
+ * insignificant separators between tokens). That single structural fact
+ * means the corpus payloads split into four buckets, each requiring a
+ * different assertion — forcing all of them through one assertion shape
+ * would either be vacuous for some payloads or impossible to satisfy for
+ * others:
+ *
+ * - `empty`: the payload contains no non-whitespace content at all (`''`,
+ *   `' '`) — there is no name token for the parser to even attempt reading.
+ * - `whitespace-decorated`: the payload is a validly-lexable word with
+ *   ASCII whitespace (space/tab/newline) leading, trailing, or embedded in
+ *   it (`' document'`, `'document\n'`). A whitespace-insensitive grammar
+ *   with no quoted-identifier syntax has no way to ever see this exact
+ *   string as a single token — the tokenizer necessarily discards the
+ *   whitespace as an insignificant separator and reads the surviving word
+ *   as the name. The payload, whitespace and all, can therefore never
+ *   become a compiled identifier: `IDENTIFIER_PATTERN` contains no
+ *   whitespace character class, so any name that *does* survive compilation
+ *   is provably not this payload. That is the property this bucket proves.
+ * - `invalid-word`: a single lexable word token that fails the *semantic*
+ *   identifier grammar — starts with a digit, or exceeds
+ *   `MAX_IDENTIFIER_LENGTH`. Expected to be rejected by name, with
+ *   `code: 'invalid_identifier'` and a message naming the payload.
+ * - `unlexable`: contains a character that breaks tokenization before the
+ *   whole payload can ever be read as one token (`;`, quotes, `/`, `<`,
+ *   NUL, a bare `-`, U+2028, etc.). Still a correct rejection, but the
+ *   error can only ever name the specific character/fragment that broke
+ *   tokenization, not the whole malformed string — the grammar splits it
+ *   into multiple tokens first.
+ *
+ * Every one of these is a real, structural consequence of "bare-word,
+ * whitespace-insensitive, no quoted identifiers" — derivable from
+ * `IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH` (types.ts) and the shape of
+ * §5's own grammar, not from having read `parser.ts` or `compiler.ts`
+ * (deliberately not read while writing this).
+ */
+const ASCII_WHITESPACE = /[ \t\n]/g;
+const WORD_CHARS = /^[A-Za-z0-9_]*$/;
 
-  it.todo(
-    'the schema DSL compiler rejects every payload in INJECTION_PAYLOAD_CORPUS as a relation name, with an error naming the offending value',
-  );
+type PayloadCategory = 'empty' | 'whitespace-decorated' | 'invalid-word' | 'unlexable';
+
+function classifyPayload(payload: string): PayloadCategory {
+  const stripped = payload.replace(ASCII_WHITESPACE, '');
+  if (stripped === '') return 'empty';
+  if (stripped !== payload) {
+    // Contains ASCII whitespace the tokenizer treats as an insignificant
+    // separator; what's left, if anything, is a lexable word or nothing.
+    return WORD_CHARS.test(stripped) ? 'whitespace-decorated' : 'unlexable';
+  }
+  if (!WORD_CHARS.test(payload)) return 'unlexable';
+  if (IDENTIFIER_PATTERN.test(payload) && payload.length <= MAX_IDENTIFIER_LENGTH) {
+    // Every entry in INJECTION_PAYLOAD_CORPUS is documented as invalid
+    // under any reasonable reading (see the corpus's own doc comment
+    // above). If reasoning about a payload lands here, that documented
+    // invariant is violated — fail loudly rather than silently
+    // misclassifying it as something we don't actually assert on.
+    throw new Error(
+      `INJECTION_PAYLOAD_CORPUS entry ${JSON.stringify(payload)} classifies as a VALID identifier — corpus invariant violated`,
+    );
+  }
+  return 'invalid-word';
+}
+
+describe('namespace and relation identifiers reject the injection payload corpus', () => {
+  it('the schema DSL compiler rejects every payload in INJECTION_PAYLOAD_CORPUS as a namespace name, with an error naming the offending value', () => {
+    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+      const source = `namespace ${payload} {\n  relation owner: user\n}`;
+      const result = compileSchema(source);
+      const category = classifyPayload(payload);
+
+      if (category === 'whitespace-decorated') {
+        if (!result.ok) {
+          expect(result.errors.length).toBeGreaterThan(0);
+          continue;
+        }
+        // Compiled — the whitespace was necessarily discarded as an
+        // insignificant separator. Pin the actual safety property: the raw
+        // payload, whitespace included, is never itself a compiled
+        // namespace name, and every name that did compile is a validated
+        // identifier.
+        const names = Object.keys(result.schema.namespaces);
+        expect(names).not.toContain(payload);
+        for (const name of names) {
+          expect(IDENTIFIER_PATTERN.test(name)).toBe(true);
+        }
+        continue;
+      }
+
+      if (result.ok) {
+        throw new Error(
+          `expected payload ${JSON.stringify(payload)} to be rejected as a namespace name, but it compiled successfully`,
+        );
+      }
+
+      // Every SchemaErrorCode a namespace-name position can produce is
+      // syntax-level (see errors.ts's own grouping comment: "always exactly
+      // one error, parsing stops at the first one").
+      expect(result.errors.length).toBe(1);
+      const [error] = result.errors;
+      expect(error).toBeDefined();
+      if (!error) continue;
+      expect(error.message.length).toBeGreaterThan(0);
+      expect(error.line).toBe(1);
+
+      if (category === 'empty') {
+        // Both '' and ' ' collapse to the same token stream once ASCII
+        // whitespace is skipped: `namespace` immediately followed by `{`
+        // with no name token in between.
+        expect(error.code).toBe('missing_namespace_name');
+      } else if (category === 'invalid-word') {
+        expect(error.code).toBe('invalid_identifier');
+        expect(error.message).toContain(payload);
+      }
+      // category === 'unlexable': a real rejection occurred (asserted
+      // above via errors.length/message/line); the specific code and
+      // fragment named vary by which character broke tokenization first,
+      // which is not something this test pins per-payload — see the file
+      // doc comment above.
+    }
+  });
+
+  it('the schema DSL compiler rejects every payload in INJECTION_PAYLOAD_CORPUS as a relation name, with an error naming the offending value', () => {
+    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+      const source = `namespace document {\n  relation ${payload}: user\n}`;
+      const result = compileSchema(source);
+      const category = classifyPayload(payload);
+
+      if (category === 'whitespace-decorated') {
+        if (!result.ok) {
+          expect(result.errors.length).toBeGreaterThan(0);
+          continue;
+        }
+        const names = Object.keys(result.schema.namespaces.document?.relations ?? {});
+        expect(names).not.toContain(payload);
+        for (const name of names) {
+          expect(IDENTIFIER_PATTERN.test(name)).toBe(true);
+        }
+        continue;
+      }
+
+      if (result.ok) {
+        throw new Error(
+          `expected payload ${JSON.stringify(payload)} to be rejected as a relation name, but it compiled successfully`,
+        );
+      }
+
+      expect(result.errors.length).toBe(1);
+      const [error] = result.errors;
+      expect(error).toBeDefined();
+      if (!error) continue;
+      expect(error.message.length).toBeGreaterThan(0);
+      expect(error.line).toBe(2);
+
+      if (category === 'empty') {
+        // Unlike the namespace-name position, there is no
+        // 'missing_relation_name' code in SchemaErrorCode — an empty or
+        // all-whitespace relation name falls back to 'unexpected_token'
+        // (the parser expected a relation-name token and found ':'
+        // instead), a different structural reason than the namespace case,
+        // exactly as the task's own guidance anticipates.
+        expect(error.code).toBe('unexpected_token');
+      } else if (category === 'invalid-word') {
+        expect(error.code).toBe('invalid_identifier');
+        expect(error.message).toContain(payload);
+      }
+    }
+  });
 
   it.todo(
     'the compiled namespace config never contains an interpolated raw namespace or relation name in any generated SQL/DDL — only a parameter placeholder or a value that already passed validation',

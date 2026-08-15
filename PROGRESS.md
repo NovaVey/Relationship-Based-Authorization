@@ -187,7 +187,7 @@ myself — not just the subagent's own transcript — against all four
 example schemas compiled together (confirmed idempotent), the malformed
 example, and two adversarial cases beyond what the subagent reported on
 its own (a relation subject type targeting another namespace's
-*permission* instead of a relation, and a self-referential `permission
+_permission_ instead of a relation, and a self-referential `permission
 view = view`). Both correctly rejected with a specific, located error.
 `npm run lint`/`typecheck`/`format:check` re-run and confirmed clean
 myself, not just trusted from the subagent's report.
