@@ -881,11 +881,25 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
 
   const queries: GeneratedQuery[] = [];
 
-  // Reserved, hand-derivable seed queries: one that touches the cyclic
-  // construct with no real path (expected denied, exercises cycle
-  // termination end-to-end through an actual query), one with a real
-  // direct grant on the same cyclic object (expected allowed, proves the
-  // cycle didn't poison a real grant sitting next to it).
+  // Reserved seed queries, both touching the same cyclic object so any
+  // consumer can pair them. Only query 1 (index 1, when queryCount >= 2)
+  // is unconditionally hand-derivable: `addTuple` never removes a tuple
+  // once added, so the direct grant below (line ~826) guarantees it
+  // `allowed`, regardless of what else the seed's random draws produce.
+  // Query 0 exercises cycle termination end-to-end through an actual
+  // query (it forces the walk to traverse `cycleA`'s real tuples,
+  // including the cyclic edge into `cycleB` and back) but its own boolean
+  // is NOT guaranteed `denied` by construction — `lonelyUser` is drawn
+  // from the same `userIds` pool `assignRandomTuples` freely assigns as a
+  // subject elsewhere (line ~549), so a coincidental, unrelated random
+  // tuple can grant it a real, separate path to the same object for some
+  // seeds. (Found via `test-author`'s Phase 5 delegation, which had
+  // originally assumed query 0 was denied-by-construction the same way
+  // query 1 is allowed-by-construction; a consumer needing a guaranteed
+  // "no real path" witness must derive its own, e.g. a subject id proven
+  // absent from every generated tuple — see
+  // `differential-soundness.fuzz.test.ts`'s own cyclic-termination test
+  // for the pattern.)
   if (queryCount >= 1) {
     queries.push({
       subject: { ns: 'user', id: lonelyUser },
