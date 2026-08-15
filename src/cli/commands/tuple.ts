@@ -17,15 +17,27 @@ interface SubjectRef extends ObjectRef {
   relation?: string;
 }
 
-/** Parses `namespace:id` — used for the object argument, which is never a userset reference. */
-function parseObjectRef(raw: string): ObjectRef | undefined {
+/**
+ * Parses `namespace:id` — used for the object argument, which is never a
+ * userset reference.
+ *
+ * Exported for `test/isolation/identifier-and-tuple-validation.fuzz.test.ts`
+ * (the malformed-userset-subject-grammar `.todo()`s), which needs to
+ * inspect the raw-string splitting behavior directly, not just the CLI
+ * command's own output — see that file's own doc comment on why. No
+ * behavior change; this was module-private since Phase 2.
+ */
+export function parseObjectRef(raw: string): ObjectRef | undefined {
   const colon = raw.indexOf(':');
   if (colon <= 0 || colon === raw.length - 1) return undefined;
   return { ns: raw.slice(0, colon), id: raw.slice(colon + 1) };
 }
 
-/** Parses `namespace:id` or `namespace:id#relation` — used for the subject argument. */
-function parseSubjectRef(raw: string): SubjectRef | undefined {
+/**
+ * Parses `namespace:id` or `namespace:id#relation` — used for the subject
+ * argument. Exported for the same reason as `parseObjectRef` above.
+ */
+export function parseSubjectRef(raw: string): SubjectRef | undefined {
   const hash = raw.indexOf('#');
   const objectPart = hash === -1 ? raw : raw.slice(0, hash);
   const object = parseObjectRef(objectPart);
@@ -36,7 +48,8 @@ function parseSubjectRef(raw: string): SubjectRef | undefined {
   return { ...object, relation };
 }
 
-function buildTupleKey(
+/** Exported for the same reason as `parseObjectRef`/`parseSubjectRef` above. */
+export function buildTupleKey(
   objectRaw: string,
   relation: string,
   subjectRaw: string,
