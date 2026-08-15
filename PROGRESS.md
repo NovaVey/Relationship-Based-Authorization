@@ -818,3 +818,127 @@ assertions).
 is now real but nothing yet renders it for a human (Phase 7/8/9); the
 `authz expand` CLI output is functional, not the polished §8 chain
 notation the eventual report/screens should use.
+
+**Closed by Phase 7, see its own section below:** the `authz expand` CLI
+output stays functional/plain per its own Phase 6 scope (report/screens
+polish is Phase 8/9's concern, not Phase 7's), but the soundness report
+itself now has the polished §8 chain notation Phase 6 deferred.
+
+## Phase 7 — Report + CI surface
+
+**Owner:** `report-designer` (the four `src/report/*.ts` files) + main
+agent (CLI `--format` wiring, `.github/workflows/soundness.yml`, the
+PR-comment script, a real build bug found and fixed, independent
+verification, CHECKPOINT) + `test-author` (the report/CI test suite).
+**This phase has a mandatory CHECKPOINT** (build spec §9): "screenshot of
+the bot comment on a real PR in this repo. This is the demo." — see the
+CHECKPOINT report delivered to the user for the real evidence; not
+repeated in full here.
+
+**Files touched:**
+
+- `src/report/markdown.ts` (new, 37KB) — renders a `SoundnessRunResult`
+  as one GitHub-flavored-markdown document. Normalizes both resolvers'
+  independently-typed `ResolutionStep`/`DisproofStep` shapes into one
+  internal display tree (a downstream reporting layer, not a D-022
+  isolation violation — neither resolver imports this file or is walked
+  by it). A linear proof (`directGrant`/`usersetMembership`/
+  `tupleToUserset`/transparent `union`) collapses to one §8-style arrow
+  chain; the moment an `intersection` or `exclusion` appears anywhere in
+  the tree, rendering switches to a fenced ` ```text ` block (D-043 — a
+  native nested markdown list was tried first and shown, by actually
+  rendering it through a real parser, to have GFM's lazy-continuation
+  rule silently swallow the "excluding:" label and the closing annotation
+  into the wrong branch). `false_grant` gets the one reserved bold label,
+  never an emoji (D-044 — §8's own text names an emoji as an equally
+  valid option, but the subagent's own stricter copy rules win).
+- `src/report/json.ts` (new) — the machine-readable sibling; raw path
+  trees preserved verbatim, `false_grant` fields ordered first.
+- `src/report/exitCodes.ts` (new) — single source of truth for
+  `verdict -> 0|1|2`.
+- `src/report/prComment.ts` (new) — pure `decidePrCommentAction`, the
+  update-in-place decision (§10's own named CI bullet), no GitHub API
+  calls anywhere in it.
+- `src/cli/commands/soundness.ts` — gains `--format text|markdown|json`;
+  exit-code mapping now delegates to `soundnessExitCode`.
+- `.github/workflows/soundness.yml` (new) — runs on every PR. Its own
+  ephemeral Postgres `services:` container, never `secrets.DATABASE_URL`
+  (D-045 — the standard 5,000-query budget would otherwise accumulate
+  synthetic fuzz data in a real, shared project database forever, purely
+  as a side effect of CI running; matches `ci.yml`'s own
+  `test-integration` precedent of a disposable database for anything
+  that writes real rows during a run).
+- `scripts/post-soundness-comment.mjs` (new) — plain Node 22 script
+  (built-in `fetch`, no new dependency) calling the real
+  `decidePrCommentAction` to post or update the PR comment (D-046 —
+  deliberately not `actions/github-script`, which would mean a second,
+  divergence-prone implementation of the same decision inline in
+  workflow YAML).
+- `scripts/copy-migrations.mjs` (new) + `package.json`'s `build` script —
+  fixes a real, previously-latent bug (D-047, see below).
+- `eslint.config.js` — `scripts/**/*.mjs` added to `allowDefaultProject`
+  with Node globals declared by hand, matching the treatment
+  `test/**/*.ts` already gets.
+- Tests (new): `test/unit/report/{exitCodes,prComment,json,markdown}
+.test.ts` (4+7+7+19 = 37 tests), `test/unit/cli/soundness-format.test.ts`
+  (4 tests) — all DB-free, pure.
+- `docs/DECISIONS.md`: D-043 through D-047.
+
+**A real bug found and fixed, not by inspection but by actually running
+the built CLI against a genuinely fresh database (D-047):** `tsc` has
+never copied `.sql` files into `dist/` — since Phase 0. This went
+unnoticed through every prior phase because every migration
+verification in this project's history ran `tsx` against `src/`
+directly, never the _built_ `dist/cli/index.js`. Building
+`.github/workflows/soundness.yml` was the first thing to actually chain
+`npm run build` into running the built CLI against a database with none
+of this project's tables (a GitHub Actions `services:` container starts
+empty) — `doctor` reported a misleadingly successful "Migrations: 0/0
+applied" while the fresh database silently had no tables at all, which
+would have made every later step in the real workflow fail with a raw
+`relation "..." does not exist` instead of a clear message. Reproduced
+locally by creating (and, after fixing, dropping) a genuinely fresh
+Postgres database for this verification specifically, not reusing this
+sandbox's already-migrated dev fixture. Fixed with
+`scripts/copy-migrations.mjs`, chained into `npm run build`.
+
+**Independent verification beyond both subagents' own reports:** read
+every line of `markdown.ts`'s normalization functions by hand against
+both resolvers' real exported types (correct 1:1 mapping, no bugs
+found); independently reproduced report-designer's own markdown-
+corruption claim end to end — a from-scratch script (not reusing any of
+their fixture code) publishing a real schema, writing real tuples,
+calling the real production resolver against real Postgres for both an
+intersection and an exclusion case, rendering both through
+`renderSoundnessMarkdown`, and running the output through a real
+`markdown-it` parser: both fenced blocks close correctly, the
+`_(this proves ...)_` annotations render as their own paragraphs, never
+swallowed; independently reproduced the D-043 regression fail-check
+myself (removed the blank-line separator, confirmed exactly the two
+expected tests go red, restored, confirmed byte-identical); verified all
+three `--format` values plus the invalid-format exit-2 path against real
+local Postgres; ran the full CI step sequence (build, doctor, soundness
+run --format markdown) against a genuinely fresh database twice — once
+to discover D-047, once after the fix to confirm it now works — and
+again through a deliberately-broken production resolver to confirm a
+real UNSOUND markdown report renders correctly end-to-end through the
+CLI at exit 1 (resolver reverted, confirmed byte-identical); verified
+`scripts/post-soundness-comment.mjs`'s control flow by mocking `fetch`
+and exercising all three real `decidePrCommentAction` outcomes (create;
+update the one real match among decoys; update-plus-delete-stale) — each
+produced exactly the expected HTTP calls, methods, and URLs.
+
+**Final state:** `npm run verify`-equivalent (format:check, lint,
+typecheck, test, build) clean throughout; fast suite 123 passed (was 56
+at the start of Phase 5), 6 `.todo()` remaining, unrelated to this phase.
+
+**A pre-existing, unrelated gap noted for the record, not fixed here:**
+`test/isolation/identifier-and-tuple-validation.fuzz.test.ts` has two
+`.todo()`s whose own doc comment says they're blocked on a raw-string
+subject parser "scheduled for Phase 7/8" — that parser
+(`parseSubjectRef`, `src/cli/commands/tuple.ts`) has actually existed
+since Phase 2. Stale since then; found by `test-author` during this
+phase's own delegation, flagged rather than silently fixed since it's
+unrelated to Phase 7's own scope (report/CI surface, not tuple
+validation grammar) — worth a deliberate, separate pass, not a drive-by
+fix bundled into an unrelated phase's commit.
