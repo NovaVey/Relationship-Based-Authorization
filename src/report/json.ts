@@ -100,3 +100,44 @@ export function renderSoundnessJson(result: SoundnessRunResult): SoundnessJsonRe
 export function renderSoundnessJsonString(result: SoundnessRunResult, pretty = true): string {
   return JSON.stringify(renderSoundnessJson(result), null, pretty ? 2 : undefined);
 }
+
+/**
+ * The JSON sibling of `renderSoundnessInfrastructureFailureMarkdown`
+ * (`src/report/markdown.ts`) — rendered when `runSoundnessFuzz` throws, or a
+ * precondition like `DATABASE_URL` was never set, before any
+ * `SoundnessRunResult` ever exists. No caller in this repository consumes
+ * `--format json` today — only `.github/workflows/soundness.yml`'s
+ * `--format markdown` capture is load-bearing (`src/cli/commands/soundness
+ * .ts`'s own top-of-file doc comment) — but that same doc comment claims
+ * "stdout is the report and nothing else" for `json` exactly as it does for
+ * `markdown`, and leaving `json` silently empty on an infrastructure
+ * failure would be the same category of dishonesty this file's markdown
+ * sibling exists to close, just for a consumer this repo doesn't have yet.
+ *
+ * **Deliberately not `SoundnessJsonReport` with zeroed-out fields.** A
+ * `SoundnessJsonReport` promises a `verdict`, a `falseGrantCount`, a
+ * `falseDenyCount` — all computed from a real completed run. None of that
+ * exists here: `runSoundnessFuzz` never got far enough to compute any of
+ * it. Reusing that shape with `falseGrantCount: 0`/`verdict: 'sound'` (or
+ * any other placeholder) would make an infrastructure failure
+ * indistinguishable, byte-for-byte, from a genuine clean pass to any
+ * consumer checking `report.verdict === 'sound'` — exactly the silent
+ * miscategorization this project's own asymmetric-verdict discipline (§6.5,
+ * `docs/DECISIONS.md` D-006) exists to prevent. `status:
+ * 'infrastructure_failure'` is an honestly different, self-describing shape
+ * with no `verdict` field to misread: a consumer has to handle it as its
+ * own case, not accidentally fall through an existing `verdict` check.
+ */
+export interface SoundnessInfrastructureFailureJson {
+  status: 'infrastructure_failure';
+  message: string;
+}
+
+/** `SoundnessInfrastructureFailureJson` serialized — same `pretty` contract as `renderSoundnessJsonString`. */
+export function renderSoundnessInfrastructureFailureJsonString(
+  message: string,
+  pretty = true,
+): string {
+  const report: SoundnessInfrastructureFailureJson = { status: 'infrastructure_failure', message };
+  return JSON.stringify(report, null, pretty ? 2 : undefined);
+}
