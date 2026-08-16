@@ -267,6 +267,29 @@ function checkDuplicateMemberNames(ns: ParsedNamespace, errors: SchemaError[]): 
  * DFS with a recursion-stack coloring, standard cycle detection — bounded
  * by the number of permissions/edges in the namespace, so this can never
  * itself hang the compiler.
+ *
+ * The traversal itself is iterative (an explicit worklist stack), not
+ * native JS recursion: a namespace with a very long, flat permission chain
+ * (`permission pN = pN+1`, thousands deep, no `(` nesting anywhere) drove a
+ * previous recursive version of this DFS to consume one native call-stack
+ * frame per chain edge and overflow Node's real call stack — a second,
+ * structurally separate denial-of-service path from `parser.ts`'s
+ * paren-nesting depth cap (`MAX_EXPRESSION_NESTING_DEPTH`), since this
+ * function only runs after parsing has already succeeded and never
+ * recurses through `parseAtom`/`parseExpression` at all. Simulating the
+ * call stack explicitly (one array entry per in-progress `dfs` frame,
+ * lazily advancing each frame's own dependency index — exactly what the
+ * native call stack would otherwise track for us) sidesteps the
+ * native-recursion depth limit entirely rather than merely capping it,
+ * which is the correct fix for a cycle-detection algorithm that has no
+ * principled reason to bound how long a legitimate, acyclic permission
+ * chain may be. See `docs/DECISIONS.md` for the audit this closes; see
+ * D-013 (above) for the coloring/cycle semantics this rewrite preserves
+ * exactly — verified by an extensive differential comparison against the
+ * original recursive implementation across hand-built and randomly
+ * generated permission graphs (self-loops, mutual cycles, longer cycles,
+ * diamonds, disjoint components, and `tupleToUserset` edges that must
+ * never contribute to the cycle graph) before this rewrite was trusted.
  */
 function checkCircularPermissions(ns: ParsedNamespace, errors: SchemaError[]): void {
   const permissionsByName = new Map(ns.permissions.map((p) => [p.name, p]));
@@ -308,6 +331,17 @@ function checkCircularPermissions(ns: ParsedNamespace, errors: SchemaError[]): v
   const reported = new Set<string>();
 
   function reportCycle(cycle: string[]): void {
+    // Joined once, outside the loop below — found live while load-testing
+    // the iterative `dfs` rewrite at very large N: with `cycle.join(' -> ')`
+    // called once per member *inside* the loop (as this line originally
+    // read), a single reported cycle of length N costs O(N) to render each
+    // of its N member messages, for O(N^2) total — invisible for any
+    // legitimate-sized cycle (a cycle is always a compile error, so no
+    // legitimate schema has a large one), but a genuine, newly-reachable
+    // CPU/memory-exhaustion path for a large adversarial one now that the
+    // iterative `dfs` no longer stack-overflows before a large cycle can be
+    // fully detected. See docs/DECISIONS.md.
+    const cyclePath = cycle.join(' -> ');
     for (const member of cycle) {
       if (reported.has(member)) continue;
       reported.add(member);
@@ -316,7 +350,7 @@ function checkCircularPermissions(ns: ParsedNamespace, errors: SchemaError[]): v
       errors.push(
         makeSchemaError(
           'circular_permission_definition',
-          `permission '${member}' on namespace '${ns.name}' is circularly defined with no relation to ground it (${cycle.join(' -> ')}) at line ${permission.line}`,
+          `permission '${member}' on namespace '${ns.name}' is circularly defined with no relation to ground it (${cyclePath}) at line ${permission.line}`,
           permission.line,
           { namespace: ns.name, member },
         ),
@@ -324,25 +358,60 @@ function checkCircularPermissions(ns: ParsedNamespace, errors: SchemaError[]): v
     }
   }
 
-  function dfs(name: string, path: string[]): void {
-    color.set(name, GREY);
-    path.push(name);
-    for (const dep of deps.get(name) ?? []) {
-      const depColor = color.get(dep) ?? WHITE;
-      if (depColor === GREY) {
-        const cycleStart = path.indexOf(dep);
-        reportCycle([...path.slice(cycleStart), dep]);
-      } else if (depColor === WHITE) {
-        dfs(dep, path);
+  // Iterative DFS: an explicit worklist stack stands in for what native
+  // recursion would otherwise track on the real JS call stack. Each frame
+  // is one in-progress `dfs(name, path)` call from the original recursive
+  // version, with `depIndex` recording exactly how far that call's own
+  // `for (const dep of deps.get(name))` loop had gotten — the same thing
+  // a paused native stack frame would remember for us. `path` is the
+  // single shared array every recursive call would otherwise have been
+  // passed by reference (see this function's own doc comment above);
+  // pushing/popping it here at exactly the same points the recursive
+  // version did (frame creation / frame completion) is what keeps cycle
+  // reporting byte-identical to the original.
+  interface DfsFrame {
+    name: string;
+    depsList: string[];
+    depIndex: number;
+  }
+
+  function dfsFrom(startName: string): void {
+    const path: string[] = [];
+    const stack: DfsFrame[] = [];
+
+    const pushFrame = (name: string): void => {
+      color.set(name, GREY);
+      path.push(name);
+      stack.push({ name, depsList: [...(deps.get(name) ?? [])], depIndex: 0 });
+    };
+
+    pushFrame(startName);
+
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+      if (frame.depIndex < frame.depsList.length) {
+        const dep = frame.depsList[frame.depIndex]!;
+        frame.depIndex += 1;
+        const depColor = color.get(dep) ?? WHITE;
+        if (depColor === GREY) {
+          const cycleStart = path.indexOf(dep);
+          reportCycle([...path.slice(cycleStart), dep]);
+        } else if (depColor === WHITE) {
+          pushFrame(dep);
+        }
+        // depColor === BLACK: already fully explored — the recursive
+        // version never re-entered `dfs` for a BLACK node either.
+      } else {
+        path.pop();
+        color.set(frame.name, BLACK);
+        stack.pop();
       }
     }
-    path.pop();
-    color.set(name, BLACK);
   }
 
   for (const permission of ns.permissions) {
     if ((color.get(permission.name) ?? WHITE) === WHITE) {
-      dfs(permission.name, []);
+      dfsFrom(permission.name);
     }
   }
 }

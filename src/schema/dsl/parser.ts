@@ -27,7 +27,11 @@
  * comment support are not specified by §5's worked examples — see
  * `docs/DECISIONS.md` for why these particular choices.
  */
-import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from './types.js';
+import {
+  IDENTIFIER_PATTERN,
+  MAX_EXPRESSION_NESTING_DEPTH,
+  MAX_IDENTIFIER_LENGTH,
+} from './types.js';
 import { makeSchemaError, SchemaParseError, type SchemaError } from './errors.js';
 
 // ---------------------------------------------------------------------------
@@ -208,6 +212,17 @@ const RESERVED_WORDS = new Set(['namespace', 'relation', 'permission']);
 interface ParserState {
   tokens: Token[];
   pos: number;
+  /**
+   * How many `(` a permission expression is currently nested inside, at
+   * the point `parseAtom` is about to descend one level further —
+   * incremented on `(`, decremented on the matching `)`. `parseAtom`,
+   * `parseTerm`, and `parseExpression` are mutually recursive with one
+   * native call-stack frame consumed per level of `(` nesting; this
+   * counter is what lets `parseAtom` reject past
+   * `MAX_EXPRESSION_NESTING_DEPTH` with a clean `SchemaError` instead of
+   * letting that recursion run until Node's real call stack overflows.
+   */
+  parenDepth: number;
 }
 
 function peek(state: ParserState): Token {
@@ -331,9 +346,20 @@ function parseRelation(state: ParserState): ParsedRelation {
 
 function parseAtom(state: ParserState): ParsedRewriteRule {
   if (peek(state).type === 'lparen') {
-    consume(state);
+    const openToken = consume(state);
+    state.parenDepth += 1;
+    if (state.parenDepth > MAX_EXPRESSION_NESTING_DEPTH) {
+      throw new SchemaParseError(
+        makeSchemaError(
+          'expression_nesting_too_deep',
+          `permission expression at line ${openToken.line} nests '(' more than ${MAX_EXPRESSION_NESTING_DEPTH} levels deep`,
+          openToken.line,
+        ),
+      );
+    }
     const expr = parseExpression(state);
     expectPunct(state, 'rparen', ')');
+    state.parenDepth -= 1;
     return expr;
   }
   const nameToken = expectWord(state, 'a relation, permission, or tuple-to-userset reference');
@@ -469,7 +495,7 @@ export function parseSchema(source: string): ParseResult {
 
   try {
     const tokens = tokenize(source);
-    const state: ParserState = { tokens, pos: 0 };
+    const state: ParserState = { tokens, pos: 0, parenDepth: 0 };
     const namespaces: ParsedNamespace[] = [];
     while (peek(state).type !== 'eof') {
       namespaces.push(parseNamespace(state));
