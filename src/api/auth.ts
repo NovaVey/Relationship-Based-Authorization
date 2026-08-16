@@ -1,7 +1,10 @@
 /**
- * The `ADMIN_API_KEY`-gated-writes check — build spec §9 Phase 8 ("`ADMIN_
- * API_KEY`-gated writes") and its own exit criterion ("an unauthenticated
- * write attempt is rejected"). Main-agent territory per
+ * The `ADMIN_API_KEY` check — build spec §9 Phase 8 ("`ADMIN_API_KEY`-gated
+ * writes") and its own exit criterion ("an unauthenticated write attempt is
+ * rejected"), extended by D-064 to gate `/check`/`/expand` too, not just
+ * the three write routes — this function itself is unchanged either way; it
+ * was already generic (a header in, an authorized/not verdict out), only
+ * `server.ts`'s own set of callers grew. Main-agent territory per
  * `src/api/responses.ts`'s own top-of-file doc comment ("no `ADMIN_API_KEY`
  * check ... all of that is `src/api/server.ts`'s job"); split into its own
  * file rather than inlined in `server.ts` so the comparison logic itself —

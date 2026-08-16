@@ -1431,6 +1431,95 @@ approaches on top of the implementing/testing subagents' own; the
 README's walkthrough now leaves zero trace by default; D-060's "revisit
 if" fired and is closed.
 
+## API auth-gating and dry-run cleanup fixes (D-064, D-065, D-066)
+
+**Owner:** main agent (all three findings — API/CLI surface, own turf).
+Not a numbered build phase — a full-repo audit (2026-08-16) found three
+HIGH-severity findings this entry closes, part of the batch the direct
+user instruction "fix the critical and high findings" covers.
+
+**Finding #4 — `/check`/`/expand` unauthenticated (D-064):**
+`requireAdminAuth` now gates `/check` and `/expand` in
+`src/api/server.ts`, exactly as it already gated the three write routes.
+Both get a new, more generous rate-limit budget (`gatedReadRateLimit`,
+200/minute) than writes' 20/minute. `/schema/compile` and `/health`
+remain the only unauthenticated routes — both answer questions about the
+caller's own supplied input or non-sensitive schema metadata, never the
+real tuple graph.
+
+**Finding #5 — rate-limit counted before auth ran (D-065):** every
+gated route's `config.rateLimit` now sets `hook: 'preHandler'`
+(`@fastify/rate-limit`'s own option, default `onRequest`), confirmed by
+reading the installed plugin's own source
+(`node_modules/@fastify/rate-limit/index.js`'s `addRouteRateHook`) to
+append onto the route's already-declared `preHandler: requireAdminAuth`
+rather than run as an earlier, separate hook — so a flood of failed-auth
+requests can no longer exhaust a route's rate-limit budget before ever
+being compared against the real key. `trustProxy: true` added to the
+`Fastify(...)` constructor so `request.ip` (the rate-limiter's default
+key) resolves from `X-Forwarded-For` behind a reverse proxy (Railway),
+rather than collapsing every real caller onto the proxy's own shared
+budget.
+
+**Finding #7 — a dry-run cleanup failure could discard a real,
+already-computed verdict (D-066):** `runSoundnessFuzz`'s
+(`src/soundness/runner.ts`) success-path `cleanupIfDryRun()` call is now
+wrapped in its own `try`/`catch` — a cleanup failure is logged via
+`console.error`, never thrown, so it can no longer fall into the
+function's own outer `catch` and get mapped by
+`src/cli/commands/soundness.ts` to exit code 3
+("infrastructure failure — no verdict exists") for a run that actually
+succeeded, possibly with a critical `unsound`/`false_grant` verdict that
+was about to be silently lost.
+
+**Files touched:**
+
+- `src/api/server.ts` — `trustProxy: true`; `hook: 'preHandler'` on
+  `writeRateLimit`; new `gatedReadRateLimit`; `/check`/`/expand` gated
+  with `requireAdminAuth`.
+- `src/api/auth.ts` — doc comment updated (no functional change) to
+  drop the write-exclusive framing now that `requireAdminAuth` gates
+  five routes, not three.
+- `src/soundness/runner.ts` — success-path cleanup wrapped in
+  `try`/`catch`; doc comments updated.
+- `test/unit/api/server.test.ts` — extensive updates for the new
+  auth contract on `/check`/`/expand` (renamed describe blocks, new
+  positive/negative auth cases), plus a new dedicated regression test
+  proving D-065: 25 wrong-key requests against `POST /tuples` (five past
+  `writeRateLimit`'s own `max: 20`) all return 401 (never 429) and never
+  call `writeTuple`, then a request with the correct key right after
+  still succeeds.
+- `test/unit/api/server.integration.test.ts` — added auth headers to
+  the three `/check`/`/expand` calls that previously ran unauthenticated
+  (now correctly required); re-verified against real local Postgres via
+  this project's established LOCALVERIFY technique.
+- `test/unit/soundness/runner-dry-run-cleanup-failure.test.ts` (new) —
+  DB-free, mocks every I/O dependency `runSoundnessFuzz` has to force a
+  successful dry run whose cleanup then fails; proves the real result is
+  still returned and the failure is logged, not swallowed or thrown.
+- `docs/DECISIONS.md` — D-064, D-065, D-066.
+
+**Verification:**
+
+- `test/unit/api/server.test.ts`: 27/27 passing (was 26; +1 new
+  regression test for D-065).
+- `test/unit/api/server.integration.test.ts`: 4/4 passing against real
+  local Postgres via LOCALVERIFY (copied, connection string swapped,
+  run for real, deleted — never committed).
+- `test/unit/soundness/runner-dry-run-cleanup-failure.test.ts`: 2/2
+  passing. Fail-checked directly: reverted the `try`/`catch` back to a
+  bare `await cleanupIfDryRun();`, confirmed the test fails for the
+  right reason (the simulated cleanup error propagates uncaught instead
+  of being logged and swallowed), restored, confirmed byte-identical via
+  `md5sum`.
+- `npx tsc --noEmit`, `npx eslint`, `npx prettier --check` all clean on
+  every touched file.
+
+**Final state:** all three findings closed; `test/unit/api/server.test.ts`
+and the new soundness unit test both pass, the integration test
+re-verified live against real Postgres, and the dry-run cleanup fix's
+fail-check confirms the regression it closes is real and now caught.
+
 ## Schema DSL unbounded-recursion DoS fix (D-067)
 
 **Owner:** `schema-compiler` (the actual parser/compiler fix, its
