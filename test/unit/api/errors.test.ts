@@ -24,6 +24,7 @@ import {
   schemaCompileError,
   schemaPublishError,
   unauthorizedError,
+  notFoundError,
   rateLimitedError,
   infrastructureUnavailableError,
   internalError,
@@ -41,16 +42,18 @@ const ERRORS_SOURCE_PATH = fileURLToPath(new URL('../../../src/api/errors.ts', i
 // ---------------------------------------------------------------------------
 
 // Hand-derived from API_ERROR_STATUS's own doc comment
-// (`400/400/400/401/429/503/500` for `invalid_request`/
+// (`400/400/400/401/404/429/503/500` for `invalid_request`/
 // `tuple_validation_failed`/`schema_compile_failed`/`unauthorized`/
-// `rate_limited`/`infrastructure_unavailable`/`internal_error`), not read
-// off the table itself. `rate_limited` (429) was added after this table
-// alongside `@fastify/rate-limit` — see `docs/DECISIONS.md` D-056.
+// `not_found`/`rate_limited`/`infrastructure_unavailable`/`internal_error`),
+// not read off the table itself. `rate_limited` (429) was added after this
+// table alongside `@fastify/rate-limit` — see `docs/DECISIONS.md` D-056.
+// `not_found` (404, full-repo audit finding #14) was added after that.
 const DOCUMENTED_STATUS: Record<ApiErrorCode, number> = {
   invalid_request: 400,
   tuple_validation_failed: 400,
   schema_compile_failed: 400,
   unauthorized: 401,
+  not_found: 404,
   rate_limited: 429,
   infrastructure_unavailable: 503,
   internal_error: 500,
@@ -70,6 +73,7 @@ describe("every constructor's returned status matches API_ERROR_STATUS for its o
       { expectedCode: 'schema_compile_failed', response: schemaCompileError([]) },
       { expectedCode: 'schema_compile_failed', response: schemaPublishError([]) },
       { expectedCode: 'unauthorized', response: unauthorizedError() },
+      { expectedCode: 'not_found', response: notFoundError() },
       { expectedCode: 'rate_limited', response: rateLimitedError(60) },
       {
         expectedCode: 'infrastructure_unavailable',
@@ -239,6 +243,38 @@ describe('unauthorizedError — default detail text vs. a caller-supplied detail
     expect(response.body.error.message).toBe(
       'unauthorized — Authorization header missing entirely',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5a. notFoundError — full-repo audit finding #14, added after
+//     unauthorizedError (see DOCUMENTED_STATUS's own comment above): a
+//     request whose method and path match no route this API registers.
+//     Structured identically to unauthorizedError's own tests directly
+//     above — default detail vs. a caller-supplied detail — plus this
+//     constructor's own status/code, since (unlike unauthorizedError) this
+//     is the first place in this file that exercises notFoundError at all.
+// ---------------------------------------------------------------------------
+
+describe('notFoundError — default detail text vs. a caller-supplied detail', () => {
+  it('notfounderror-with-no-argument-uses-the-default-no-route-matches-this-method-and-path-detail', () => {
+    const response = notFoundError();
+    expect(response.body.error.message).toBe('not found — no route matches this method and path');
+  });
+
+  it('notfounderror-with-a-supplied-detail-uses-that-detail-verbatim-instead-of-the-default', () => {
+    const response = notFoundError('GET /this-route-does-not-exist has no handler');
+    expect(response.body.error.message).toBe(
+      'not found — GET /this-route-does-not-exist has no handler',
+    );
+  });
+});
+
+describe('notFoundError — status is 404 and body.error.code is not_found', () => {
+  it('notfounderror-status-is-404-and-body-error-code-is-not-found', () => {
+    const response = notFoundError();
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('not_found');
   });
 });
 

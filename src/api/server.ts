@@ -79,6 +79,7 @@ import {
   infrastructureUnavailableError,
   internalError,
   rateLimitedError,
+  notFoundError,
   type ApiErrorResponse,
 } from './errors.js';
 
@@ -105,7 +106,19 @@ const tupleBodySchema = z.object({
   subjectRelation: z.string().min(1).optional(),
 });
 
-const schemaSourceBodySchema = z.object({ source: z.string().min(1) });
+// `.max(65_536)` (64 KiB — D-067's own "defense in depth" recommendation,
+// docs/DECISIONS.md): a second, tighter ceiling than the server-wide
+// `bodyLimit` (256 KiB, `buildServer` above) specifically on the one field
+// that actually reaches the DSL parser/compiler D-067's own fix already
+// hardened structurally. Every real schema this project has ever written
+// is a few KB — 64 KiB is generous by roughly an order of magnitude over
+// that while giving a maliciously oversized `source` string its own
+// specific, named Zod rejection (`invalidRequestError`, via
+// `describeZodError`) rather than relying solely on the blunter, whole-body
+// `bodyLimit` check upstream.
+const schemaSourceBodySchema = z.object({
+  source: z.string().min(1).max(65_536, 'schema source exceeds the 64 KiB limit'),
+});
 
 /** Flattens a Zod issue list into the short, specific `detail` string `invalidRequestError` expects — never just "validation failed". */
 function describeZodError(error: z.ZodError): string {
@@ -190,7 +203,31 @@ export async function buildServer(pool: Pool): Promise<FastifyInstance> {
   // see `docs/DECISIONS.md` D-065 for the tradeoff this accepts and when to
   // revisit it (e.g. a deployment that genuinely answers raw sockets
   // directly, where this would let a client spoof its own rate-limit key).
-  const app = Fastify({ logger: { level: env.LOG_LEVEL }, trustProxy: true });
+  // `bodyLimit` (D-067's own disclosed-but-not-yet-implemented "defense in
+  // depth" recommendation, docs/DECISIONS.md): a hard ceiling on every
+  // request body, enforced at the HTTP content-type-parsing layer, before
+  // any route's own Zod validation or domain logic ever runs. Fastify
+  // itself already defaults to 1,048,576 bytes (1 MiB) when this option is
+  // omitted — confirmed by reading `node_modules/fastify/lib/context.js`
+  // and `config-validator.js` directly, not assumed — so this codebase has
+  // never actually been unbounded; the gap D-067 flagged was that the
+  // ceiling was implicit and undocumented, not genuinely absent, and never
+  // tuned to what this API's own five operations actually need. 262,144
+  // bytes (256 KiB) is set explicitly here instead: every real payload this
+  // API ever legitimately receives is small (a tuple/check/expand body is a
+  // few hundred bytes at most; every schema this project has ever written,
+  // including `schema/example.authz`, is a few KB) — 256 KiB is generous by
+  // roughly two orders of magnitude over any legitimate use while cutting
+  // a would-be attacker's usable request-body budget to a quarter of
+  // Fastify's own un-tuned default, exactly the "reject a pathological
+  // schema before it ever reaches the parser at all" outcome D-067's own
+  // text described. See `schemaSourceBodySchema` below for a second,
+  // tighter, field-specific ceiling layered on top of this one.
+  const app = Fastify({
+    logger: { level: env.LOG_LEVEL },
+    trustProxy: true,
+    bodyLimit: 262_144,
+  });
 
   // Framework-level errors (malformed JSON body, etc.), the rate-limit
   // plugin's own thrown rejection (see the `retryAfterSeconds` marker below
@@ -208,8 +245,23 @@ export async function buildServer(pool: Pool): Promise<FastifyInstance> {
       return;
     }
     if (typeof error.statusCode === 'number' && error.statusCode < 500) {
+      // `reply.code(error.statusCode)`, not `resp.status`: every case that
+      // reached this branch before the `bodyLimit` option above existed
+      // was already a genuine 400 (a malformed JSON body, an unsupported
+      // content type — Fastify's own defaults for both), so hardcoding
+      // `invalidRequestError`'s own 400 changed nothing in practice. A
+      // request that exceeds `bodyLimit` is Fastify's own
+      // `FST_ERR_CTP_BODY_TOO_LARGE`, statusCode 413 — a real, standard,
+      // distinct status a well-behaved client or proxy specifically checks
+      // for, and collapsing it to 400 here would silently lose that signal
+      // now that this is a reachable case. The response *body* still uses
+      // `invalidRequestError`'s shape (this is still, in spirit, "your
+      // request as sent cannot be fulfilled" — no new `ApiErrorCode` is
+      // warranted for one framework-level status among several this same
+      // envelope already covers); only the status code on the wire is
+      // corrected to match what actually happened.
       const resp = invalidRequestError(error.message);
-      void reply.code(resp.status).send(resp.body);
+      void reply.code(error.statusCode).send(resp.body);
       return;
     }
     request.log.error(error);
@@ -255,6 +307,33 @@ export async function buildServer(pool: Pool): Promise<FastifyInstance> {
       err.retryAfterSeconds = retryAfterSeconds;
       return err;
     },
+  });
+
+  /**
+   * A request to a path/method matching no route above never fires — and
+   * never has fired — any route's own `onRoute` hook, because Fastify's
+   * 404 handling runs entirely outside the matched-route hook lifecycle
+   * `@fastify/rate-limit` wires itself into (confirmed directly: that
+   * plugin's own `index.js` attaches only via `fastify.addHook('onRoute',
+   * ...)`, never a global request hook). Two consequences, both real
+   * (full-repo audit findings #13 and #14, MEDIUM, 2026-08-16, both
+   * reproduced live — 150 consecutive requests to a non-existent path
+   * never hit a 429 where an identical run against a real route did, at
+   * request 101; and a 404 returned Fastify's own raw default body,
+   * `{ error, message, statusCode }`, never this API's one documented
+   * `{ error: { code, message } }` envelope every other response uses):
+   * an unmatched path was rate-limited by nothing at all, and any client
+   * written against the documented single-envelope contract would crash
+   * parsing a 404. `setNotFoundHandler` with `preHandler: app.rateLimit()`
+   * is `@fastify/rate-limit`'s own documented fix for exactly this gap
+   * (its README's "Preventing guessing of URLs through 404s" section) —
+   * reuses the same global `max`/`timeWindow` registered immediately
+   * above, since an unmatched path deserves no more headroom than a real
+   * route gets. See `docs/DECISIONS.md`.
+   */
+  app.setNotFoundHandler({ preHandler: app.rateLimit() }, async (_request, reply) => {
+    const resp = notFoundError();
+    await reply.code(resp.status).send(resp.body);
   });
 
   /**
@@ -429,14 +508,49 @@ export async function buildServer(pool: Pool): Promise<FastifyInstance> {
   app.get(
     '/health',
     { config: { rateLimit: { max: 300, timeWindow: '1 minute' } } },
-    async (_request, reply) => {
+    async (request, reply) => {
+      // Two independent try/catches, deliberately — not one wrapping both
+      // calls (full-repo audit finding #22, MEDIUM, 2026-08-16). The
+      // connectivity probe (`select 1`) and the namespace-listing query are
+      // two different questions with two different honest answers: a
+      // listing-query failure (e.g. an unapplied migration) with Postgres
+      // itself perfectly reachable must never be reported as "database
+      // unreachable" — that claim would simply be false. See
+      // `src/api/responses.ts`'s `HealthNamespaceListStatus` and
+      // `healthResponse` for how the two outcomes stay distinguishable on
+      // the wire while both still fail closed (503). See docs/DECISIONS.md.
       try {
         await pool.query('select 1');
+      } catch (err) {
+        // The real driver error is logged server-side only, never forwarded
+        // over the wire (full-repo audit finding #15, MEDIUM, 2026-08-16): a
+        // real connection failure routinely includes internal hostnames,
+        // ports, or usernames, and this route is deliberately unauthenticated
+        // (load-balancer/uptime-monitor convention — see this route's own
+        // top comment), so *any* network caller could previously read it.
+        request.log.error({ err }, 'GET /health: connectivity probe failed');
+        const resp = healthResponse(
+          { reachable: false, error: 'database is unreachable' },
+          { ok: false, error: 'not attempted — database unreachable' },
+        );
+        await reply.code(resp.status).send(resp.body);
+        return;
+      }
+
+      try {
         const namespaces = await listLatestNamespaceVersions(pool);
-        const resp = healthResponse({ reachable: true }, namespaces);
+        const resp = healthResponse({ reachable: true }, { ok: true, namespaces });
         await reply.code(resp.status).send(resp.body);
       } catch (err) {
-        const resp = healthResponse({ reachable: false, error: (err as Error).message }, []);
+        // Connectivity is fine (the probe above already succeeded) — this
+        // is the namespace-listing query failing on its own, a different,
+        // distinctly logged diagnosis. Same non-disclosure reasoning as the
+        // probe-failure branch above for the wire-facing message.
+        request.log.error({ err }, 'GET /health: namespace listing failed');
+        const resp = healthResponse(
+          { reachable: true },
+          { ok: false, error: 'namespace listing failed' },
+        );
         await reply.code(resp.status).send(resp.body);
       }
     },

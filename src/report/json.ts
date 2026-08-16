@@ -141,3 +141,33 @@ export function renderSoundnessInfrastructureFailureJsonString(
   const report: SoundnessInfrastructureFailureJson = { status: 'infrastructure_failure', message };
   return JSON.stringify(report, null, pretty ? 2 : undefined);
 }
+
+/**
+ * The JSON sibling of `renderSoundnessFixtureFailureMarkdown`
+ * (`src/report/markdown.ts`) — rendered when `runSoundnessFuzz` throws
+ * specifically a `SoundnessFixtureError` (`src/soundness/runner.ts`): the
+ * *generated fuzz fixture itself* was invalid (a schema compile, a schema
+ * publish, or a generated tuple write rejected) before a single query was
+ * ever checked. Closes full-repo audit finding #12 (MEDIUM, 2026-08-16) at
+ * the JSON layer — see `SoundnessInfrastructureFailureJson` immediately
+ * above and that finding's own writeup in `renderSoundnessFixtureFailureMarkdown`'s
+ * doc comment for the full context: this is a distinct failure mode from an
+ * unreachable database, a generator/validation bug rather than an
+ * infrastructure one, and reusing `status: 'infrastructure_failure'` for it
+ * would misdirect a consumer at exactly the wrong fix.
+ *
+ * **Deliberately not `SoundnessJsonReport` with zeroed-out fields**, for
+ * the same reason `SoundnessInfrastructureFailureJson` above isn't — see
+ * that interface's own doc comment; the reasoning is identical here, just
+ * for a different thrown-error case.
+ */
+export interface SoundnessFixtureFailureJson {
+  status: 'fixture_failure';
+  message: string;
+}
+
+/** `SoundnessFixtureFailureJson` serialized — same `pretty` contract as `renderSoundnessJsonString`. */
+export function renderSoundnessFixtureFailureJsonString(message: string, pretty = true): string {
+  const report: SoundnessFixtureFailureJson = { status: 'fixture_failure', message };
+  return JSON.stringify(report, null, pretty ? 2 : undefined);
+}

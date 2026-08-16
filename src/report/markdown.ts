@@ -841,6 +841,57 @@ export function renderSoundnessInfrastructureFailureMarkdown(message: string): s
   ].join('\n');
 }
 
+/**
+ * The `FIXTURE_FAILURE` sibling of `renderSoundnessInfrastructureFailureMarkdown`
+ * directly above — rendered when `runSoundnessFuzz` throws specifically a
+ * `SoundnessFixtureError` (`src/soundness/runner.ts`): the *generated fuzz
+ * fixture itself* was invalid — its schema failed to compile, its schema
+ * failed to publish, or one of its generated tuples was rejected on write —
+ * before a single query was ever checked. This is a bug in the fixture
+ * generator, or in schema/tuple validation the generator's own output
+ * tripped, never a database-connectivity problem.
+ *
+ * Exists to close full-repo audit finding #12 (MEDIUM, 2026-08-16):
+ * `src/cli/commands/soundness.ts`'s previous blanket `catch` treated every
+ * error `runSoundnessFuzz` could throw identically as exit-code-3
+ * "infrastructure failure," additionally framed with a `"Postgres:
+ * <message>"` prefix — both wrong for this case, per build spec §7's own
+ * exit-code table (exit 2 is "insufficient fuzz coverage or a schema/tuple
+ * validation failure"; exit 3 is specifically "infrastructure failure (DB
+ * unreachable, etc.)"). `SoundnessFixtureError` exists so that `catch` block
+ * can now tell the two apart and route a fixture failure to exit code 2 and
+ * *this* rendering, never exit code 3 and the infrastructure one.
+ *
+ * Same `SOUNDNESS_REPORT_MARKER`-prefixed shape, and the same "this is not a
+ * `sound` result" honesty line, as `renderSoundnessInfrastructureFailureMarkdown`
+ * above (see that function's own doc comment for why omitting the marker
+ * would break the "update in place, never stack" PR-comment contract) — but
+ * the body text deliberately never suggests a database or connectivity
+ * problem (no "check that the target database is reachable"). It says
+ * plainly that the *fixture* was invalid, that this is worth filing or
+ * investigating as a generator/validation bug, and points at the seed
+ * embedded in `message` (every `SoundnessFixtureError` message includes
+ * `seed=...`) as what makes the exact broken fixture reproducible.
+ */
+export function renderSoundnessFixtureFailureMarkdown(message: string): string {
+  return [
+    SOUNDNESS_REPORT_MARKER,
+    '',
+    '## FIXTURE_FAILURE — soundness check did not run',
+    '',
+    'No verdict was produced — the generated fuzz fixture itself was invalid before a single query ' +
+      'ran: its schema failed to compile, failed to publish, or one of its generated tuples was ' +
+      'rejected on write. This is a bug in the fixture generator or in schema/tuple validation, not an ' +
+      'infrastructure problem. This is not a `sound` result: `0 false_grant` is never reported here, ' +
+      'because no queries ran to report it about.',
+    '',
+    `Error: \`${message}\``,
+    '',
+    'File or investigate this against the seed in the error above — it reproduces the exact fixture ' +
+      'that failed to build.',
+  ].join('\n');
+}
+
 export interface RenderSoundnessMarkdownOptions {
   /**
    * Soft cap on how many `false_deny` entries render their full path before

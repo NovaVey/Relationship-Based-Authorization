@@ -68,14 +68,16 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  # Not in the required status checks list yet — proves the isolation
-  # suite's claims against a real Postgres-backed tuple store, not just
-  # against a naive in-memory oracle, once Phase 2/4 of
-  # .claude/commands/build-authz-service.md land (until then every test
-  # here is `.todo()` and the job is a no-op that always passes). Container-
-  # based tests carry more infra-flakiness risk than the pure unit suite.
-  # ubuntu-latest runners have Docker preinstalled, so no extra setup is
-  # needed. Promoting this to required is a manual, deliberate choice — see
+  # Not in the required status checks list — proves the isolation suite's
+  # claims against a real Postgres-backed tuple store, not just against a
+  # naive in-memory oracle (a real, non-`.todo()` suite as of Phase 2/4;
+  # see docs/github-governance.md's own note on full-repo audit finding
+  # #18, MEDIUM, 2026-08-16, which corrected this comment's own previously
+  # stale "every test here is `.todo()`" framing). Container-based tests
+  # carry more infra-flakiness risk than the pure unit suite — that's the
+  # actual, still-current reason this stays advisory. ubuntu-latest
+  # runners have Docker preinstalled, so no extra setup is needed.
+  # Promoting this to required is a manual, deliberate choice — see
   # docs/github-governance.md Step 5.
   #
   # Runs on Node 22, same as the rest of CI now (it wasn't always — this

@@ -6,8 +6,9 @@
  * top-of-file doc comment says is out of scope for it. Written from
  * `responses.ts`'s own exported types and doc comments — "always 200",
  * "present iff allowed", "passed through verbatim, never reshaped",
- * "namespaces forced to [] when unreachable" — not from a separate
- * re-derivation of what the shapes "should" be.
+ * "namespace listing forced to a not-attempted failure when unreachable"
+ * (full-repo audit finding #22) — not from a separate re-derivation of what
+ * the shapes "should" be.
  *
  * This file was flagged as a real, un-covered gap by Phase 8's own
  * `server.test.ts` top-of-file doc comment ("no `responses.test.ts`/
@@ -25,7 +26,11 @@ import {
   schemaPublishResponse,
   healthResponse,
 } from '../../../src/api/responses.js';
-import type { ApiEntityRef, HealthDatabaseStatus } from '../../../src/api/responses.js';
+import type {
+  ApiEntityRef,
+  HealthDatabaseStatus,
+  HealthNamespaceListStatus,
+} from '../../../src/api/responses.js';
 import {
   tupleValidationError,
   schemaCompileError,
@@ -360,36 +365,42 @@ describe('schemaPublishResponse — ok:false delegates to schemaPublishError, no
 // 5. healthResponse
 // ---------------------------------------------------------------------------
 
-describe('healthResponse — reachable:false always forces status:503, body.status:unavailable, and an empty namespaces array', () => {
+describe('healthResponse — reachable:false always forces status:503, body.status:unavailable, and a not-attempted namespace-listing failure', () => {
   it('healthresponse-reachable-false-renders-status-503-and-body-status-unavailable', () => {
     const database: HealthDatabaseStatus = { reachable: false, error: 'connection refused' };
-    const response = healthResponse(database, []);
+    const response = healthResponse(database, { ok: true, namespaces: [] });
     expect(response.status).toBe(503);
     expect(response.body.status).toBe('unavailable');
   });
 
-  it('healthresponse-reachable-false-discards-a-non-empty-namespaces-array-and-forces-it-to-empty-not-just-when-the-input-was-already-empty', () => {
+  it('healthresponse-reachable-false-discards-a-successful-namespacelist-and-forces-a-not-attempted-failure-instead-not-just-when-the-input-was-already-a-failure', () => {
     const database: HealthDatabaseStatus = { reachable: false, error: 'connection timed out' };
-    const nonEmptyNamespaces: PublishedNamespace[] = [
-      { namespace: 'document', version: 3 },
-      { namespace: 'folder', version: 1 },
-    ];
+    const suppliedNamespaceList: HealthNamespaceListStatus = {
+      ok: true,
+      namespaces: [
+        { namespace: 'document', version: 3 },
+        { namespace: 'folder', version: 1 },
+      ],
+    };
 
-    const response = healthResponse(database, nonEmptyNamespaces);
+    const response = healthResponse(database, suppliedNamespaceList);
 
-    expect(response.body.namespaces).toEqual([]);
+    expect(response.body.namespaces).toEqual({
+      ok: false,
+      error: 'not attempted — database unreachable',
+    });
   });
 
   it('healthresponse-reachable-false-still-carries-the-database-field-through-with-its-own-error-detail', () => {
     const database: HealthDatabaseStatus = { reachable: false, error: 'connection refused' };
-    const response = healthResponse(database, []);
+    const response = healthResponse(database, { ok: true, namespaces: [] });
     expect(response.body.database).toEqual(database);
   });
 });
 
 describe('healthResponse — reachable:true renders status:200, body.status:ok, and namespaces passed through verbatim as a defensive copy', () => {
   it('healthresponse-reachable-true-renders-status-200-and-body-status-ok', () => {
-    const response = healthResponse({ reachable: true }, []);
+    const response = healthResponse({ reachable: true }, { ok: true, namespaces: [] });
     expect(response.status).toBe(200);
     expect(response.body.status).toBe('ok');
   });
@@ -399,20 +410,28 @@ describe('healthResponse — reachable:true renders status:200, body.status:ok, 
       { namespace: 'document', version: 3 },
       { namespace: 'org', version: 2 },
     ];
-    const response = healthResponse({ reachable: true }, namespaces);
-    expect(response.body.namespaces).toEqual(namespaces);
+    const response = healthResponse({ reachable: true }, { ok: true, namespaces });
+    expect(response.body.namespaces).toEqual({ ok: true, namespaces });
   });
 
   it('healthresponse-reachable-true-returns-a-defensive-copy-of-namespaces-mutating-the-input-array-after-the-call-does-not-affect-the-returned-body', () => {
     const namespaces: PublishedNamespace[] = [{ namespace: 'document', version: 3 }];
-    const response = healthResponse({ reachable: true }, namespaces);
+    const response = healthResponse({ reachable: true }, { ok: true, namespaces });
 
     // Mutate the caller's array AFTER the call — the function's own
-    // `[...namespaces]` doc-commented defensive copy must mean this has no
-    // effect on the already-returned body.
+    // `[...namespaceList.namespaces]` doc-commented defensive copy must mean
+    // this has no effect on the already-returned body.
     namespaces.push({ namespace: 'folder', version: 9 });
 
-    expect(response.body.namespaces).toEqual([{ namespace: 'document', version: 3 }]);
-    expect(response.body.namespaces).not.toBe(namespaces);
+    expect(response.body.namespaces).toEqual({
+      ok: true,
+      namespaces: [{ namespace: 'document', version: 3 }],
+    });
+    const resultNamespaceList = response.body.namespaces;
+    if (resultNamespaceList.ok) {
+      expect(resultNamespaceList.namespaces).not.toBe(namespaces);
+    } else {
+      expect.unreachable('expected the ok:true branch');
+    }
   });
 });

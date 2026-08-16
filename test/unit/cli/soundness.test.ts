@@ -54,7 +54,7 @@ import * as runnerModule from '../../../src/soundness/runner.js';
 import { env } from '../../../src/config/env.js';
 import { soundnessRun } from '../../../src/cli/commands/soundness.js';
 import { closePool } from '../../../src/store/client.js';
-import type { SoundnessRunResult } from '../../../src/soundness/runner.js';
+import { SoundnessFixtureError, type SoundnessRunResult } from '../../../src/soundness/runner.js';
 
 /** Guaranteed unreachable: nothing listens on this port on the loopback interface in any environment this test runs in. */
 const UNREACHABLE_DATABASE_URL = 'postgres://user:pass@127.0.0.1:1/definitely_nonexistent_db';
@@ -153,4 +153,134 @@ describe('authz soundness run — exit codes', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     expect(process.exitCode).toBeUndefined();
   }, 30_000);
+});
+
+/**
+ * Full-repo audit finding #12 (MEDIUM, 2026-08-16), CLI-level half — the
+ * other half lives in `test/unit/soundness/runner-fixture-error.test.ts`
+ * (does `runSoundnessFuzz` itself throw `SoundnessFixtureError` from each of
+ * its three generator-bug sites) and `test/unit/report/markdown.test.ts` /
+ * `test/unit/report/json.test.ts` (do the `FIXTURE_FAILURE`/
+ * `fixture_failure` renderers themselves look right). This describe block
+ * is only about `soundnessRun`'s own `catch` block branching correctly on
+ * `err instanceof SoundnessFixtureError` — mirroring
+ * `test/unit/cli/soundness.test.ts`'s own established `vi.spyOn(runnerModule,
+ * 'runSoundnessFuzz').mockRejectedValue(...)` pattern from the
+ * `a-false-grant-exits-one-and-an-infrastructure-failure-exits-three` test
+ * above, and `test/unit/cli/soundness-format.test.ts`'s own
+ * `vi.spyOn(console, 'log'/'error')` pattern for capturing what actually
+ * printed.
+ */
+describe('authz soundness run — SoundnessFixtureError vs. every other rejection (finding #12)', () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await closePool();
+    process.exitCode = undefined;
+  });
+
+  it('a-soundnessfixtureerror-rejection-sets-exit-code-2-not-3', async () => {
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockRejectedValue(
+      new SoundnessFixtureError(
+        'soundness run (seed=fixture-seed): generated schema failed to compile — this is a ' +
+          'generator bug, not a resolver finding: line 1: bad',
+      ),
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({});
+
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-soundnessfixtureerror-with-format-markdown-prints-fixture-failure-framing-on-stdout-never-infrastructure-failure', async () => {
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockRejectedValue(
+      new SoundnessFixtureError('the generated fixture was invalid'),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({ format: 'markdown' });
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const printed = String(logSpy.mock.calls[0]?.[0]);
+    expect(printed).toContain('FIXTURE_FAILURE');
+    expect(printed).not.toContain('INFRASTRUCTURE_FAILURE');
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-soundnessfixtureerror-with-format-json-prints-fixture-failure-status-on-stdout-never-infrastructure-failure', async () => {
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockRejectedValue(
+      new SoundnessFixtureError('the generated fixture was invalid'),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({ format: 'json' });
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const printed = String(logSpy.mock.calls[0]?.[0]);
+    expect(JSON.parse(printed).status).toBe('fixture_failure');
+    expect(printed).not.toContain('infrastructure_failure');
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-soundnessfixtureerror-rejection-never-prints-the-postgres-colon-prefix-on-stderr', async () => {
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockRejectedValue(
+      new SoundnessFixtureError('broken fixture, seed=xyz'),
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({});
+
+    expect(errorSpy).toHaveBeenCalled();
+    const allStderr = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(allStderr).not.toContain('Postgres: ');
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-plain-error-rejection-that-is-not-a-soundnessfixtureerror-keeps-the-pre-existing-exit-3-postgres-prefixed-behavior-unchanged', async () => {
+    // Regression check: this is exactly the behavior every rejection had
+    // before `SoundnessFixtureError` existed — proving the new `instanceof`
+    // branch in `soundnessRun`'s `catch` block didn't change what happens
+    // for anything that ISN'T a fixture error.
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockRejectedValue(
+      new Error('connection terminated unexpectedly'),
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({});
+
+    expect(process.exitCode).toBe(3);
+    expect(errorSpy).toHaveBeenCalled();
+    const allStderr = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(allStderr).toContain('Postgres: connection terminated unexpectedly');
+  });
+
+  it('a-plain-error-rejections-format-markdown-output-still-prints-infrastructure-failure-framing-not-fixture-failure', async () => {
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockRejectedValue(
+      new Error('connection terminated'),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({ format: 'markdown' });
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const printed = String(logSpy.mock.calls[0]?.[0]);
+    expect(printed).toContain('INFRASTRUCTURE_FAILURE');
+    expect(printed).not.toContain('FIXTURE_FAILURE');
+    expect(process.exitCode).toBe(3);
+  });
 });

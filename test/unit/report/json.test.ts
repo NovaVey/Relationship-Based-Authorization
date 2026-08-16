@@ -20,7 +20,11 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { renderSoundnessJson, renderSoundnessJsonString } from '../../../src/report/json.js';
+import {
+  renderSoundnessJson,
+  renderSoundnessJsonString,
+  renderSoundnessFixtureFailureJsonString,
+} from '../../../src/report/json.js';
 import { renderHeadline } from '../../../src/report/markdown.js';
 import type { DivergenceRecord, SoundnessRunResult } from '../../../src/soundness/runner.js';
 import type { ResolutionStep as ReferenceResolutionStep } from '../../../src/resolve/reference/resolver.js';
@@ -262,5 +266,50 @@ describe('renderSoundnessJsonString', () => {
 
     expect(compact).not.toContain('\n');
     expect(JSON.parse(compact)).toEqual(renderSoundnessJson(result));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderSoundnessFixtureFailureJsonString — full-repo audit finding #12
+// (MEDIUM, 2026-08-16). The JSON sibling of
+// `renderSoundnessFixtureFailureMarkdown` (`src/report/markdown.ts`,
+// `test/unit/report/markdown.test.ts`'s own test of the same name) —
+// rendered when `runSoundnessFuzz` throws a `SoundnessFixtureError`, never
+// for an infrastructure failure. Written from
+// `renderSoundnessFixtureFailureJsonString`'s own doc comment and its
+// sibling `SoundnessInfrastructureFailureJson`'s doc comment in
+// `src/report/json.ts` (both state the `pretty` contract is identical to
+// `renderSoundnessJsonString`'s own — asserted here the same way
+// `renderSoundnessJsonString`'s own tests immediately above assert it, not
+// against a pre-existing infrastructure-failure sibling test — no such test
+// exists yet in this file; see this phase's own test-author report for that
+// gap), not from reading `src/report/json.ts`'s implementation beyond those
+// two doc comments.
+// ---------------------------------------------------------------------------
+
+describe('renderSoundnessFixtureFailureJsonString', () => {
+  const message =
+    'soundness run (seed=broken-fixture-seed): failed to write a generated tuple: object id is malformed';
+
+  it('parses-to-status-fixture-failure-and-the-exact-message-passed-in-and-no-other-keys', () => {
+    const parsed = JSON.parse(renderSoundnessFixtureFailureJsonString(message));
+    expect(parsed).toEqual({ status: 'fixture_failure', message });
+  });
+
+  it('never-uses-status-infrastructure-failure-for-a-fixture-error', () => {
+    const parsed = JSON.parse(renderSoundnessFixtureFailureJsonString(message));
+    expect(parsed.status).not.toBe('infrastructure_failure');
+  });
+
+  it('pretty-defaults-to-true-two-space-indented-multi-line-output', () => {
+    const output = renderSoundnessFixtureFailureJsonString(message);
+    expect(output).toContain('\n');
+    expect(output).toBe(JSON.stringify({ status: 'fixture_failure', message }, null, 2));
+  });
+
+  it('pretty-false-produces-a-single-line-payload-that-still-parses-to-the-same-report', () => {
+    const compact = renderSoundnessFixtureFailureJsonString(message, false);
+    expect(compact).not.toContain('\n');
+    expect(JSON.parse(compact)).toEqual({ status: 'fixture_failure', message });
   });
 });

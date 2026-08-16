@@ -171,7 +171,7 @@ authz tuple write <object> <relation> <subject>     write a tuple, prints the re
 authz tuple delete <object> <relation> <subject>
 authz check <subject> <relation> <object> [--at-token <n>]
 authz expand <object> <relation>                    print the resolved subject tree
-authz soundness run [--queries N] [--seed S] [--dry-run]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted)
+authz soundness run [--queries N] [--seed S] [--format text|markdown|json] [--dry-run]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted)
 authz serve                                         start the Fastify API server
 ```
 

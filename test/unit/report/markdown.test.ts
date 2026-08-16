@@ -25,6 +25,7 @@ import {
   renderDivergenceMarkdown,
   renderHeadline,
   renderSoundnessMarkdown,
+  renderSoundnessFixtureFailureMarkdown,
 } from '../../../src/report/markdown.js';
 import type { DivergenceRecord, SoundnessRunResult } from '../../../src/soundness/runner.js';
 import type { ResolutionStep as ProductionResolutionStep } from '../../../src/resolve/production/resolver.js';
@@ -447,5 +448,63 @@ describe('renderSoundnessMarkdown — false_grant and false_deny labels never cr
     // assertion cannot produce a false positive on the arrow glyph itself.
     const emojiPattern = /\p{Extended_Pictographic}/u;
     expect(emojiPattern.test(output)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderSoundnessFixtureFailureMarkdown — full-repo audit finding #12
+// (MEDIUM, 2026-08-16). The `FIXTURE_FAILURE` sibling of
+// `renderSoundnessInfrastructureFailureMarkdown` (`src/report/markdown.ts`),
+// rendered when `runSoundnessFuzz` throws a `SoundnessFixtureError`: the
+// generated fuzz fixture itself was invalid (a schema compile, publish, or
+// tuple-write failure), never a database-connectivity problem — so this
+// rendering must say plainly that no verdict was produced, without ever
+// implying Postgres or connectivity is the culprit. Written from
+// `renderSoundnessFixtureFailureMarkdown`'s own doc comment in
+// `src/report/markdown.ts` (its `## FIXTURE_FAILURE` header, its explicit
+// "not an infrastructure problem" framing, its `SOUNDNESS_REPORT_MARKER`
+// requirement for the PR-comment "update in place" contract), not from a
+// pre-existing sibling test for `renderSoundnessInfrastructureFailureMarkdown`
+// — no such test exists yet in this file to mirror; see this phase's own
+// test-author report for that gap.
+// ---------------------------------------------------------------------------
+
+describe('renderSoundnessFixtureFailureMarkdown', () => {
+  const message =
+    'soundness run (seed=broken-fixture-seed): generated schema failed to compile — this is a ' +
+    'generator bug, not a resolver finding: line 4: namespace `document` is declared twice';
+  const output = renderSoundnessFixtureFailureMarkdown(message);
+
+  it('starts-with-the-soundness-report-marker-so-the-pr-comment-update-in-place-contract-still-recognizes-it', () => {
+    expect(output.split('\n')[0]).toBe(SOUNDNESS_REPORT_MARKER);
+  });
+
+  it('contains-the-fixture-failure-header-never-the-infrastructure-failure-header', () => {
+    expect(output).toContain('## FIXTURE_FAILURE');
+    expect(output).not.toContain('INFRASTRUCTURE_FAILURE');
+  });
+
+  it('contains-the-literal-message-text-verbatim', () => {
+    expect(output).toContain(message);
+  });
+
+  it('never-mentions-postgres-or-database-reachability-this-is-a-generator-bug-not-an-infrastructure-problem', () => {
+    expect(output.toLowerCase()).not.toContain('postgres');
+    expect(output.toLowerCase()).not.toMatch(/check that the (target |)database is reachable/);
+  });
+
+  it('states-plainly-that-no-verdict-was-produced-and-never-renders-a-real-headline-claiming-a-measured-false-grant-count', () => {
+    expect(output).toContain('No verdict was produced');
+    // Never a real `renderHeadline`-shaped claim ("N false_grant, M
+    // false_deny, across Q queries") — this rendering's own honest-
+    // disclosure sentence legitimately contains the substring "0
+    // false_grant" (see `renderSoundnessFixtureFailureMarkdown`'s own doc
+    // comment: "`0 false_grant` is never reported here" — the phrase itself
+    // appears precisely to say it is NOT being reported as a measured
+    // result), so asserting the bare substring is absent would be a false
+    // requirement; what actually matters is that no real headline pattern
+    // — the one a genuine `sound` verdict renders — ever appears here.
+    expect(output).not.toMatch(/\d+ false_grant, \d+ false_deny, across \d+ queries/);
+    expect(output).not.toMatch(/^SOUND\b/m);
   });
 });

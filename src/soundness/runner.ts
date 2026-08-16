@@ -162,6 +162,31 @@ export interface DivergenceRecord {
   productionPath?: ProductionResolutionStep;
 }
 
+/**
+ * Thrown when the generated fixture itself is broken — a schema that fails
+ * to compile, a publish rejection, or a tuple write rejection — and never
+ * for anything else `runSoundnessFuzz` can throw (an unreachable database,
+ * an unexpected `soundness_runs` insert response, a rethrown cleanup
+ * failure). These are generator bugs, not resolver findings: build spec §7
+ * puts them in exit code 2 ("insufficient fuzz coverage or a schema/tuple
+ * validation failure"), a distinct category from exit code 3
+ * ("infrastructure failure (DB unreachable, etc.)") — see
+ * `src/cli/commands/soundness.ts`'s own top-of-file exit-code table, which
+ * already documented this split before this class existed to let its
+ * `catch` block actually implement it (full-repo audit finding #12,
+ * MEDIUM, 2026-08-16 — `src/cli/commands/soundness.ts`'s previous blanket
+ * `catch` mapped every thrown error, including these, to exit code 3, and
+ * additionally mislabeled the message with a `"Postgres: "` prefix that
+ * implies a database-connectivity problem regardless of which of these
+ * three actually happened — see `docs/DECISIONS.md`).
+ */
+export class SoundnessFixtureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SoundnessFixtureError';
+  }
+}
+
 export interface SoundnessRunResult {
   /** The persisted `soundness_runs` row's id. */
   id: string;
@@ -440,7 +465,7 @@ export async function runSoundnessFuzz(
     // `setUpSchema` precedent).
     const compiled = compileSchema(fixture.schemaSource);
     if (!compiled.ok) {
-      throw new Error(
+      throw new SoundnessFixtureError(
         `soundness run (seed=${seed}): generated schema failed to compile — this is a ` +
           `generator bug, not a resolver finding: ${compiled.errors.map(formatSchemaError).join('; ')}`,
       );
@@ -449,7 +474,7 @@ export async function runSoundnessFuzz(
 
     const published = await publishSchema(pool, fixture.schemaSource);
     if (!published.ok) {
-      throw new Error(
+      throw new SoundnessFixtureError(
         `soundness run (seed=${seed}): failed to publish the generated schema: ${published.errors.join('; ')}`,
       );
     }
@@ -458,7 +483,7 @@ export async function runSoundnessFuzz(
     for (const tuple of fixture.tuples) {
       const writeResult = await writeTuple(pool, tuple);
       if (!writeResult.ok) {
-        throw new Error(
+        throw new SoundnessFixtureError(
           `soundness run (seed=${seed}): failed to write a generated tuple ` +
             `${JSON.stringify(tuple)}: ${JSON.stringify(writeResult.errors)}`,
         );
