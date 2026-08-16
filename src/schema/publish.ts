@@ -97,6 +97,35 @@ export async function getLatestNamespaceConfig(
 }
 
 /**
+ * Deletes exactly one `namespace_configs` row by `(namespace, version)`.
+ *
+ * A narrow, deliberate exception to this table's normal shape: every
+ * other piece of this system treats a published namespace version as
+ * permanent, append-only history — `publishOne` never overwrites a
+ * version, nothing anywhere else in `src/` ever deletes a row here, and
+ * `docs/RELATIONS.md`/`docs/CONSISTENCY.md` describe schema versions the
+ * same way §4 does, as a record, not a mutable current-state table. This
+ * function exists for exactly one caller: `src/soundness/runner.ts`'s
+ * `dryRun` cleanup (D-063), which publishes a fuzz-generated schema,
+ * proves the differential comparison against it, and then must leave
+ * *no trace* — the row it deletes was synthetic fuzz-fixture data,
+ * created and destroyed within the same `runSoundnessFuzz` call, never
+ * observed as real schema history by anything in between. This is not a
+ * general "unpublish a namespace" feature and must not be reached for
+ * that purpose — nothing in the CLI or API surface exposes it.
+ */
+export async function deletePublishedNamespaceVersion(
+  pool: Pool,
+  namespace: string,
+  version: number,
+): Promise<void> {
+  await pool.query(`delete from namespace_configs where namespace = $1 and version = $2`, [
+    namespace,
+    version,
+  ]);
+}
+
+/**
  * Every namespace that has ever been published, each at its own latest
  * version — the Phase 8 `/health` route's own requirement (build spec §9
  * Phase 8: "reports ... current namespace config versions"), and the reason

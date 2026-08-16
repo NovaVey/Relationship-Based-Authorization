@@ -1308,4 +1308,125 @@ zero `it.todo()` remaining anywhere in `test/isolation/`.
   is disclosed plainly in the README rather than engineered around
   (D-060) — revisit if a future `--dry-run` mode or a documented
   disposable-database convention makes the walkthrough's own advice
-  worth changing.
+  worth changing. **Resolved 2026-08-16 — see the section below.**
+
+## `authz soundness run --dry-run` (D-063, closing D-060)
+
+**Owner:** main agent (`deletePublishedNamespaceVersion` in
+`src/schema/publish.ts` — schema-config plumbing, own turf; CLI wiring in
+`src/cli/commands/soundness.ts`/`src/cli/index.ts`; README/DECISIONS/
+PROGRESS; all independent verification) + `soundness-engineer` (the
+`dryRun` orchestration itself in `src/soundness/runner.ts`) +
+`test-author` (the real-Postgres integration test). Not a numbered build
+phase — the build spec's own 9 phases are complete; this closes the one
+open item left on record (D-060's own "revisit if"), per direct user
+instruction ("fix what is open").
+
+**What it does:** `authz soundness run --dry-run` runs the exact same
+real differential-fuzz cycle as always — real schema publish, real tuple
+writes, real checks against both resolvers, the exact same verdict — and
+then deletes every row it created (the `soundness_runs` row, every
+generated tuple, every published namespace version) before returning, so
+the database ends the call exactly as it started. `write_log` is
+deliberately untouched (an honest ledger of writes that really
+happened). The README's "try it yourself" walkthrough now uses
+`--dry-run` by default, closing the friction D-060 originally disclosed
+rather than engineered around.
+
+**Files touched:**
+
+- `src/schema/publish.ts` — new `deletePublishedNamespaceVersion(pool,
+namespace, version)`, the first (and only) place this codebase ever
+  deletes a `namespace_configs` row, narrowly scoped to this one caller
+  and documented as such.
+- `src/soundness/runner.ts` — `SoundnessRunOptions.dryRun`, a
+  `cleanupDryRunArtifacts` helper (best-effort, every deletion category
+  attempted independently, never masks a genuine run failure already in
+  flight), and `runSoundnessFuzz`'s body wrapped in `try`/`catch` (not a
+  plain `finally` — see the in-code comment on why a `finally` that
+  itself throws would silently replace an in-flight error). Non-dry-run
+  path provably unchanged.
+- `src/cli/commands/soundness.ts`, `src/cli/index.ts` — `--dry-run` flag,
+  one extra honest line in `--format text` output only (`--format
+markdown`/`json`'s "stdout is exactly the report" contract, which CI's
+  PR-comment capture depends on, is untouched either way).
+- `test/unit/soundness/dry-run-cleanup.integration.test.ts` (new
+  directory) — 5 real-Postgres tests: exact row-count preservation
+  (namespace_configs/relation_tuples/soundness_runs unchanged, the
+  specific inserted-then-deleted row and the specific generated
+  namespace/tuple rows confirmed gone, not just aggregate totals);
+  same-seed dry-run vs. real-run byte-identical computed results (the
+  single most important assertion — catches a dry-run that silently
+  weakens the actual comparison, which the persistence checks alone
+  wouldn't); normal persistence still works for a real run; `write_log`
+  correctly grows by `2×tupleCount` rather than staying flat or being
+  pruned; explicit `dryRun: false` and omitted `dryRun` both behave
+  identically to each other and to today's pre-existing default.
+- `README.md` — "try it yourself" now uses `--dry-run`; CLI reference
+  table updated.
+- `docs/DECISIONS.md` — D-063 (new), D-060 marked resolved with a
+  cross-reference.
+
+**A real, disclosed test-coverage gap, found and explained, not
+papered over:** neither `test-author`'s integration test nor any other
+automated test in this repo proves "cleanup still runs for whatever was
+created when the run itself fails partway through" against a genuine,
+deterministically-triggered failure reached only through
+`runSoundnessFuzz`'s own public API with zero source changes —
+investigated directly and found not reliably achievable that way (every
+throw site is only reachable from a fixture the generator's own
+self-consistency guarantees can never actually produce; the one real
+race available, two concurrent same-seed calls, isn't deterministic
+enough to build a non-flaky test on). This case is instead validated by
+the main agent's own manual fail-checks against the real, committed
+source (below) — a real, honest choice not to fake automated coverage
+for a case that can't be triggered honestly through the public surface.
+
+**Independent verification performed by the main agent, not accepted
+from either subagent's report alone:**
+
+- Read the full diff of both subagents' work directly.
+- Ran a same-seed dry-run-vs-real comparison against real local
+  Postgres myself (distinct from `test-author`'s own, using a different
+  seed and query count): `falseGrantCount`/`falseDenyCount`/`verdict`
+  byte-identical between the two calls; `namespace_configs`/
+  `relation_tuples`/`soundness_runs` counts exactly unchanged after the
+  dry run; a real, non-dry-run call with the same seed persisted
+  normally afterward.
+- Performed an original fail-check on `src/schema/publish.ts`'s new
+  function, distinct from `soundness-engineer`'s own four: forced
+  `deletePublishedNamespaceVersion` itself to always fail while leaving
+  tuple/soundness_runs cleanup untouched — confirmed the real database
+  ended up exactly as the "each cleanup category is independent" design
+  predicts (`relation_tuples`/`soundness_runs` correctly returned to
+  zero, `namespace_configs` correctly retained exactly the rows whose
+  deletion was forced to fail, the thrown `AggregateError` named exactly
+  those failures) — then restored and confirmed byte-identical via
+  `md5sum`.
+- Ran `test-author`'s real, committed integration test myself via this
+  project's established LOCALVERIFY technique (real local Postgres, not
+  the subagent's own scratch-copy report) — 5/5 passed. Performed an
+  original fail-check of my own against that exact committed test and
+  the real, committed `runner.ts` (not a scratch copy): changed
+  `options.dryRun ?? false` to `options.dryRun ?? true` (a real,
+  plausible wrong-default bug) and confirmed exactly and only the
+  "explicit `false` vs. omitted" test failed — the other four,
+  including the explicit `dryRun: true`/`false` tests, stayed correctly
+  green, precisely isolating the fault. Restored, confirmed
+  byte-identical via `md5sum`, reran clean.
+- Smoke-tested the real CLI against real Postgres directly: `--dry-run`
+  alone (zero row-count change, exit 0, honest text note printed),
+  `--dry-run --format markdown` (confirmed the dry-run note does NOT
+  leak into markdown output, preserving the contract
+  `.github/workflows/soundness.yml`'s PR-comment capture depends on),
+  and a plain non-dry-run run (regression check — rows persist exactly
+  as before this change).
+- Ran the complete `npm run verify` pipeline against the full, final
+  worktree state: clean throughout (format:check, lint, typecheck, 221
+  tests passed, build).
+
+**Final state:** `npm run verify` clean; the new dry-run mechanism
+independently proven against real Postgres by two different fail-check
+approaches on top of the implementing/testing subagents' own; the
+README's walkthrough now leaves zero trace by default; D-060's "revisit
+if" fired and is closed.
