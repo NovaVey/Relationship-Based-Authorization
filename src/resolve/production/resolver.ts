@@ -382,7 +382,7 @@ async function resolve(
   depth: number,
 ): Promise<ProductionOutcome> {
   ctx.depthReached.value = Math.max(ctx.depthReached.value, depth);
-  if (depth >= ctx.maxDepth) {
+  if (depth > ctx.maxDepth) {
     return { allowed: false, disproof: { kind: 'boundReached', object, name, reason: 'depth' } };
   }
 
@@ -397,12 +397,13 @@ async function resolve(
 
     const relation = config.relations[name];
     if (relation) {
+      const remainingDepth = Math.max(0, ctx.maxDepth - depth);
       const sqlOutcome = await sqlRelationMembershipWithWitness(
         ctx.pool,
         object,
         name,
         subject,
-        ctx.maxDepth,
+        remainingDepth,
       );
       ctx.depthReached.value = Math.max(ctx.depthReached.value, sqlOutcome.depthReached);
       return sqlOutcome.allowed
@@ -516,7 +517,7 @@ async function evalRewrite(
           newObject,
           rule.computedUserset,
           visited,
-          depth + 1,
+          depth,
         );
         if (outcome.allowed) {
           return {
