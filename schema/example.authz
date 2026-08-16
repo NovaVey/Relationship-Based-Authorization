@@ -1,0 +1,88 @@
+// The Phase 9 demo schema — build spec `.claude/commands/build-authz-service.md`
+// §5 (grammar) and §9 Phase 9 ("Example schema: document/folder/group/org
+// per §5, populated with a realistic tuple graph"). Everything the README,
+// docs/RELATIONS.md, docs/CONSISTENCY.md, the report-designer screens, and
+// `scripts/seed-example.ts` reference by name comes from this one file —
+// there is exactly one definition of the demo's shape, never a second copy
+// drifting out of sync with it.
+//
+// Deliberately one file, all four namespaces together, not `schema/{document,
+// folder,group,org}.authz` split apart the way Phase 1's own CHECKPOINT
+// fixtures are (those stay as they are — untouched historical evidence that
+// each one *also* compiles standalone; see their own comments). A single
+// file lets `authz schema publish schema/example.authz` publish the whole
+// demo in one command, which matters for §9 Phase 9's own exit criterion
+// ("a stranger clones ... in under 10 minutes"), and lets `folder`'s and
+// `document`'s `parent->edit`/`parent->view` tuple-to-userset rules target
+// `folder` from inside the same compilation unit (§5's own "target
+// namespace must exist" rule — see docs/DECISIONS.md).
+//
+// Every rewrite-rule kind appears at least once, deliberately, so the demo
+// exercises the full engine, not just direct grants:
+//   union        — every `view`/`edit` permission below
+//   exclusion    — org.view = member - banned
+//   intersection — folder.sensitive_review = (viewer | edit) & sensitive_reviewer
+//   tuple-to-userset — folder/document `parent->edit`, `parent->view`
+//   nested groups (a userset as a tuple's own *subject*, not a rewrite
+//   rule at all — see group.member's own comment) — group:eng#member is
+//   itself a subject of another group's member set two levels deep in the
+//   seeded tuple graph (`scripts/seed-example.ts`), the one deliberately
+//   non-obvious case §9 Phase 9 asks for by name.
+
+namespace org {
+  relation member: user | group#member
+  relation banned: user
+
+  // Anyone in the org can see org-wide content — unless explicitly banned.
+  // A real exclusion: `member` alone is not the answer, `member - banned`
+  // is. See docs/RELATIONS.md for why this is the rewrite rule that
+  // actually needs a subtract, not a second boolean column on `member`.
+  permission view = member - banned
+}
+
+namespace group {
+  // `user | group#member` is what makes nested group membership possible
+  // with zero special-cased recursion: a tuple can name another group's
+  // *member set* as its subject
+  // (`group:eng#member@group:eng-backend#member`), not just a plain user.
+  // See docs/RELATIONS.md's own walkthrough of the seeded graph's
+  // two-level nesting case.
+  relation member: user | group#member
+
+  permission view = member
+}
+
+namespace folder {
+  relation parent: folder
+  relation owner: user
+  relation editor: user | group#member
+  relation viewer: user | group#member
+  // Who's specifically cleared to review this folder's sensitive
+  // contents — deliberately a *second*, narrower gate on top of ordinary
+  // access, not a replacement for it. See `sensitive_review` below.
+  relation sensitive_reviewer: user | group#member
+
+  // Editing a parent folder implies editing every folder/document nested
+  // under it — `parent->edit`, never `parent->view` (an edit permission
+  // that only required the parent's *view* would be a real privilege-
+  // escalation bug, not a convenience).
+  permission edit = editor | owner | parent->edit
+  // Anyone who can edit can also view; direct viewers can view; and view
+  // inherits down the folder tree the same way edit does.
+  permission view = viewer | edit | parent->view
+  // Intersection: being able to see this folder at all is necessary but
+  // not sufficient — you also need the narrower `sensitive_reviewer`
+  // grant. Two people can both be ordinary viewers of the same folder and
+  // get different answers to this one permission.
+  permission sensitive_review = (viewer | edit) & sensitive_reviewer
+}
+
+namespace document {
+  relation parent: folder
+  relation owner: user
+  relation editor: user | group#member
+  relation viewer: user | group#member
+
+  permission edit = editor | owner | parent->edit
+  permission view = viewer | edit | parent->view
+}

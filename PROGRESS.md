@@ -1109,3 +1109,203 @@ real local Postgres.
   LOCALVERIFY) but not yet inside actual CI — first CI run on this
   phase's PR is the first time it runs in the environment it was
   actually written for (a real Docker-backed `test-integration` job).
+
+## Phase 9 — Screens, example schema, docs, demo
+
+**Owner:** main agent (`schema/example.authz`, `scripts/seed-example.ts`,
+`docs/RELATIONS.md`, `docs/CONSISTENCY.md`, `docs/DELIVERY.md`, the
+README rewrite, all independent verification) + `report-designer` (the
+five `docs/screens/*.html` mockups, one agent per screen) + `test-author`
+(the demo-graph structural-verification test). No CHECKPOINT required
+for this phase (confirmed from §9's own text) — still followed this
+project's own established "report before merging" pattern from every
+prior non-CHECKPOINT phase (2, 4, 6, 8): this phase's PR is opened and
+reported, not merged, until the user says so.
+
+Built in a separate git worktree (`feat/phase-9-screens-example-docs`,
+off `origin/main`), matching Phase 8's own concurrent-agent discipline —
+the six-agent `report-designer`/`test-author` fan-out (below) ran
+entirely inside this worktree, isolated from the main checkout.
+
+**Files touched:**
+
+- `schema/example.authz` (new, 88 lines) — the Phase 9 demo schema: all
+  four namespaces (`org`/`group`/`folder`/`document`) in one file, so
+  `authz schema publish schema/example.authz` publishes all of them in
+  one command (D-057). Deliberately exercises all five real mechanics —
+  union, exclusion (`org.view = member - banned`), intersection
+  (`folder.sensitive_review = (viewer|edit) & sensitive_reviewer`),
+  tuple-to-userset (`parent->edit`/`parent->view`), and nested-group-as-
+  subject — not just the one §9 Phase 9 names by name (D-058). Phase 1's
+  own `schema/{document,folder,group,org}.authz` are untouched, kept as
+  historical CHECKPOINT evidence (D-057).
+- `scripts/seed-example.ts` (new, `.ts`, run via `npx tsx`/
+  `npm run seed:example`) — publishes the real schema and writes a real
+  22-tuple graph (6 org members incl. one banned, two levels of nested
+  groups, a folder hierarchy with a mix of direct and inherited grants,
+  an intersection case). `tsconfig.json`'s `include` extended to cover
+  `scripts/**/*.ts` (confirmed `tsconfig.build.json` has its own separate
+  `include`, so this doesn't leak into `dist/`) so this file gets full
+  project-service type-checking, not ESLint's loose fallback. Found and
+  fixed live: every hyphenated demo id (`eng-backend`, `finance-docs`, …)
+  was rejected by `IDENTIFIER_PATTERN` the moment the script actually ran
+  against real Postgres — fixed to underscores throughout (D-059).
+- `docs/RELATIONS.md`, `docs/CONSISTENCY.md` (new) — the two plain-
+  language docs §9 Phase 9 names explicitly, every example pulled from
+  the real `schema/example.authz`/real check-and-expand output, never
+  invented. `docs/CONSISTENCY.md`'s test citations were caught and fixed
+  before finalizing: an initial draft cited invented literal test names
+  that don't exist verbatim anywhere in `test/`; replaced with the real
+  `it()` description strings from
+  `test/isolation/permission-resolution.integration.test.ts` and
+  `test/unit/resolve/production/production-check-behavior.integration.test.ts`,
+  found by grep, not memory.
+- `docs/DELIVERY.md` (new) — §13's content. Not named explicitly by §9
+  Phase 9's own paragraph, but listed in §3's repo layout with no other
+  phase claiming it, and Phase 9 is the last "docs, demo" phase this
+  build spec has (D-061).
+- `docs/screens/{namespaces,tuples,check,soundness,expand}.html` (new,
+  6,774 lines total) — the five screens per §8, one `report-designer`
+  agent per screen, dispatched together via a `Workflow` fan-out (below).
+  Every id, tuple, check result, resolution path, and soundness run shown
+  is real, captured directly from this repo's own CLI/API against
+  `schema/example.authz`, never invented; where a screen had no captured
+  data for a case, it says so rather than filling the gap (confirmed
+  independently — see verification below). `docs/screens/README.md`
+  (new, main agent) — a short index explaining these are static mockups,
+  not a live app, and pointing back to the README's own "try it
+  yourself" section for reproducing the underlying data.
+- `test/unit/demo/example-schema.integration.test.ts` (new, new
+  directory, `test-author`) — publishes the real `schema/example.authz`
+  and writes a hand-transcribed 22-tuple `DEMO_TUPLES` graph, with a
+  parity test that re-parses `scripts/seed-example.ts`'s own source text
+  at run time and asserts byte-for-byte match, so the two can never
+  silently drift. Asserts `check(user:dana, edit, document:eng_handbook)`
+  structurally, field-by-field down the full resolution path (union →
+  tupleToUserset → union → usersetMembership → usersetMembership →
+  usersetMembership → directGrant) — not a bare `allowed === true` — plus
+  a negative control (`user:bob`, denied, no path).
+- `README.md` (fully rewritten per §12's exact structure) — failure-
+  first opener, the real 5-hop `dana` chain as the headline resolution-
+  path example, the real "SOUND — 0 false_grant, 0 false_deny, across
+  5,000 queries" result stated before any feature list, a "Try it
+  yourself — under 10 minutes" section with the exact real commands, an
+  honest note about `authz soundness run` writing real rows into
+  whatever database it's pointed at (D-060), "How it works" linking the
+  two new docs, honest positioning naming SpiceDB/OpenFGA/Ory Keto and
+  linking `docs/DELIVERY.md`, the full CLI/API reference, and an updated
+  repository layout.
+- `docs/DECISIONS.md` — D-057 through D-062 (this phase's six entries,
+  below).
+
+**Real fan-out, real captured data, not invented content:** before
+dispatching any subagent, the main agent ran the real CLI/API against
+`schema/example.authz` and the real seeded graph and captured every
+output to a `.captures/` staging directory (schema source, compiled
+JSON, `/health`, four real `check` responses spanning all three
+outcomes worth showing — allowed/denied/exclusion-denied/intersection —
+two real `expand` trees, and two real, independent `authz soundness run`
+results with their real seeds). All six subagents (five `report-designer`,
+one `test-author`) were dispatched together via a single `Workflow`
+`parallel([...])` fan-out, each given the same real capture pointers plus
+a per-screen brief, and required to cite a real capture file for every
+concrete value they used rather than inventing one. `.captures/` was
+deleted before committing — staging data, never committed, matching this
+project's own LOCALVERIFY-never-committed precedent.
+
+**Independent verification performed by the main agent, not trusted from
+any subagent's own report alone:**
+
+- A from-scratch Python `html.parser` tag-balance checker run personally
+  against all five screen files — zero unclosed/mismatched tags on all
+  five — plus `npx prettier --check docs/screens/*.html`, clean.
+- Grep-confirmed the headline `dana` chain (`…eng_backend_interns#member
+→ …eng_backend#member → …eng#member → folder:eng_docs#editor →
+document:eng_handbook#edit`) actually appears on `check.html`/
+  `expand.html`/`namespaces.html`; confirmed the complete set of user ids
+  referenced across all five screens is exactly the real six-person cast
+  (`alice, bob, carol, dana, erin, mallory`) — zero fabricated identities;
+  confirmed `tuples.html` renders exactly 22 rows (the real seeded
+  count); confirmed `namespaces.html` renders the real exclusion and
+  intersection rewrite rules verbatim against `compiled-schema.json`;
+  confirmed `soundness.html` contains both real captured seed strings (10
+  total occurrences) and the `FALSE_GRANT` badge markup.
+- Redid, properly, an emoji-adjacency check on `soundness.html`'s
+  `FALSE_GRANT` styling that had initially failed to execute (a Python
+  regex error) rather than accepting its inconclusive fallback output:
+  read the actual surrounding HTML directly and confirmed the badge CSS
+  (`text-transform: uppercase`, `font-weight: 700`, solid `--alert`
+  fill) and every nearby line are plain text — no emoji anywhere near any
+  `FALSE_GRANT` reference, and `.badge-false-deny` uses the muted,
+  bordered, unfilled treatment — matching this project's own established
+  asymmetric-severity convention (D-044) exactly.
+- Ran the real, committed `test/unit/demo/example-schema.integration.test.ts`
+  directly — not the subagent's own scratch-copy report — via this
+  project's established LOCALVERIFY technique (copied to a
+  `LOCALVERIFY-`-prefixed sibling, swapped `PostgreSqlContainer` for this
+  sandbox's real local Postgres, ran for real, deleted the copy, never
+  committed): all 3 tests passed against a freshly-reset real database.
+  Performed an independent fail-check of its own, distinct from
+  `test-author`'s three already-performed fail-checks: edited the real,
+  committed `scripts/seed-example.ts` (not the test's own copy) to
+  change one real tuple's subject (`user:dana` → `user:dave`), reran, and
+  confirmed the parity test failed with a precise, correctly-located
+  diff — proving the byte-for-byte drift check genuinely catches drift
+  in the real committed source, not just in a private copy of it.
+  Restored the file and confirmed byte-identical restoration via
+  `md5sum` before and after.
+- Ran the complete `npm run verify` pipeline (format:check, lint,
+  typecheck, test, build) against the full, final worktree state — every
+  new file together, not piecemeal — clean throughout: 217 tests passed,
+  4 `.todo()` remaining (all in `test/isolation/`, pre-existing, see
+  D-062), build clean.
+- Independently re-ran the exact README-documented "try it yourself"
+  flow end-to-end (`doctor` → `seed:example` → `check` → `expand` →
+  `soundness run`) from a freshly, fully wiped local database (`drop
+schema public cascade`) — completed in 6.41 real seconds, verdict
+  SOUND, 0 false_grant / 0 false_deny across 5,000 queries — reconfirming
+  the README's claims with a fresh run, not the same run already cited
+  in the README's own text.
+
+**A real, disclosed gap, found and then closed on the same PR:** four
+`test/isolation/identifier-and-tuple-validation.fuzz.test.ts` `it.todo()`s
+remained open with Phase 9 being the last phase this build spec names, so
+there was no further phase left to attribute them to — recorded honestly
+per D-062 rather than left unmentioned. Per direct user instruction ("fix
+the open gap"), dispatched a second `test-author` delegation to
+un-skip and implement all four for real: a DB-free SQL/DDL-splicing
+proof across `publishSchema`/`writeTuple`/`deleteTuple`, and two 2,000-run
+`fast-check` property tests plus a deterministic boundary case against
+the identifier grammar. Writing the namespace-name property surfaced a
+real, narrow gap between the _published_ grammar
+(`IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH`) and what the parser
+actually enforces (`namespace`/`relation`/`permission` are reserved
+words despite matching the pattern) — folded correctly into the test's
+own oracle, and `IDENTIFIER_PATTERN`'s doc comment updated to state it
+explicitly. Independently verified by the main agent (not accepted from
+`test-author`'s report alone): read the full diff; ran the file directly
+(11/11 passed, zero `it.todo()` left anywhere in `test/isolation/`); ran
+the full `npm run verify` pipeline (221/221, up from 217/4-todo);
+performed an independent fail-check of my own, distinct from
+`test-author`'s own four, targeting a different source location
+(`parser.ts`'s own length-boundary check) and confirmed byte-identical
+restoration via `git diff`/`md5sum`. Full detail in D-062's own
+resolution note.
+
+**Final state:** `npm run verify` clean (format:check, lint, typecheck,
+221 tests passed, 0 todo, build); the real demo-graph integration test
+passes against real local Postgres (verified directly, twice, including
+one independent fail-check); all five screens independently confirmed
+well-formed, prettier-clean, and grounded in real captured data; the
+full README-documented 10-minute flow independently re-run end-to-end
+from a clean database in 6.41 seconds with a genuine `SOUND` verdict;
+zero `it.todo()` remaining anywhere in `test/isolation/`.
+
+**Open questions carried forward:**
+
+- `authz soundness run` writing real rows into whatever database it's
+  pointed at (including a stranger's own freshly-seeded demo database)
+  is disclosed plainly in the README rather than engineered around
+  (D-060) — revisit if a future `--dry-run` mode or a documented
+  disposable-database convention makes the walkthrough's own advice
+  worth changing.

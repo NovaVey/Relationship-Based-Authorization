@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Tuple browser — Relationship-Based Authorization</title>
+    <style>
+      :root {
+        --paper: #f7f2e7;
+        --paper-raised: #efe7d5;
+        --ink: #201d17;
+        --muted: #5a5240;
+        --border: #d9cfb5;
+        --border-strong: #c3b795;
+        --accent-intersection: #2f5d55;
+        --accent-intersection-bg: #e4efec;
+        --accent-exclusion: #6b4119;
+        --accent-exclusion-bg: #f2e6d8;
+        --accent-hop: #4f3d6e;
+        --accent-hop-bg: #ece6f2;
+        --focus: #201d17;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family:
+          ui-monospace, 'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.55;
+        font-size: 15px;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: -999px;
+        top: 0;
+        background: var(--ink);
+        color: var(--paper);
+        padding: 0.5em 1em;
+        z-index: 10;
+      }
+      .skip-link:focus-within {
+        left: 0;
+      }
+
+      a {
+        color: var(--ink);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 1.75rem 1.25rem 4rem;
+      }
+
+      code,
+      pre {
+        font-family: inherit;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ---- header ---- */
+
+      .page-header {
+        border-bottom: 1px solid var(--border-strong);
+        padding-bottom: 1.25rem;
+        margin-bottom: 2rem;
+      }
+
+      .eyebrow {
+        margin: 0 0 0.6rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .screen-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+        margin: 0 0 0.35rem;
+      }
+
+      .screen-tab {
+        font-size: 0.8rem;
+        padding: 0.15rem 0.1rem;
+      }
+      .screen-tab.current {
+        font-weight: 700;
+        border-bottom: 2px solid var(--ink);
+      }
+      .screen-tab.inert {
+        color: var(--muted);
+      }
+      .screen-sep {
+        color: var(--border-strong);
+      }
+
+      .nav-caption {
+        margin: 0.35rem 0 1.1rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.7rem;
+        letter-spacing: -0.01em;
+      }
+
+      .lede {
+        margin: 0 0 0.6rem;
+        max-width: 68ch;
+      }
+
+      .subnote {
+        margin: 0;
+        max-width: 68ch;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+
+      /* ---- filter panel ---- */
+
+      .filter-panel {
+        border: 1px solid var(--border);
+        background: var(--paper-raised);
+        border-radius: 6px;
+        padding: 1rem 1.15rem;
+        margin-bottom: 2rem;
+      }
+
+      .filter-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.6rem;
+      }
+
+      .filter-row label {
+        font-size: 0.85rem;
+        font-weight: 700;
+      }
+
+      .filter-row input {
+        flex: 1 1 16rem;
+        min-width: 0;
+        font-family: inherit;
+        font-size: 0.92rem;
+        color: var(--ink);
+        background: var(--paper);
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        padding: 0.4rem 0.6rem;
+      }
+
+      .filter-row input::placeholder {
+        color: var(--muted);
+        opacity: 1;
+      }
+
+      .filter-count {
+        font-size: 0.8rem;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .filter-hint {
+        margin: 0.7rem 0 0;
+        font-size: 0.8rem;
+        color: var(--muted);
+        max-width: 74ch;
+      }
+
+      .filter-empty {
+        margin: 0;
+        padding: 0.9rem 1.15rem;
+        border: 1px dashed var(--border-strong);
+        border-radius: 6px;
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+
+      /* ---- tuple groups ---- */
+
+      .tuple-group {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1.1rem 1.3rem 1.3rem;
+        margin-bottom: 1.5rem;
+        background: var(--paper);
+      }
+
+      .group-head {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .group-head h2 {
+        margin: 0;
+        font-size: 1.15rem;
+      }
+
+      .count-badge {
+        font-size: 0.72rem;
+        border: 1px solid var(--border-strong);
+        border-radius: 999px;
+        padding: 0.1rem 0.55rem;
+        color: var(--muted);
+      }
+
+      .group-note {
+        margin: 0 0 0.9rem;
+        font-size: 0.86rem;
+        color: var(--muted);
+        max-width: 74ch;
+      }
+
+      .group-note code {
+        font-size: 0.95em;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.88rem;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 0.45rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+
+      thead th {
+        background: var(--paper-raised);
+        font-weight: 700;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      tbody tr[hidden] {
+        display: none;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        tbody tr {
+          transition: background-color 120ms ease;
+        }
+      }
+
+      tbody tr:hover {
+        background: var(--paper-raised);
+      }
+
+      code {
+        background: var(--paper-raised);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.03em 0.35em;
+        font-size: 0.92em;
+      }
+
+      td code {
+        background: none;
+        border: none;
+        padding: 0;
+      }
+
+      .chip {
+        display: inline-block;
+        border: 1px solid var(--border-strong);
+        background: var(--paper-raised);
+        border-radius: 3px;
+        padding: 0.03em 0.45em;
+        font-size: 0.92em;
+      }
+
+      .chip-hop {
+        border-style: dashed;
+        border-color: var(--accent-hop);
+        background: var(--accent-hop-bg);
+        color: var(--accent-hop);
+      }
+
+      /* ---- legend ---- */
+
+      .legend-line {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.5rem;
+        font-size: 0.84rem;
+        color: var(--muted);
+        margin: 0 0 2rem;
+        max-width: 78ch;
+      }
+
+      footer {
+        border-top: 1px solid var(--border-strong);
+        padding-top: 1rem;
+        margin-top: 2.5rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      footer p {
+        max-width: 72ch;
+      }
+
+      @media (max-width: 640px) {
+        .wrap {
+          padding: 1.25rem 0.9rem 3rem;
+        }
+        h1 {
+          font-size: 1.4rem;
+        }
+        .tuple-group {
+          padding: 1rem;
+        }
+        th,
+        td {
+          white-space: normal;
+        }
+        .filter-row {
+          align-items: stretch;
+        }
+        .filter-row input {
+          flex-basis: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="skip-link"><a href="#main">Skip to content</a></div>
+    <div class="wrap">
+      <header class="page-header">
+        <p class="eyebrow">relationship-based-authorization · schema instrument panel</p>
+        <nav class="screen-nav" aria-label="Screens in this report UI">
+          <span class="screen-tab inert">Namespaces</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab current" aria-current="page">Tuple browser</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Check playground</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Soundness runs</span>
+          <span class="screen-sep" aria-hidden="true">·</span>
+          <span class="screen-tab inert">Expand tree</span>
+        </nav>
+        <p class="nav-caption">
+          Five screens per the design direction (build spec §8). This file renders only
+          <strong>Tuple browser</strong> — the other four are separate static files in this set, not
+          linked from here.
+        </p>
+        <h1>Tuple browser</h1>
+        <p class="lede">
+          All <strong>22</strong> relation tuples currently written to the seeded demo graph — the
+          facts the check engine walks, never a conditional in application code. Grouped by the
+          object's namespace, in the same order the demo seeds them
+          (<code>scripts/seed-example.ts</code>): <code>org</code> membership first, then nested
+          <code>group</code>s, then the <code>folder</code> hierarchy, then <code>document</code>s.
+        </p>
+        <p class="subnote">
+          A tuple is a fact, not a derived permission — <code>view</code> and
+          <code>edit</code> never appear as a <code>relation</code> column value here because a
+          <code>permission</code> can never be the target of a tuple write (build spec §5). See the
+          Namespaces screen for how these tuples get combined into computed permissions.
+        </p>
+      </header>
+
+      <main id="main">
+        <section class="filter-panel" aria-labelledby="filter-heading">
+          <h2 id="filter-heading" class="sr-only">Filter tuples</h2>
+          <div class="filter-row">
+            <label for="tuple-filter">Filter by object or subject</label>
+            <input
+              type="text"
+              id="tuple-filter"
+              placeholder="e.g. dana, group:eng, folder:finance_docs"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span id="filter-count" class="filter-count" aria-live="polite"
+              >22 of 22 tuples shown</span
+            >
+          </div>
+          <p class="filter-hint">
+            Matches a case-insensitive substring against the exact <code>namespace:id</code> (or
+            <code>namespace:id#relation</code>) text in the object or subject column — the same
+            notation <code>authz tuple write</code> itself takes. Try <code>dana</code> to isolate
+            the two-level nested-group case, or <code>finance</code> for the
+            <code>sensitive_review</code> intersection's two grants. Runs entirely client-side,
+            against the 22 rows already in this page — no network request. Works without JavaScript
+            too: with it disabled, the input is inert and every row stays visible.
+          </p>
+        </section>
+
+        <p class="legend-line">
+          <span class="chip chip-hop">group:eng#member</span>
+          <span
+            >— a subject given as a userset (<code>namespace:id#relation</code>) rather than a plain
+            id. 4 of the 22 tuples below are shaped this way; they're what make nested-group
+            membership and tuple-to-userset resolution possible without any special-cased recursion
+            in application code.</span
+          >
+        </p>
+
+        <p id="filter-empty" class="filter-empty" hidden>
+          No tuple's object or subject matches that filter.
+        </p>
+
+        <!-- ============ org ============ -->
+        <section class="tuple-group" id="tuples-org" aria-labelledby="tuples-org-heading">
+          <div class="group-head">
+            <h2 id="tuples-org-heading"><code>org</code></h2>
+            <span class="count-badge">7 tuples</span>
+          </div>
+          <p class="group-note">
+            Six members of <code>org:acme</code>; <code>user:mallory</code> is also
+            <code>banned</code> — the one row that turns <code>org.view</code>'s
+            <code>member - banned</code> exclusion from a no-op into a real subtract. Real check:
+            <code>user:mallory view org:acme</code> → denied
+            (<code>.captures/check-mallory-view-org.json</code>).
+          </p>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="org tuples">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">object</th>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr data-object="org:acme" data-subject="user:alice">
+                  <td><code>org:acme</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:alice</code></td>
+                </tr>
+                <tr data-object="org:acme" data-subject="user:bob">
+                  <td><code>org:acme</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:bob</code></td>
+                </tr>
+                <tr data-object="org:acme" data-subject="user:carol">
+                  <td><code>org:acme</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:carol</code></td>
+                </tr>
+                <tr data-object="org:acme" data-subject="user:dana">
+                  <td><code>org:acme</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:dana</code></td>
+                </tr>
+                <tr data-object="org:acme" data-subject="user:erin">
+                  <td><code>org:acme</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:erin</code></td>
+                </tr>
+                <tr data-object="org:acme" data-subject="user:mallory">
+                  <td><code>org:acme</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:mallory</code></td>
+                </tr>
+                <tr data-object="org:acme" data-subject="user:mallory">
+                  <td><code>org:acme</code></td>
+                  <td><code>banned</code></td>
+                  <td><code>user:mallory</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ============ group ============ -->
+        <section class="tuple-group" id="tuples-group" aria-labelledby="tuples-group-heading">
+          <div class="group-head">
+            <h2 id="tuples-group-heading"><code>group</code></h2>
+            <span class="count-badge">6 tuples</span>
+          </div>
+          <p class="group-note">
+            <code>group:eng</code> nests two levels deep: <code>group:eng_backend</code> nests
+            inside <code>group:eng</code>, and <code>group:eng_backend_interns</code> nests inside
+            <code>group:eng_backend</code>. <code>user:dana</code> is a member of
+            <code>eng_backend_interns</code> only — her only path to <code>eng</code> membership,
+            and everything <code>eng</code> grants, runs through both nesting hops. This is build
+            spec §9 Phase 9's own named non-obvious case. <code>group:finance</code> has no nesting:
+            <code>carol</code> and <code>erin</code> are both direct members.
+          </p>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="group tuples">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">object</th>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr data-object="group:eng" data-subject="user:alice">
+                  <td><code>group:eng</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:alice</code></td>
+                </tr>
+                <tr data-object="group:eng" data-subject="group:eng_backend#member">
+                  <td><code>group:eng</code></td>
+                  <td><code>member</code></td>
+                  <td><span class="chip chip-hop">group:eng_backend#member</span></td>
+                </tr>
+                <tr data-object="group:eng_backend" data-subject="group:eng_backend_interns#member">
+                  <td><code>group:eng_backend</code></td>
+                  <td><code>member</code></td>
+                  <td><span class="chip chip-hop">group:eng_backend_interns#member</span></td>
+                </tr>
+                <tr data-object="group:eng_backend_interns" data-subject="user:dana">
+                  <td><code>group:eng_backend_interns</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:dana</code></td>
+                </tr>
+                <tr data-object="group:finance" data-subject="user:carol">
+                  <td><code>group:finance</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:carol</code></td>
+                </tr>
+                <tr data-object="group:finance" data-subject="user:erin">
+                  <td><code>group:finance</code></td>
+                  <td><code>member</code></td>
+                  <td><code>user:erin</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ============ folder ============ -->
+        <section class="tuple-group" id="tuples-folder" aria-labelledby="tuples-folder-heading">
+          <div class="group-head">
+            <h2 id="tuples-folder-heading"><code>folder</code></h2>
+            <span class="count-badge">4 tuples</span>
+          </div>
+          <p class="group-note">
+            <code>folder:eng_docs</code> grants <code>editor</code> directly to
+            <code>group:eng#member</code>. <code>folder:eng_backend_docs</code> holds only a
+            <code>parent</code> tuple pointing at <code>eng_docs</code> — no direct grant of its own
+            at all; everything on it is inherited via <code>parent→edit</code> /
+            <code>parent→view</code>, proving inheritance actually does the work rather than sitting
+            behind a direct grant as a fallback. <code>folder:finance_docs</code> splits ordinary
+            access (<code>viewer</code> to <code>group:finance#member</code>) from a narrower
+            <code>sensitive_reviewer</code> grant held by <code>user:carol</code> alone — the two
+            branches the <code>sensitive_review</code> intersection checks (see Namespaces).
+          </p>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="folder tuples">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">object</th>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr data-object="folder:eng_docs" data-subject="group:eng#member">
+                  <td><code>folder:eng_docs</code></td>
+                  <td><code>editor</code></td>
+                  <td><span class="chip chip-hop">group:eng#member</span></td>
+                </tr>
+                <tr data-object="folder:eng_backend_docs" data-subject="folder:eng_docs">
+                  <td><code>folder:eng_backend_docs</code></td>
+                  <td><code>parent</code></td>
+                  <td><code>folder:eng_docs</code></td>
+                </tr>
+                <tr data-object="folder:finance_docs" data-subject="group:finance#member">
+                  <td><code>folder:finance_docs</code></td>
+                  <td><code>viewer</code></td>
+                  <td><span class="chip chip-hop">group:finance#member</span></td>
+                </tr>
+                <tr data-object="folder:finance_docs" data-subject="user:carol">
+                  <td><code>folder:finance_docs</code></td>
+                  <td><code>sensitive_reviewer</code></td>
+                  <td><code>user:carol</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ============ document ============ -->
+        <section class="tuple-group" id="tuples-document" aria-labelledby="tuples-document-heading">
+          <div class="group-head">
+            <h2 id="tuples-document-heading"><code>document</code></h2>
+            <span class="count-badge">5 tuples</span>
+          </div>
+          <p class="group-note">
+            <code>document:roadmap</code> has no <code>parent</code> tuple at all —
+            <code>bob</code> (<code>viewer</code>) and <code>alice</code> (<code>owner</code>) are
+            direct grants only, the deliberate contrast case against every other document here,
+            which carry no direct <code>editor</code>/<code>viewer</code>/<code>owner</code> row and
+            resolve access purely by inheriting from a parent folder: <code>eng_handbook</code> and
+            <code>eng_backend_runbook</code> resolve <code>edit</code> for <code>alice</code>/<code
+              >dana</code
+            >
+            through their parent folders alone, and <code>financials</code> resolves
+            <code>view</code> for <code>carol</code>/<code>erin</code> through
+            <code>finance_docs</code> the same way.
+          </p>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="document tuples">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">object</th>
+                  <th scope="col">relation</th>
+                  <th scope="col">subject</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr data-object="document:eng_handbook" data-subject="folder:eng_docs">
+                  <td><code>document:eng_handbook</code></td>
+                  <td><code>parent</code></td>
+                  <td><code>folder:eng_docs</code></td>
+                </tr>
+                <tr
+                  data-object="document:eng_backend_runbook"
+                  data-subject="folder:eng_backend_docs"
+                >
+                  <td><code>document:eng_backend_runbook</code></td>
+                  <td><code>parent</code></td>
+                  <td><code>folder:eng_backend_docs</code></td>
+                </tr>
+                <tr data-object="document:roadmap" data-subject="user:bob">
+                  <td><code>document:roadmap</code></td>
+                  <td><code>viewer</code></td>
+                  <td><code>user:bob</code></td>
+                </tr>
+                <tr data-object="document:roadmap" data-subject="user:alice">
+                  <td><code>document:roadmap</code></td>
+                  <td><code>owner</code></td>
+                  <td><code>user:alice</code></td>
+                </tr>
+                <tr data-object="document:financials" data-subject="folder:finance_docs">
+                  <td><code>document:financials</code></td>
+                  <td><code>parent</code></td>
+                  <td><code>folder:finance_docs</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <p>
+          Source of every row on this page: <code>scripts/seed-example.ts</code>'s
+          <code>TUPLES</code> list (22 entries, 4 namespaces) — the same tuples currently written to
+          the seeded demo graph, and the exact facts every resolution path on the Check playground
+          and Expand tree screens walks. This is a static mockup: no build step, no external
+          requests; the filter above runs entirely against the rows already in this document.
+        </p>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        var input = document.getElementById('tuple-filter');
+        var countEl = document.getElementById('filter-count');
+        var emptyEl = document.getElementById('filter-empty');
+        var rows = Array.prototype.slice.call(document.querySelectorAll('tbody tr[data-object]'));
+        var groups = Array.prototype.slice.call(document.querySelectorAll('.tuple-group'));
+        var total = rows.length;
+
+        function apply() {
+          var q = input.value.trim().toLowerCase();
+          var shown = 0;
+          rows.forEach(function (row) {
+            var obj = row.getAttribute('data-object').toLowerCase();
+            var subj = row.getAttribute('data-subject').toLowerCase();
+            var match = q === '' || obj.indexOf(q) !== -1 || subj.indexOf(q) !== -1;
+            row.hidden = !match;
+            if (match) shown += 1;
+          });
+          groups.forEach(function (group) {
+            var visibleRow = group.querySelector('tbody tr[data-object]:not([hidden])');
+            group.hidden = !visibleRow;
+          });
+          countEl.textContent = shown + ' of ' + total + ' tuples shown';
+          emptyEl.hidden = shown !== 0;
+        }
+
+        input.addEventListener('input', apply);
+        apply();
+      })();
+    </script>
+  </body>
+</html>
