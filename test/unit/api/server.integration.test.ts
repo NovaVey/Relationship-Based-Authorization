@@ -214,6 +214,7 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
         object: { ns, id: objectId },
         atToken: writeBody.token,
       },
+      headers: authHeaders(),
     });
     expect(checkRes.statusCode).toBe(200);
     const checkBody = await parseBody(checkRes);
@@ -232,6 +233,7 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
       method: 'POST',
       url: '/expand',
       payload: { object: { ns, id: objectId }, relation: 'view' },
+      headers: authHeaders(),
     });
     expect(expandRes.statusCode).toBe(200);
     const expandBody = await parseBody(expandRes);
@@ -270,6 +272,7 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
         object: { ns, id: objectId },
         atToken: deleteBody.token,
       },
+      headers: authHeaders(),
     });
     expect(recheckRes.statusCode).toBe(200);
     const recheckBody = await parseBody(recheckRes);

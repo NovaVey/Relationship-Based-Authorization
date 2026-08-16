@@ -92,7 +92,13 @@ export interface SoundnessRunOptions {
    * was actually created, even if the run itself throws partway through
    * (a generator bug, a crashing check, anything) — see this file's own
    * `runSoundnessFuzz` implementation for exactly what "best-effort" means
-   * when cleanup itself fails.
+   * when cleanup itself fails. **A cleanup failure after an otherwise
+   * successful run never discards that run's own result** (D-066): the
+   * verdict this option promises to prove is real the moment it's computed,
+   * whether or not the housekeeping afterward succeeds — a failed cleanup
+   * in that case is logged, not thrown, so it can never masquerade as
+   * (and get mapped to the exit code of) the "no verdict was ever computed"
+   * failure `src/report/exitCodes.ts` reserves exit code 3 for.
    *
    * Deliberately does **not** clean up `write_log`: that table is an
    * honest, append-only ledger of every write that has ever really
@@ -503,7 +509,34 @@ export async function runSoundnessFuzz(
 
     // Real row inserted, real result computed — now erase the evidence
     // (no-op when `dryRun` is false) before handing the result back.
-    await cleanupIfDryRun();
+    //
+    // Deliberately NOT a bare `await cleanupIfDryRun();` here (full-repo
+    // audit finding, HIGH, 2026-08-16 — see `docs/DECISIONS.md` D-066): a
+    // dry run's cleanup is a courtesy on top of an already-successful,
+    // already-persisted run — `result` above is a real, valid
+    // `SoundnessRunResult` the moment the insert above returns, whether or
+    // not cleanup afterward succeeds. Letting a cleanup failure here
+    // propagate as a thrown error would fall into this function's own
+    // `catch` block below and reach `soundnessRun`'s `catch`
+    // (`src/cli/commands/soundness.ts`) indistinguishably from a genuine
+    // "no verdict was ever computed" failure — silently downgrading a real
+    // verdict (possibly `unsound`, with a critical `false_grant` — exit
+    // code 1, meant to block a PR) to exit code 3
+    // ("infrastructure failure"), which `src/report/exitCodes.ts`'s own
+    // doc comment reserves for exactly the case that did NOT happen here.
+    // A cleanup failure at this point is logged, visibly, not thrown — it
+    // never gets the chance to mask the verdict this function is about to
+    // return.
+    try {
+      await cleanupIfDryRun();
+    } catch (cleanupErr) {
+      console.error(
+        `soundness dry run (seed=${seed}): cleanup failed after a successful run — ` +
+          `the computed verdict (${verdict}) is still valid and will be returned; ` +
+          `some fixture rows may remain in namespace_configs/relation_tuples/soundness_runs`,
+        cleanupErr,
+      );
+    }
     return result;
   } catch (err) {
     // Best-effort cleanup of whatever was actually created before this

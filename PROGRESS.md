@@ -1431,6 +1431,95 @@ approaches on top of the implementing/testing subagents' own; the
 README's walkthrough now leaves zero trace by default; D-060's "revisit
 if" fired and is closed.
 
+## API auth-gating and dry-run cleanup fixes (D-064, D-065, D-066)
+
+**Owner:** main agent (all three findings — API/CLI surface, own turf).
+Not a numbered build phase — a full-repo audit (2026-08-16) found three
+HIGH-severity findings this entry closes, part of the batch the direct
+user instruction "fix the critical and high findings" covers.
+
+**Finding #4 — `/check`/`/expand` unauthenticated (D-064):**
+`requireAdminAuth` now gates `/check` and `/expand` in
+`src/api/server.ts`, exactly as it already gated the three write routes.
+Both get a new, more generous rate-limit budget (`gatedReadRateLimit`,
+200/minute) than writes' 20/minute. `/schema/compile` and `/health`
+remain the only unauthenticated routes — both answer questions about the
+caller's own supplied input or non-sensitive schema metadata, never the
+real tuple graph.
+
+**Finding #5 — rate-limit counted before auth ran (D-065):** every
+gated route's `config.rateLimit` now sets `hook: 'preHandler'`
+(`@fastify/rate-limit`'s own option, default `onRequest`), confirmed by
+reading the installed plugin's own source
+(`node_modules/@fastify/rate-limit/index.js`'s `addRouteRateHook`) to
+append onto the route's already-declared `preHandler: requireAdminAuth`
+rather than run as an earlier, separate hook — so a flood of failed-auth
+requests can no longer exhaust a route's rate-limit budget before ever
+being compared against the real key. `trustProxy: true` added to the
+`Fastify(...)` constructor so `request.ip` (the rate-limiter's default
+key) resolves from `X-Forwarded-For` behind a reverse proxy (Railway),
+rather than collapsing every real caller onto the proxy's own shared
+budget.
+
+**Finding #7 — a dry-run cleanup failure could discard a real,
+already-computed verdict (D-066):** `runSoundnessFuzz`'s
+(`src/soundness/runner.ts`) success-path `cleanupIfDryRun()` call is now
+wrapped in its own `try`/`catch` — a cleanup failure is logged via
+`console.error`, never thrown, so it can no longer fall into the
+function's own outer `catch` and get mapped by
+`src/cli/commands/soundness.ts` to exit code 3
+("infrastructure failure — no verdict exists") for a run that actually
+succeeded, possibly with a critical `unsound`/`false_grant` verdict that
+was about to be silently lost.
+
+**Files touched:**
+
+- `src/api/server.ts` — `trustProxy: true`; `hook: 'preHandler'` on
+  `writeRateLimit`; new `gatedReadRateLimit`; `/check`/`/expand` gated
+  with `requireAdminAuth`.
+- `src/api/auth.ts` — doc comment updated (no functional change) to
+  drop the write-exclusive framing now that `requireAdminAuth` gates
+  five routes, not three.
+- `src/soundness/runner.ts` — success-path cleanup wrapped in
+  `try`/`catch`; doc comments updated.
+- `test/unit/api/server.test.ts` — extensive updates for the new
+  auth contract on `/check`/`/expand` (renamed describe blocks, new
+  positive/negative auth cases), plus a new dedicated regression test
+  proving D-065: 25 wrong-key requests against `POST /tuples` (five past
+  `writeRateLimit`'s own `max: 20`) all return 401 (never 429) and never
+  call `writeTuple`, then a request with the correct key right after
+  still succeeds.
+- `test/unit/api/server.integration.test.ts` — added auth headers to
+  the three `/check`/`/expand` calls that previously ran unauthenticated
+  (now correctly required); re-verified against real local Postgres via
+  this project's established LOCALVERIFY technique.
+- `test/unit/soundness/runner-dry-run-cleanup-failure.test.ts` (new) —
+  DB-free, mocks every I/O dependency `runSoundnessFuzz` has to force a
+  successful dry run whose cleanup then fails; proves the real result is
+  still returned and the failure is logged, not swallowed or thrown.
+- `docs/DECISIONS.md` — D-064, D-065, D-066.
+
+**Verification:**
+
+- `test/unit/api/server.test.ts`: 27/27 passing (was 26; +1 new
+  regression test for D-065).
+- `test/unit/api/server.integration.test.ts`: 4/4 passing against real
+  local Postgres via LOCALVERIFY (copied, connection string swapped,
+  run for real, deleted — never committed).
+- `test/unit/soundness/runner-dry-run-cleanup-failure.test.ts`: 2/2
+  passing. Fail-checked directly: reverted the `try`/`catch` back to a
+  bare `await cleanupIfDryRun();`, confirmed the test fails for the
+  right reason (the simulated cleanup error propagates uncaught instead
+  of being logged and swallowed), restored, confirmed byte-identical via
+  `md5sum`.
+- `npx tsc --noEmit`, `npx eslint`, `npx prettier --check` all clean on
+  every touched file.
+
+**Final state:** all three findings closed; `test/unit/api/server.test.ts`
+and the new soundness unit test both pass, the integration test
+re-verified live against real Postgres, and the dry-run cleanup fix's
+fail-check confirms the regression it closes is real and now caught.
+
 ## Schema DSL unbounded-recursion DoS fix (D-067)
 
 **Owner:** `schema-compiler` (the actual parser/compiler fix, its
@@ -1509,3 +1598,87 @@ both DoS paths independently confirmed closed via a live, original
 reproduction distinct from the implementing subagent's own; pushed as
 its own branch/PR, per this project's one-fix-per-PR convention for this
 audit's findings.
+
+## Production resolver depth-budget accounting fixes (D-069)
+
+**Owner:** `soundness-engineer` (resolver.ts fix, regression tests) +
+main agent (independent live re-verification, DECISIONS.md/PROGRESS.md,
+review). Not a numbered build phase — a full-repo audit (2026-08-16)
+found this as the single CRITICAL finding (a real `false_grant`) plus a
+paired HIGH finding (a real `false_deny`), the highest-priority item in
+the direct user instruction ("fix the critical and high findings").
+
+**What was wrong:** three separate depth-budget accounting bugs in
+`src/resolve/production/resolver.ts`, all stemming from the same root
+cause — `resolve()`'s per-call `depth` parameter didn't mean the same
+thing at every point it was read, compared to the reference resolver's
+own consistent convention. (1) CRITICAL: the SQL-level relation lookup
+received the full `ctx.maxDepth` ceiling instead of the depth remaining
+after prior hops — a `false_grant`, confirmed live (a 3-level nested
+group chain that the reference resolver correctly denied at
+`maxDepth: 3`, production incorrectly allowed). (2) HIGH: `tupleToUserset`
+charged an extra `+1` on top of the `+1` its own entry into `evalRewrite`
+already spent, double-costing the same conceptual hop `computedUserset`
+charges once — a `false_deny`, confirmed live (a 25-level `folder`
+parent chain: reference allowed to 24 hops of distance, production
+started denying around hop 11-12). (3) found independently while
+verifying the fix for (1)-(2): a residual `>=`/`>` off-by-one at the
+ceiling comparator itself, invisible until the first two bugs were
+fixed and the remaining discrepancy could be isolated.
+
+**Why none of this was caught before:** the existing
+`cross-resolver-agreement.integration.test.ts` suite had no fixture
+deeper than 3 levels — nowhere near deep enough to make TS-level depth
+bookkeeping the deciding factor in any assertion.
+
+**The fix** (`src/resolve/production/resolver.ts`): (1) pass
+`Math.max(0, ctx.maxDepth - depth)`, not `ctx.maxDepth`, into
+`sqlRelationMembershipWithWitness`. (2) `tupleToUserset`'s recursive
+call now passes `depth` unchanged, matching `computedUserset`'s own
+convention. (3) the ceiling comparator changed from `depth >=
+ctx.maxDepth` to `depth > ctx.maxDepth`, matching the reference
+resolver's own `resolveMembership`.
+
+**Regression tests:** 6 new `it`s added to
+`cross-resolver-agreement.integration.test.ts` — the false_grant fixture
+
+- a raised-budget control; the 25-level false_deny fixture + a
+  past-ceiling control; an isolated ceiling-comparator fixture + its own
+  past-ceiling control (with an honest in-test disclosure that this last
+  fixture is NOT independently isolated from bug 2 — reverting either bug
+  2 or bug 3 alone fails it, confirmed by fail-checking each).
+
+**A genuine, disclosed coverage gap found while proving the fuzz
+harness has power against this fix:** reintroducing bug 1 and running
+the real 5,000-query differential fuzz at the _standard_ configuration
+(default `maxDepth`, several fresh seeds) did **not** catch it —
+`src/soundness/generators.ts`'s `OBJECTS_PER_NAMESPACE_MAX = 6` caps
+graphs too small to ever produce the ~20+-hop chain the bug needs to
+diverge from correct behavior. Tightening `maxDepth` to 2 via the
+harness's own existing option reliably caught it (unsound in ~33/40
+seeds). This is a real, new coverage gap — distinct from D-035's
+latency-only gap, a genuine boolean-level defect the harness _can_
+catch, just not at the generator's default scale — flagged in D-069,
+out of scope for this fix (`generators.ts` is Phase 5/soundness-engineer
+territory), and disclosed to the user as a candidate follow-up rather
+than left for someone to find the hard way.
+
+**Verification, independent of the implementing subagent's own
+report:** read the full diff by hand against my own prior understanding
+of bugs 1-2 (already personally reproduced earlier this session via
+throwaway `VERIFY-finding1.ts`/`VERIFY-finding2.ts` scripts before
+delegating). Ran all 20 tests in `cross-resolver-agreement.integration
+.test.ts` (14 existing + 6 new) live against real local Postgres via
+LOCALVERIFY, all passing. Performed an original fail-check of my own,
+distinct from the subagent's: reverted _only_ the comparator fix (bug 3,
+`>` back to `>=`, bugs 1-2 left fixed) and re-ran the suite live — exactly
+the two tests the subagent predicted failed (`false_deny` fixture and
+the isolated comparator fixture), everything else stayed green, then
+restored and confirmed byte-identical via `md5sum`. Full fast unit
+suite (`npx vitest run`) 221/221 passing; `tsc`/`eslint`/`prettier` all
+clean on every touched file.
+
+**Final state:** all three depth-budget bugs fixed and independently
+re-verified live against real Postgres; the fuzz-harness coverage gap
+disclosed rather than smoothed over, with its own "revisit if" trigger
+in D-069.

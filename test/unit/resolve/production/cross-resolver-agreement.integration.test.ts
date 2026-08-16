@@ -697,3 +697,341 @@ describe('a diamond-shaped graph (the same node reachable via two non-cyclic bra
     expect(productionResult.allowed).toBe(referenceResult.allowed);
   });
 });
+
+describe('depth-budget accounting parity — deep fixtures the earlier 3-level fixtures above cannot catch', () => {
+  // The fixtures above top out at three levels, which is nowhere near deep
+  // enough to exercise `resolve()`'s depth-budget bookkeeping in
+  // `src/resolve/production/resolver.ts`. The three fixtures below each
+  // reproduce a real, previously-live cross-resolver disagreement found by
+  // auditing that bookkeeping line by line against the reference resolver's
+  // own (`src/resolve/reference/resolver.ts`'s `resolveMembership`/
+  // `evalRewrite`), confirmed live against real Postgres before the fix and
+  // re-confirmed clean after it. See `docs/DECISIONS.md` for the full
+  // writeup (the entry documenting this fix).
+
+  describe('a false_grant: the SQL-level relation lookup must charge for TS-level depth already spent, not the full ceiling', () => {
+    // Before the fix, `resolve()`'s relation branch always handed
+    // `sqlRelationMembershipWithWitness` the FULL `ctx.maxDepth` ceiling,
+    // regardless of how much TS-level `depth` a prior computedUserset hop
+    // had already spent reaching that call — so one relation-membership
+    // lookup could walk the *entire* configured budget on its own, on top
+    // of whatever it cost to get there. Reproduced live: at `maxDepth: 3`,
+    // `referenceCheck` denied and `productionCheck` allowed — a real
+    // `false_grant` per build spec §6.5 (allowed-with-no-real-path), not a
+    // mere disagreement.
+    function fixtureSource(gns: string, dns: string): string {
+      return [
+        `namespace ${gns} {`,
+        `  relation member: user | ${gns}#member`,
+        '}',
+        `namespace ${dns} {`,
+        `  relation viewer: user | ${gns}#member`,
+        '  permission view = viewer',
+        '}',
+      ].join('\n');
+    }
+
+    it('both-resolvers-deny-a-subject-reachable-only-past-a-three-level-nested-group-chain-once-a-permission-hop-has-already-spent-part-of-the-depth-budget', async () => {
+      const gns = uniqueName('grp');
+      const dns = uniqueName('doc');
+      const schema = await setUpSchema(fixtureSource(gns, dns));
+      const d1 = uniqueName('d1');
+      const g0 = uniqueName('g0');
+      const g1 = uniqueName('g1');
+      const g2 = uniqueName('g2');
+
+      // doc:d1 --viewer--> group:g0#member --member--> group:g1#member
+      //   --member--> group:g2#member --member--> user:alice (direct grant)
+      // Hand-derived cost to reach alice: 1 hop for the `viewer`
+      // computedUserset leaf, plus 3 nested `member` userset crossings = 4
+      // total. At `maxDepth: 3` that's one hop past budget on both engines.
+      const tuples: TupleKey[] = [
+        tuple(dns, d1, 'viewer', gns, g0, 'member'),
+        tuple(gns, g0, 'member', gns, g1, 'member'),
+        tuple(gns, g1, 'member', gns, g2, 'member'),
+        tuple(gns, g2, 'member', 'user', 'alice'),
+      ];
+      for (const t of tuples) await writeOk(t);
+
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        { maxDepth: 3 },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        {
+          maxDepth: 3,
+        },
+      );
+
+      expect(referenceResult.allowed).toBe(false);
+      // The regression this guards: before the fix this was `true` — a
+      // false_grant, not merely a false_deny — because the SQL-level
+      // lookup for `viewer` received the full `maxDepth: 3` budget instead
+      // of the 2 remaining after the computedUserset hop already spent 1,
+      // which was enough slack to walk all three nested `member` crossings
+      // undetected.
+      expect(productionResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+
+    it('the-identical-chain-is-allowed-by-both-resolvers-once-maxDepth-is-raised-enough-to-cover-the-real-cost', async () => {
+      // Control: same fixture, budget raised to the real cost (4) — proves
+      // the denial above was genuinely about the budget, not a mistake
+      // elsewhere in the fixture.
+      const gns = uniqueName('grp');
+      const dns = uniqueName('doc');
+      const schema = await setUpSchema(fixtureSource(gns, dns));
+      const d1 = uniqueName('d1');
+      const g0 = uniqueName('g0');
+      const g1 = uniqueName('g1');
+      const g2 = uniqueName('g2');
+
+      const tuples: TupleKey[] = [
+        tuple(dns, d1, 'viewer', gns, g0, 'member'),
+        tuple(gns, g0, 'member', gns, g1, 'member'),
+        tuple(gns, g1, 'member', gns, g2, 'member'),
+        tuple(gns, g2, 'member', 'user', 'alice'),
+      ];
+      for (const t of tuples) await writeOk(t);
+
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        { maxDepth: 4 },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        {
+          maxDepth: 4,
+        },
+      );
+
+      expect(referenceResult.allowed).toBe(true);
+      expect(productionResult.allowed).toBe(true);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+  });
+
+  describe('a false_deny: tupleToUserset must cost exactly what computedUserset costs, never double, all the way to the real ceiling', () => {
+    // Before the fix, `tupleToUserset` in `evalRewrite` passed `depth + 1`
+    // to `resolve()` on top of the `+1` already spent entering `evalRewrite`
+    // from `resolve()`'s own permission branch — double the cost
+    // `computedUserset` charges for the same conceptual one-hop crossing.
+    // Reproduced live on a 25-level `folder` parent chain (`view = editor |
+    // parent->view`) with the grant on the deepest node and `maxDepth: 25`:
+    // the reference resolver allows all the way out to 24 hops of distance
+    // (denying only at the true ceiling, 25); before the fix, production
+    // started denying around 11-12 hops — roughly half its real capacity.
+    function folderChainSource(fns: string): string {
+      return [
+        `namespace ${fns} {`,
+        `  relation parent: ${fns}`,
+        '  relation editor: user',
+        '',
+        '  permission view = editor | parent->view',
+        '}',
+      ].join('\n');
+    }
+
+    it('both-resolvers-allow-a-subject-at-the-farthest-distance-the-real-ceiling-permits-on-a-25-level-parent-chain', async () => {
+      const fns = uniqueName('folder');
+      const schema = await setUpSchema(folderChainSource(fns));
+      const N = 25;
+      const nodeIds = Array.from({ length: N + 1 }, (_, i) => uniqueName(`f${i}`));
+      const tuples: TupleKey[] = [];
+      for (let i = 0; i < N; i++) {
+        tuples.push(tuple(fns, nodeIds[i]!, 'parent', fns, nodeIds[i + 1]!));
+      }
+      tuples.push(tuple(fns, nodeIds[N]!, 'editor', 'user', 'alice'));
+      for (const t of tuples) await writeOk(t);
+
+      // Query object is 24 parent-hops away from the grant (nodeIds[1]) —
+      // the deepest point the reference resolver's own `depth > maxDepth`
+      // ceiling still allows at `maxDepth: 25`.
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[1]!),
+        'view',
+        { maxDepth: N },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[1]!),
+        'view',
+        { maxDepth: N },
+      );
+
+      // Hand-derived: reference allows at exactly 24 hops of distance (see
+      // this describe block's own comment). Before the fix, production
+      // denied here — both from the tupleToUserset double-counting bug and,
+      // independently, from a residual off-by-one in `resolve()`'s own
+      // ceiling comparator found while re-deriving this fixture's expected
+      // boundary (see `docs/DECISIONS.md`) — this single assertion catches
+      // either regression on its own.
+      expect(referenceResult.allowed).toBe(true);
+      expect(productionResult.allowed).toBe(true);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+
+    it('both-resolvers-deny-the-same-chains-query-object-itself-25-hops-away-genuinely-past-the-ceiling', async () => {
+      // Control at the other edge: one hop farther out (the full chain,
+      // nodeIds[0]) is genuinely past `maxDepth: 25` on both engines — the
+      // allow above is not "always allow," it tracks the real ceiling.
+      const fns = uniqueName('folder');
+      const schema = await setUpSchema(folderChainSource(fns));
+      const N = 25;
+      const nodeIds = Array.from({ length: N + 1 }, (_, i) => uniqueName(`f${i}`));
+      const tuples: TupleKey[] = [];
+      for (let i = 0; i < N; i++) {
+        tuples.push(tuple(fns, nodeIds[i]!, 'parent', fns, nodeIds[i + 1]!));
+      }
+      tuples.push(tuple(fns, nodeIds[N]!, 'editor', 'user', 'alice'));
+      for (const t of tuples) await writeOk(t);
+
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[0]!),
+        'view',
+        { maxDepth: N },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[0]!),
+        'view',
+        { maxDepth: N },
+      );
+
+      expect(referenceResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+  });
+
+  describe('a false_deny: the ceiling comparator itself (a node reached at depth exactly maxDepth must still be checked, not skipped)', () => {
+    // Found independently while re-deriving depth costs for every
+    // rewrite-rule kind per this fix's own verification step (not one of
+    // the two originally reported bugs). `resolve()` denied at
+    // `depth >= ctx.maxDepth`; the reference resolver's `resolveMembership`
+    // denies only at `depth > ctx.maxDepth` — a node reached at depth
+    // exactly `maxDepth` must still execute (and can still resolve a direct
+    // grant with zero further recursion) on both engines.
+    //
+    // This fixture is smaller and faster than the 25-level chain above, but
+    // it is NOT isolated from the tupleToUserset double-counting bug fixed
+    // in the previous `describe` block — confirmed directly, by
+    // reintroducing only that bug (with this comparator fix still applied)
+    // and observing this test fail too, since doubling the per-hop cost
+    // exhausts even this small a budget well before the real ceiling.
+    // What this fixture DOES do, confirmed the same way, is fail on its own
+    // when *only* the comparator regresses (`>` reverted to `>=`) with the
+    // other fix left in place — so it's still a genuine, independent
+    // regression guard for the comparator specifically, just not a fixture
+    // that cleanly attributes a failure to one bug over the other by
+    // itself; that attribution came from the fail-check process (see
+    // `docs/DECISIONS.md`), not from this fixture's own shape.
+    function folderChainSource(fns: string): string {
+      return [
+        `namespace ${fns} {`,
+        `  relation parent: ${fns}`,
+        '  relation editor: user',
+        '',
+        '  permission view = editor | parent->view',
+        '}',
+      ].join('\n');
+    }
+
+    it('both-resolvers-allow-a-subject-reached-exactly-at-the-configured-ceiling-not-one-hop-short-of-it', async () => {
+      const fns = uniqueName('folder');
+      const schema = await setUpSchema(folderChainSource(fns));
+      const M = 6;
+      const nodeIds = Array.from({ length: M + 1 }, (_, i) => uniqueName(`n${i}`));
+      const tuples: TupleKey[] = [];
+      for (let i = 0; i < M; i++) {
+        tuples.push(tuple(fns, nodeIds[i]!, 'parent', fns, nodeIds[i + 1]!));
+      }
+      tuples.push(tuple(fns, nodeIds[M]!, 'editor', 'user', 'alice'));
+      for (const t of tuples) await writeOk(t);
+
+      // nodeIds[1] is 5 parent-hops from the grant — exactly `maxDepth - 1`
+      // at `maxDepth: 6` — the last point the reference resolver's `>`
+      // comparator still allows.
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[1]!),
+        'view',
+        { maxDepth: M },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[1]!),
+        'view',
+        { maxDepth: M },
+      );
+
+      expect(referenceResult.allowed).toBe(true);
+      // Before this fix, production denied here even though the direct
+      // editor grant needed zero further SQL recursion once reached — the
+      // TS-level `resolve()` entry for the `editor` relation check was
+      // rejected by the `>=` comparator alone, one hop earlier than the
+      // reference resolver's own `>` comparator would deny.
+      expect(productionResult.allowed).toBe(true);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+
+    it('both-resolvers-deny-a-subject-one-hop-farther-out-genuinely-past-the-ceiling', async () => {
+      const fns = uniqueName('folder');
+      const schema = await setUpSchema(folderChainSource(fns));
+      const M = 6;
+      const nodeIds = Array.from({ length: M + 1 }, (_, i) => uniqueName(`n${i}`));
+      const tuples: TupleKey[] = [];
+      for (let i = 0; i < M; i++) {
+        tuples.push(tuple(fns, nodeIds[i]!, 'parent', fns, nodeIds[i + 1]!));
+      }
+      tuples.push(tuple(fns, nodeIds[M]!, 'editor', 'user', 'alice'));
+      for (const t of tuples) await writeOk(t);
+
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[0]!),
+        'view',
+        { maxDepth: M },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(fns, nodeIds[0]!),
+        'view',
+        { maxDepth: M },
+      );
+
+      expect(referenceResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+  });
+});
