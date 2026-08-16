@@ -5,7 +5,20 @@ import eslintConfigPrettier from 'eslint-config-prettier';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'coverage/**', 'node_modules/**'],
+    // .claude/workflows/**: Workflow-tool scripts, not conventional ES
+    // modules — they use a bare top-level `await`/`return` (the Workflow
+    // tool wraps the whole file body in an async function at run time; see
+    // its own tool description). A plain top-level `return` crashes
+    // typescript-eslint's typed rules (confirmed live:
+    // `@typescript-eslint/no-misused-promises` throws "Non-null Assertion
+    // Failed: Expected node to have a parent" trying to walk up from the
+    // return statement to its enclosing function, which doesn't exist at
+    // module scope) rather than reporting a normal lint error — excluding
+    // them here, the same way dist/coverage/node_modules already are, is
+    // the correct fix, not a looser `allowDefaultProject` entry (tried
+    // first; it gets past the "not found by project service" error but
+    // hits this same crash once actually parsed).
+    ignores: ['dist/**', 'coverage/**', 'node_modules/**', '.claude/workflows/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
