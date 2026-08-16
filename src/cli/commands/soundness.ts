@@ -22,6 +22,20 @@
  * exit-code mapping are identical across all three formats — `--format`
  * changes what's printed, never what's computed or persisted.
  *
+ * `--dry-run` (D-063, closing `docs/DECISIONS.md` D-060's own "revisit
+ * if"): runs the exact same real differential fuzz — real schema publish,
+ * real tuple writes, real checks against both resolvers, the exact same
+ * verdict — then deletes every row it created before returning, so
+ * whatever database `DATABASE_URL` points at ends the call in exactly the
+ * state it started in. Intended for local exploration (see the README's
+ * own "try it yourself" walkthrough, which uses it) where the point is
+ * "prove the claim," not "leave a permanent record" — CI never needs it,
+ * since `.github/workflows/soundness.yml` already runs against its own
+ * ephemeral, per-job Postgres (D-045). Only affects `--format text`'s
+ * extra note below; `markdown`/`json` output is untouched either way,
+ * since both modes' own contract is "stdout is the report and nothing
+ * else."
+ *
  * Exit codes, per §7's table (distinct from `check`/`tuple`'s own table —
  * this command's `1` and `2` mean something specific to a soundness
  * verdict, not a generic validation/audit failure):
@@ -45,6 +59,7 @@ export interface SoundnessRunCliOptions {
   queries?: string;
   seed?: string;
   format?: string;
+  dryRun?: boolean;
 }
 
 const VALID_FORMATS = ['text', 'markdown', 'json'] as const;
@@ -54,8 +69,14 @@ function isValidFormat(f: string): f is Format {
   return (VALID_FORMATS as readonly string[]).includes(f);
 }
 
-/** The original Phase 5 human-skimmable summary — `--format text` (the default), unchanged. */
-function printText(result: SoundnessRunResult): void {
+/**
+ * The original Phase 5 human-skimmable summary — `--format text` (the
+ * default). `dryRun` adds one honest line stating plainly that nothing
+ * was persisted — never silently omitted, per this project's own
+ * discipline against letting a material fact go unstated. Every other
+ * line is byte-for-byte unchanged from before `--dry-run` existed.
+ */
+function printText(result: SoundnessRunResult, dryRun: boolean): void {
   console.log(
     `soundness run ${result.id} (seed=${result.graphSeed}): ${result.verdict.toUpperCase()}`,
   );
@@ -74,6 +95,11 @@ function printText(result: SoundnessRunResult): void {
           `${d.query.object.ns}:${d.query.object.id} — expected ${d.expected}, got ${d.actual}`,
       );
     }
+  }
+  if (dryRun) {
+    console.log(
+      `  (dry run — the generated schema, tuples, and this run's own record were deleted; nothing was left in the database)`,
+    );
   }
 }
 
@@ -104,10 +130,13 @@ export async function soundnessRun(options: SoundnessRunCliOptions): Promise<voi
     return;
   }
 
+  const dryRun = options.dryRun ?? false;
+
   const pool = getPool();
   try {
     const result = await runSoundnessFuzz(pool, {
       trigger: 'cli',
+      dryRun,
       ...(seed !== undefined ? { seed } : {}),
       ...(queryCount !== undefined ? { queryCount } : {}),
     });
@@ -117,7 +146,7 @@ export async function soundnessRun(options: SoundnessRunCliOptions): Promise<voi
     } else if (format === 'json') {
       console.log(renderSoundnessJsonString(result));
     } else {
-      printText(result);
+      printText(result, dryRun);
     }
 
     const exitCode = soundnessExitCode(result.verdict);

@@ -91,16 +91,19 @@ npx tsx src/cli/index.ts doctor          # confirms Postgres is reachable, appli
 npm run seed:example                     # publishes schema/example.authz + the real demo graph above
 npx tsx src/cli/index.ts check user:dana edit document:eng_handbook
 npx tsx src/cli/index.ts expand document:eng_handbook edit
-npx tsx src/cli/index.ts soundness run   # the SOUND result above, reproduced live against your own database
+npx tsx src/cli/index.ts soundness run --dry-run   # the SOUND result above, reproduced live against your own database
 ```
 
 `npm run seed:example` prints a handful of other real checks worth trying
 (a denied case, the intersection case) once it finishes. `authz soundness
 run` generates and checks its **own** random schema/tuple graph each time
 (that's the whole point — it's testing the engine, not this repository's
-example data), so it writes some randomly-named namespaces into the same
-database alongside the demo graph; harmless, but expect to see them if
-you go looking at `namespace_configs` directly afterward.
+example data) — `--dry-run` runs that exact same real fuzz cycle for real,
+against your real database, and computes the exact same verdict, but
+deletes every row it created before returning, so your demo graph's
+database is left exactly as `seed:example` left it. Drop `--dry-run` if
+you'd rather see the generated fixture persist in `namespace_configs`
+afterward — it's harmless either way, just no longer the default.
 
 ## How it works
 
@@ -167,7 +170,7 @@ authz tuple write <object> <relation> <subject>     write a tuple, prints the re
 authz tuple delete <object> <relation> <subject>
 authz check <subject> <relation> <object> [--at-token <n>]
 authz expand <object> <relation>                    print the resolved subject tree
-authz soundness run [--queries N] [--seed S]        run the differential fuzz harness, print/store the report
+authz soundness run [--queries N] [--seed S] [--dry-run]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted)
 authz serve                                         start the Fastify API server
 ```
 
