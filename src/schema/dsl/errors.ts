@@ -18,6 +18,7 @@ export type SchemaErrorCode =
   | 'missing_namespace_name'
   | 'empty_namespace_body'
   | 'invalid_identifier'
+  | 'expression_nesting_too_deep'
   // Semantic-level (compiler.ts) — collected across the whole compilation
   // unit; every issue the compiler can find is reported in one pass rather
   // than one-at-a-time.

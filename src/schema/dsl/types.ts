@@ -44,6 +44,30 @@ export const IDENTIFIER_PATTERN = /^[a-z][a-z0-9_]*$/;
 export const MAX_IDENTIFIER_LENGTH = 63;
 
 /**
+ * The maximum number of nested `(` levels a single permission expression
+ * may contain (`parser.ts`'s `parseAtom`/`parseTerm`/`parseExpression` are
+ * mutually recursive on native JS call-stack frames, one frame per level of
+ * `(` nesting — with no ceiling, a source string with a few thousand nested
+ * parens around a trivial expression drives that recursion past Node's
+ * default call-stack size and throws a raw, unhandled `RangeError` instead
+ * of a clean, located `SchemaError`).
+ *
+ * 100 is deliberately generous: every real schema this project has ever
+ * written (see `schema/example.authz`, and every worked example in
+ * `.claude/commands/build-authz-service.md` §5) nests at most 1-2 levels
+ * deep — a human author has no reason to write a permission expression
+ * nesting parentheses anywhere near this deep, and the compiler's own
+ * paren-depth counter never counts toward this ceiling until an author (or
+ * an attacker) actually writes that many literal `(` characters in a row.
+ * Nesting exactly `MAX_EXPRESSION_NESTING_DEPTH` levels deep still compiles;
+ * one level past it is rejected with `expression_nesting_too_deep`
+ * (`src/schema/dsl/errors.ts`) — see `docs/DECISIONS.md` for the audit this
+ * closes and why 100 was chosen over the audit's own suggested 100-200
+ * range.
+ */
+export const MAX_EXPRESSION_NESTING_DEPTH = 100;
+
+/**
  * A subject type a `relation` is allowed to store as the subject of a
  * tuple: either a direct/terminal principal type (`user` — no `relation`
  * field) or a userset reference into another namespace's relation
