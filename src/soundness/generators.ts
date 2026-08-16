@@ -341,6 +341,68 @@ const USER_COUNT_MIN = 6;
 const USER_COUNT_MAX = 12;
 
 /**
+ * The guaranteed deep chain (D-070, see `docs/DECISIONS.md`) — sizing
+ * constants only; the construction itself is `buildGuaranteedDeepChain`
+ * below. Hardcoded relative to `env.CHECK_MAX_DEPTH`'s *documented default*
+ * (25 — `src/config/env.ts`, `.env.example`), deliberately not read from
+ * `env.ts` itself: this file stays as free of runtime-config coupling as
+ * the reference resolver keeps itself of `env.ts` (see that file's own doc
+ * comment on `ReferenceCheckOptions.maxDepth` — "this resolver stays pure
+ * and env-independent"), and every other constant in this section is
+ * already a hardcoded, non-configurable choice. If a future change moves
+ * `CHECK_MAX_DEPTH`'s default away from 25, these numbers stop landing
+ * exactly on the real ceiling but remain structurally meaningful (a chain
+ * comfortably past half of *whatever* the real default happens to be) —
+ * see D-070's own "Revisit if".
+ *
+ * `DEEP_CHAIN_HIER_HOPS` (24) is the full length of the guaranteed
+ * `hierNs` parent chain (`dc_h0..dc_h24`) — the largest number of
+ * `tupleToUserset` hops `resolve()`'s own TS-level depth ceiling permits
+ * before entering `dc_h0`'s `editor` relation (`D + 1 <= CHECK_MAX_DEPTH`,
+ * i.e. `D <= 24`), so a query anchored at `dc_h24` sits exactly at that
+ * boundary.
+ *
+ * `DEEP_CHAIN_ISOLATED_HOP` (13) is where the chain's *pure* tupleToUserset
+ * cost (no relation-lookup budget involved at all — the witness grant is a
+ * plain, direct tuple on `dc_h0.editor`) is queried, comfortably past half
+ * of 24 — deep enough that D-069 bug 2's double-charging (each hop costing
+ * 2 instead of 1) pushes the *buggy* total (2 x 13 = 26) past the ceiling
+ * while the *correct* total (13) stays comfortably inside it.
+ *
+ * `DEEP_CHAIN_INTERMEDIATE_HOP` (12) is where the two group-chain-combo
+ * witnesses (below) are queried: `D = 12` real `tupleToUserset` hops
+ * already spent (entering `dc_h0`'s `editor` relation lookup at TS-depth
+ * `13`) before a nested-`group#member` chain of length `k` is walked
+ * *inside* that one relation lookup's own SQL-level budget
+ * (`remainingDepth = CHECK_MAX_DEPTH - 13 = 12`) — the exact "remaining
+ * budget after N prior hops" vs. "full budget" split D-069 bug 1 confused.
+ *
+ * `DEEP_CHAIN_GROUP_HOPS_INSIDE`/`_OUTSIDE` (12 / 13) are the two nested
+ * `groupNs#member` chain lengths queried against `dc_h12`: `12` sits
+ * exactly at the shared `D + k <= CHECK_MAX_DEPTH - 1` boundary (`12 + 12
+ * = 24`, allowed under correctly-scoped accounting at a *shared* ceiling);
+ * `13` sits one hop past it (`12 + 13 = 25`, denied under correctly-scoped
+ * accounting at a shared ceiling, but wrongly *allowed* by D-069 bug 1's
+ * unreduced `ctx.maxDepth` budget — see D-070 for the full derivation and
+ * its live-verified numbers).
+ */
+// Exported (not just module-private, unlike this file's other sizing
+// constants) specifically so `test/unit/soundness/generators.test.ts` can
+// assert against the exact same numbers this file uses to build the chain,
+// rather than a second, hand-copied set of literals that could silently
+// drift from these if either changed.
+export const DEEP_CHAIN_HIER_HOPS = 24;
+export const DEEP_CHAIN_ISOLATED_HOP = 13;
+export const DEEP_CHAIN_INTERMEDIATE_HOP = 12;
+export const DEEP_CHAIN_GROUP_HOPS_INSIDE = 12;
+export const DEEP_CHAIN_GROUP_HOPS_OUTSIDE = 13;
+
+/** Dedicated, never-shared-with-`userIds` witness subjects for the guaranteed deep chain — see `buildGuaranteedDeepChain`. */
+export const DEEP_CHAIN_DIRECT_GRANT_USER = 'deep_chain_direct_grant_witness';
+export const DEEP_CHAIN_COMBO_INSIDE_USER = 'deep_chain_combo_inside_witness';
+export const DEEP_CHAIN_COMBO_OUTSIDE_USER = 'deep_chain_combo_outside_witness';
+
+/**
  * The group-shaped namespace — always namespace #0. Its `member` relation
  * accepts `user | <self>#member`, the exact shape a nested-group cycle
  * needs (§6.4's own worked example: `group:a` nests `group:b` nests
@@ -566,6 +628,195 @@ function assignRandomTuples(
   }
 }
 
+/** Every `(ns, id)` reserved by `buildGuaranteedDeepChain` — excluded from `assignRandomTuples` below so no randomly drawn edge can ever shorten or lengthen the hand-derived chain it built. */
+export interface DeepChainReservedKeys {
+  readonly keys: ReadonlySet<string>;
+}
+
+function deepChainReservationKey(ns: string, id: string): string {
+  return `${ns}\0${id}`;
+}
+
+/** The three hand-derivable query witnesses `buildGuaranteedDeepChain` produces — see `generateFixture`'s "Reserved seed queries" section for how each becomes a query, and this file's own `DEEP_CHAIN_*` constants' doc comment for the full numeric derivation. */
+export interface DeepChainWitnesses {
+  /** `dc_h{DEEP_CHAIN_ISOLATED_HOP}` — a pure tupleToUserset chain, no relation-lookup budget involved; isolates D-069 bug 2. */
+  isolatedHopObject: GeneratedEntityRef;
+  /** `dc_h{DEEP_CHAIN_HIER_HOPS}` — the TS-level ceiling boundary itself; exercises D-069 bug 3 (not independently isolated from bug 2 — both affect the same TS-level hop count). */
+  ceilingBoundaryObject: GeneratedEntityRef;
+  /** `dc_h{DEEP_CHAIN_INTERMEDIATE_HOP}` — where the two group-chain-combo witnesses below are queried. */
+  comboObject: GeneratedEntityRef;
+  directGrantUser: string;
+  comboInsideUser: string;
+  comboOutsideUser: string;
+  reserved: DeepChainReservedKeys;
+}
+
+/**
+ * The guaranteed deep chain (D-070, `docs/DECISIONS.md`) — inserted into
+ * every fixture the same deliberate way the guaranteed cycle
+ * (`generateFixture`, below) is: created first, in strictly increasing
+ * `order`, entirely independent of any randomly drawn structure, so a
+ * consumer can reason about its exact real length by construction rather
+ * than by chance. Reuses `hierNs`'s existing `parent`/`editor`/`view` shape
+ * and `groupNs`'s existing `member`/`view` shape (both already compiled
+ * into the schema by `buildHierNamespaceSource`/`buildGroupNamespaceSource`
+ * — no new namespace, no new rewrite-rule shape) with a deliberately long,
+ * deliberately placed set of real tuples along those existing relations.
+ *
+ * Shape (see the `DEEP_CHAIN_*` constants above for exactly why these
+ * numbers):
+ *
+ * ```
+ * dc_h{DEEP_CHAIN_HIER_HOPS} -parent-> ... -parent-> dc_h{DEEP_CHAIN_INTERMEDIATE_HOP} -parent-> ... -parent-> dc_h0
+ * ```
+ *
+ * `dc_h0.editor` carries two real, independent tuples: a PLAIN grant
+ * straight to `DEEP_CHAIN_DIRECT_GRANT_USER` (no userset hop — `k = 0` for
+ * that witness), and a userset edge into a *second*, separate nested-group
+ * chain rooted at `dc_g0`:
+ *
+ * ```
+ * dc_g0 -member-> dc_g1#member -member-> ... -member-> dc_g{DEEP_CHAIN_GROUP_HOPS_INSIDE - 1}#member
+ * ```
+ *
+ * with `dc_g{DEEP_CHAIN_GROUP_HOPS_INSIDE - 1}` (`dc_g11`) carrying a
+ * PLAIN grant to `DEEP_CHAIN_COMBO_INSIDE_USER` *and* one further userset
+ * edge to `dc_g{DEEP_CHAIN_GROUP_HOPS_OUTSIDE - 1}#member` (`dc_g12`),
+ * which carries a PLAIN grant to `DEEP_CHAIN_COMBO_OUTSIDE_USER`.
+ *
+ * Every edge here points from a just-created object to an already-created
+ * one (`dc_h{i}.parent -> dc_h{i-1}`, `dc_g{i}.member -> dc_g{i+1}#member`
+ * — note the group chain's direction is the reverse of its creation order,
+ * which is fine: `hasUsersetCycle`'s acyclicity guarantee only cares that
+ * *no* directed cycle exists among userset-subject edges, never that every
+ * edge points backward in creation order — that stronger rule is specific
+ * to `assignRandomTuples`'s own *randomly drawn* edges, the mechanism that
+ * actually needs a cheap, syntactic acyclicity proof since it has no other
+ * way to guarantee one; this hand-built chain is provably acyclic by
+ * inspection, a straight-line path with no repeated node), so this
+ * structure is, by construction, a simple acyclic path — no interaction
+ * with the guaranteed cycle (`cycleA`/`cycleB`, also in `groupNs`, disjoint
+ * object ids) either.
+ */
+function buildGuaranteedDeepChain(
+  createObject: (ns: string, id: string) => ObjectEntity,
+  addTuple: (t: GeneratedTuple) => void,
+  groupNs: string,
+  hierNs: string,
+): DeepChainWitnesses {
+  const reservedKeys = new Set<string>();
+  const reserve = (ns: string, id: string): void => {
+    reservedKeys.add(deepChainReservationKey(ns, id));
+  };
+
+  // The nested-group chain (built first, deepest-independent — dc_h0's
+  // editor tuple below references dc_g0, which must already exist).
+  const groupChain: ObjectEntity[] = [];
+  for (let i = 0; i < DEEP_CHAIN_GROUP_HOPS_OUTSIDE; i += 1) {
+    const g = createObject(groupNs, `dc_g${i}`);
+    reserve(g.ns, g.id);
+    groupChain.push(g);
+  }
+  for (let i = 0; i < DEEP_CHAIN_GROUP_HOPS_OUTSIDE - 1; i += 1) {
+    const from = requireDefined(groupChain[i], 'generator: deep chain group object missing');
+    const to = requireDefined(groupChain[i + 1], 'generator: deep chain group object missing');
+    addTuple({
+      objectNs: groupNs,
+      objectId: from.id,
+      relation: 'member',
+      subjectNs: groupNs,
+      subjectId: to.id,
+      subjectRelation: 'member',
+    });
+  }
+  const insideGroup = requireDefined(
+    groupChain[DEEP_CHAIN_GROUP_HOPS_INSIDE - 1],
+    'generator: deep chain "inside" group object missing',
+  );
+  addTuple({
+    objectNs: groupNs,
+    objectId: insideGroup.id,
+    relation: 'member',
+    subjectNs: 'user',
+    subjectId: DEEP_CHAIN_COMBO_INSIDE_USER,
+  });
+  const outsideGroup = requireDefined(
+    groupChain[DEEP_CHAIN_GROUP_HOPS_OUTSIDE - 1],
+    'generator: deep chain "outside" group object missing',
+  );
+  addTuple({
+    objectNs: groupNs,
+    objectId: outsideGroup.id,
+    relation: 'member',
+    subjectNs: 'user',
+    subjectId: DEEP_CHAIN_COMBO_OUTSIDE_USER,
+  });
+
+  // The hier parent chain, created dc_h0 (root) first, then dc_h1..dc_hN —
+  // matching `assignRandomTuples`'s own "point only to an earlier-created
+  // object" convention even though (per this function's own doc comment)
+  // nothing here actually depends on that filter, since these tuples are
+  // hand-inserted directly via `addTuple`, never routed through
+  // `assignRandomTuples`.
+  const hierChain: ObjectEntity[] = [];
+  for (let i = 0; i <= DEEP_CHAIN_HIER_HOPS; i += 1) {
+    const h = createObject(hierNs, `dc_h${i}`);
+    reserve(h.ns, h.id);
+    hierChain.push(h);
+  }
+  for (let i = 1; i <= DEEP_CHAIN_HIER_HOPS; i += 1) {
+    const child = requireDefined(hierChain[i], 'generator: deep chain hier object missing');
+    const parent = requireDefined(hierChain[i - 1], 'generator: deep chain hier object missing');
+    addTuple({
+      objectNs: hierNs,
+      objectId: child.id,
+      relation: 'parent',
+      subjectNs: hierNs,
+      subjectId: parent.id,
+    });
+  }
+  const root = requireDefined(hierChain[0], 'generator: deep chain hier root missing');
+  const groupRoot = requireDefined(groupChain[0], 'generator: deep chain group root missing');
+  addTuple({
+    objectNs: hierNs,
+    objectId: root.id,
+    relation: 'editor',
+    subjectNs: 'user',
+    subjectId: DEEP_CHAIN_DIRECT_GRANT_USER,
+  });
+  addTuple({
+    objectNs: hierNs,
+    objectId: root.id,
+    relation: 'editor',
+    subjectNs: groupNs,
+    subjectId: groupRoot.id,
+    subjectRelation: 'member',
+  });
+
+  const isolatedHopObject = requireDefined(
+    hierChain[DEEP_CHAIN_ISOLATED_HOP],
+    'generator: deep chain isolated-hop object missing',
+  );
+  const ceilingBoundaryObject = requireDefined(
+    hierChain[DEEP_CHAIN_HIER_HOPS],
+    'generator: deep chain ceiling-boundary object missing',
+  );
+  const comboObject = requireDefined(
+    hierChain[DEEP_CHAIN_INTERMEDIATE_HOP],
+    'generator: deep chain combo object missing',
+  );
+
+  return {
+    isolatedHopObject: { ns: isolatedHopObject.ns, id: isolatedHopObject.id },
+    ceilingBoundaryObject: { ns: ceilingBoundaryObject.ns, id: ceilingBoundaryObject.id },
+    comboObject: { ns: comboObject.ns, id: comboObject.id },
+    directGrantUser: DEEP_CHAIN_DIRECT_GRANT_USER,
+    comboInsideUser: DEEP_CHAIN_COMBO_INSIDE_USER,
+    comboOutsideUser: DEEP_CHAIN_COMBO_OUTSIDE_USER,
+    reserved: { keys: reservedKeys },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Coverage self-check
 // ---------------------------------------------------------------------------
@@ -770,6 +1021,33 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
   const cycleA = createObject(groupNs, 'cycle_a');
   const cycleB = createObject(groupNs, 'cycle_b');
 
+  // --- tuples (declared here, ahead of the random per-namespace object
+  // loop below, so both the guaranteed cycle's tuples AND the guaranteed
+  // deep chain's — see `buildGuaranteedDeepChain` — can be added
+  // immediately after the objects each one needs already exist, while both
+  // constructs' own objects still land at the lowest `order` values in
+  // their namespace, exactly like `cycleA`/`cycleB` above; this is a
+  // structural reordering of what was previously two separate top-level
+  // sections, not a behavior change to anything the cycle itself does). ---
+  const tuples: GeneratedTuple[] = [];
+  const seenTupleKeys = new Set<string>();
+  const addTuple = (t: GeneratedTuple): void => {
+    const key = tupleKey(t);
+    if (seenTupleKeys.has(key)) return;
+    seenTupleKeys.add(key);
+    tuples.push(t);
+  };
+
+  // --- objects (continued) -----------------------------------------------
+  // The guaranteed deep chain (D-070, `docs/DECISIONS.md`) — created next,
+  // still ahead of the random per-namespace object loop, so `dc_h*`/`dc_g*`
+  // also land at the lowest `order` values in `hierNs`/`groupNs` (after the
+  // cycle, before anything random) and so no randomly drawn edge
+  // (`assignRandomTuples`, below) can ever attach to one of its objects —
+  // see `DeepChainReservedKeys` and the skip check in the tuple-generation
+  // loop below.
+  const deepChain = buildGuaranteedDeepChain(createObject, addTuple, groupNs, hierNs);
+
   for (const ns of namespaceOrder) {
     const already = requireDefined(
       objectsByNs.get(ns),
@@ -788,16 +1066,6 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
     userIds[userIds.length - 1],
     'generator: expected at least one user id',
   );
-
-  // --- tuples -------------------------------------------------------------
-  const tuples: GeneratedTuple[] = [];
-  const seenTupleKeys = new Set<string>();
-  const addTuple = (t: GeneratedTuple): void => {
-    const key = tupleKey(t);
-    if (seenTupleKeys.has(key)) return;
-    seenTupleKeys.add(key);
-    tuples.push(t);
-  };
 
   // The guaranteed cycle (§6.4's own worked example): cycle_a's `member`
   // set includes cycle_b's `member` set, and vice versa. Neither grants
@@ -838,6 +1106,14 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
     );
     const objects = objectsByNs.get(ns) ?? [];
     for (const object of objects) {
+      // The guaranteed deep chain's own objects are hand-wired above and
+      // must never receive an *additional*, randomly drawn tuple on top of
+      // what `buildGuaranteedDeepChain` deliberately placed — an extra
+      // `parent`/`editor`/`member` edge here could shorten (or otherwise
+      // change) the hand-derived real chain length the reserved deep-chain
+      // queries below depend on, silently invalidating their hand-derived
+      // expected answers for whichever seed happened to draw it.
+      if (deepChain.reserved.keys.has(deepChainReservationKey(object.ns, object.id))) continue;
       for (const relation of Object.values(nsConfig.relations)) {
         assignRandomTuples(rng, addTuple, object, relation, objectsByNs, userIds);
       }
@@ -915,7 +1191,87 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
     });
   }
 
-  const reserved = Math.min(2, Math.max(0, queryCount));
+  // Reserved deep-chain seed queries (D-070, `docs/DECISIONS.md`) — indices
+  // 2-5, appended after the two cyclic reserved queries above so nothing
+  // about their own indices changes. Each is hand-derived against
+  // `buildGuaranteedDeepChain`'s exact, deterministic structure — see that
+  // function's own doc comment and the `DEEP_CHAIN_*` constants for the
+  // full numeric derivation of why each is expected `allowed`/`denied`.
+  //
+  // - Query 2 (`isolatedHopObject`, `directGrantUser`): a pure
+  //   `tupleToUserset` chain, `DEEP_CHAIN_ISOLATED_HOP` (13) hops from a
+  //   direct grant, no relation-lookup budget involved at all — hand-
+  //   derived ALLOWED under correct depth accounting (13 hops is
+  //   comfortably inside the real ceiling), and reliably flips to a new,
+  //   isolated `false_deny` if D-069 bug 2 (tupleToUserset's per-hop cost
+  //   doubling) regresses, since 2 x 13 = 26 exceeds the ceiling.
+  // - Query 3 (`ceilingBoundaryObject`, `directGrantUser`): the same pure
+  //   chain at its full `DEEP_CHAIN_HIER_HOPS` (24) length — sits exactly
+  //   at the TS-level ceiling boundary (`D + 1 <= CHECK_MAX_DEPTH`, i.e.
+  //   `D <= 24`) — hand-derived ALLOWED under the correct `>` comparator,
+  //   and flips to `false_deny` if D-069 bug 3's `>=` regresses (not
+  //   independently isolated from bug 2 either, since both affect the same
+  //   TS-level hop count — matching D-069's own honest disclosure for its
+  //   analogous fixture).
+  // - Query 4 (`comboObject`, `comboInsideUser`): `DEEP_CHAIN_INTERMEDIATE
+  //   _HOP` (12) real `tupleToUserset` hops, landing on a relation lookup
+  //   whose own nested-group chain is `DEEP_CHAIN_GROUP_HOPS_INSIDE` (12)
+  //   deep — `D + k = 24`, exactly at the shared `D + k <= CHECK_MAX_DEPTH
+  //   - 1` boundary. Hand-derived ALLOWED under correctly-scoped depth
+  //   accounting at *any* maxDepth both resolvers actually share (as of
+  //   D-071, `runSoundnessFuzz`'s own standard/default invocation already
+  //   is one — see below — and an explicitly `maxDepth`-pinned call is
+  //   another) — demonstrating the deep chain does not, by itself,
+  //   introduce a spurious divergence for a correct resolver.
+  // - Query 5 (`comboObject`, `comboOutsideUser`): the same combo, one
+  //   nested-group hop deeper (`DEEP_CHAIN_GROUP_HOPS_OUTSIDE` = 13,
+  //   `D + k = 25`) — one past that boundary. Hand-derived DENIED under
+  //   correctly-scoped depth accounting *whenever both resolvers share a
+  //   ceiling*. As of D-071 (`docs/DECISIONS.md`), `runSoundnessFuzz`'s own
+  //   standard/default invocation (`options.maxDepth` omitted) already
+  //   resolves one effective ceiling (`env.CHECK_MAX_DEPTH`) and passes it
+  //   to *both* resolvers — so this query is DENIED on both by default too
+  //   (agreement, not a divergence) — and reliably reproduces D-069 bug 1
+  //   as a genuine `false_grant` at that same standard/default
+  //   configuration if that bug regresses, no `maxDepth` pinning required
+  //   any more. (Before D-071, `runSoundnessFuzz`'s default left each
+  //   resolver to its own independently mismatched default —
+  //   `env.CHECK_MAX_DEPTH` for production, the much larger
+  //   `DEFAULT_REFERENCE_MAX_DEPTH` for reference — which made this an
+  //   expected, non-blocking `false_deny` at the *old* default and meant
+  //   catching bug 1 required an explicit `maxDepth` override; see D-070's
+  //   own original discussion and D-071's live-verified numbers for the
+  //   full before/after story.)
+  if (queryCount >= 3) {
+    queries.push({
+      subject: { ns: 'user', id: deepChain.directGrantUser },
+      object: deepChain.isolatedHopObject,
+      relationOrPermission: 'view',
+    });
+  }
+  if (queryCount >= 4) {
+    queries.push({
+      subject: { ns: 'user', id: deepChain.directGrantUser },
+      object: deepChain.ceilingBoundaryObject,
+      relationOrPermission: 'view',
+    });
+  }
+  if (queryCount >= 5) {
+    queries.push({
+      subject: { ns: 'user', id: deepChain.comboInsideUser },
+      object: deepChain.comboObject,
+      relationOrPermission: 'view',
+    });
+  }
+  if (queryCount >= 6) {
+    queries.push({
+      subject: { ns: 'user', id: deepChain.comboOutsideUser },
+      object: deepChain.comboObject,
+      relationOrPermission: 'view',
+    });
+  }
+
+  const reserved = Math.min(6, Math.max(0, queryCount));
   for (let i = reserved; i < queryCount; i += 1) {
     if (tuples.length > 0 && rng.nextBoolean(0.5)) {
       // "Likely positive": derive a query from a real tuple's own object,

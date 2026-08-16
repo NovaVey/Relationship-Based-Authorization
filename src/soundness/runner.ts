@@ -57,18 +57,31 @@ export interface SoundnessRunOptions {
   prNumber?: number;
   /**
    * Overrides `env.CHECK_MAX_DEPTH` for every check this run makes, on
-   * *both* resolvers. Omit for the standard run — production-realistic
-   * depth, exactly what real callers see. A generic replay/reproduction
-   * knob (e.g. re-running a seed at a different depth budget to see
-   * whether a boundary-dependent divergence appears) — **not** a fix for
-   * catching a missing SQL cycle guard specifically; see D-035 for why
-   * that bug class is structurally invisible to boolean-only differential
-   * comparison at any depth, and forcing a large value here on a full-size
-   * query batch is itself impractical (confirmed directly: a 500-query run
-   * forced to `maxDepth: 20_000` against a schema containing the
-   * guaranteed cycle did not complete within 5 minutes — every query
-   * touching that cycle pays the same superlinear cost the missing guard
-   * introduces, not just the one query that would demonstrate it).
+   * *both* resolvers. **Omit for the standard run.** Until D-071
+   * (`docs/DECISIONS.md`), omitting this meant each resolver silently fell
+   * back to its own *independent* default — `productionCheck` to
+   * `env.CHECK_MAX_DEPTH` (25), `referenceCheck` to
+   * `DEFAULT_REFERENCE_MAX_DEPTH` (1000, `src/resolve/reference/
+   * resolver.ts`) — a 40x mismatch that D-070 proved makes an entire class
+   * of real, boolean-level `false_grant` bugs (D-069 bug 1's own shape:
+   * an under-reduced depth budget on a relation lookup) structurally
+   * undetectable by this harness at the default configuration, no matter
+   * how the fixture generator is built. As of D-071, omitting this option
+   * resolves *one* effective ceiling — `env.CHECK_MAX_DEPTH` — and passes
+   * it explicitly to *both* resolvers, so "the standard run" now actually
+   * means "both resolvers are held to the one real, production-configured
+   * ceiling," not "each resolver quietly does its own, mismatched thing."
+   * Still a generic replay/reproduction knob when explicitly set (e.g.
+   * re-running a seed at a different depth budget to see whether a
+   * boundary-dependent divergence appears) — **not** a fix for catching a
+   * missing SQL cycle guard specifically; see D-035 for why that bug class
+   * is structurally invisible to boolean-only differential comparison at
+   * any depth, and forcing a large value here on a full-size query batch
+   * is itself impractical (confirmed directly: a 500-query run forced to
+   * `maxDepth: 20_000` against a schema containing the guaranteed cycle
+   * did not complete within 5 minutes — every query touching that cycle
+   * pays the same superlinear cost the missing guard introduces, not just
+   * the one query that would demonstrate it).
    */
   maxDepth?: number;
   /**
@@ -222,14 +235,27 @@ export function buildDivergenceRecord(input: BuildDivergenceRecordInput): Diverg
   };
 }
 
-/** Runs `queries` through both resolvers, `concurrency` at a time, preserving input order in the returned array. */
+/**
+ * Runs `queries` through both resolvers, `concurrency` at a time,
+ * preserving input order in the returned array. `maxDepth` is always a
+ * concrete, already-resolved number by the time it reaches here (D-071,
+ * `docs/DECISIONS.md`) — `runSoundnessFuzz` resolves `options.maxDepth ??
+ * env.CHECK_MAX_DEPTH` exactly once, before this function is ever called,
+ * and passes the *same* resolved value to both `referenceCheck` and
+ * `productionCheck` below, unconditionally. This function itself has no
+ * "fall back to each resolver's own default" branch left to get wrong —
+ * that mismatch (`env.CHECK_MAX_DEPTH` vs. `DEFAULT_REFERENCE_MAX_DEPTH`)
+ * is exactly what made D-069 bug 1's own `false_grant` shape structurally
+ * undetectable by this harness at the standard configuration (D-070); see
+ * D-071 for the live-verified fix and numbers.
+ */
 async function checkAllQueries(
   pool: Pool,
   schema: Parameters<typeof referenceCheck>[0],
   referenceTuples: Parameters<typeof referenceCheck>[1],
   queries: readonly GeneratedQuery[],
   concurrency: number,
-  maxDepth: number | undefined,
+  maxDepth: number,
 ): Promise<CheckedQuery[]> {
   const results: CheckedQuery[] = [];
   for (let start = 0; start < queries.length; start += concurrency) {
@@ -242,14 +268,14 @@ async function checkAllQueries(
           query.subject,
           query.object,
           query.relationOrPermission,
-          maxDepth !== undefined ? { maxDepth } : {},
+          { maxDepth },
         );
         const productionResult = await productionCheck(
           pool,
           query.subject,
           query.object,
           query.relationOrPermission,
-          maxDepth !== undefined ? { maxDepth } : {},
+          { maxDepth },
         );
         return {
           query,
@@ -368,6 +394,13 @@ export async function runSoundnessFuzz(
   const queryCount = options.queryCount ?? env.SOUNDNESS_FUZZ_QUERIES;
   const trigger = options.trigger ?? DEFAULT_TRIGGER;
   const dryRun = options.dryRun ?? false;
+  // Resolved once, here, and passed explicitly to *both* resolvers below
+  // (D-071, `docs/DECISIONS.md`) — never left for `referenceCheck`/
+  // `productionCheck` to silently apply their own, independently mismatched
+  // defaults (`env.CHECK_MAX_DEPTH` = 25 vs. `DEFAULT_REFERENCE_MAX_DEPTH`
+  // = 1000), which D-070 proved makes an entire real `false_grant` bug
+  // class undetectable by this harness at the standard configuration.
+  const effectiveMaxDepth = options.maxDepth ?? env.CHECK_MAX_DEPTH;
 
   const fixture = generateFixture(seed, queryCount);
 
@@ -445,7 +478,7 @@ export async function runSoundnessFuzz(
       fixture.tuples,
       fixture.queries,
       concurrency,
-      options.maxDepth,
+      effectiveMaxDepth,
     );
 
     const divergences: DivergenceRecord[] = [];

@@ -1703,3 +1703,211 @@ clean on every touched file.
 re-verified live against real Postgres; the fuzz-harness coverage gap
 disclosed rather than smoothed over, with its own "revisit if" trigger
 in D-069.
+
+## A guaranteed deep chain closes D-069's own generator coverage gap — and finds it's only half-closable without touching runner.ts (D-070)
+
+**Owner:** a dedicated fix-agent, on branch
+`fix/soundness-generators-deep-chain-coverage`, scoped to exactly
+`src/soundness/generators.ts` and its own tests, closing D-069's
+disclosed "Revisit if" (the standard-configuration fuzz run's generator
+was too small to ever exercise the depth-budget-accounting bug class
+D-069 fixed).
+
+**What was wrong:** `generateFixture`'s `OBJECTS_PER_NAMESPACE_MAX = 6`
+meant no randomly generated userset-subject or tuple-to-userset chain
+could ever get anywhere near the ~20+ hops needed to make "remaining
+depth budget after N prior hops" and "the full budget" disagree under
+`env.CHECK_MAX_DEPTH`'s default ceiling (25) — the exact structural
+precondition D-069's own critical bug (a real `false_grant`) needs to
+produce a wrong boolean. The standard 5,000-query fuzz run's own small
+graphs made the bug statistically invisible, confirmed by D-069 itself
+reintroducing the bug and getting a clean run back.
+
+**The fix:** a second guaranteed, deterministic structure —
+`buildGuaranteedDeepChain` — inserted into every fixture the same
+deliberate way the pre-existing guaranteed cycle already is: a 24-hop
+`hierNs` parent chain landing on a 13-group `groupNs` nested-membership
+chain, reusing both namespaces' already-compiled schema shapes (no new
+namespace, no new rewrite-rule kind). Four reserved queries (indices
+2-5, appended after the two pre-existing cyclic ones) are hand-derived
+against this exact structure, each isolating one of D-069's three bugs
+as precisely as the structure allows — see D-070 for the full numeric
+derivation (`D + k <= CHECK_MAX_DEPTH - 1` as the shared boundary, and
+why 12/13 and 24 are the specific numbers chosen). The deep chain's own
+objects are excluded from the generator's random-tuple-assignment loop
+so no coincidental random edge can ever change the hand-derived chain
+length a reserved query depends on.
+
+**The most important finding, from this fix's own live verification,
+not assumed from a clean fuzz run:** D-069's critical bug (the
+`false_grant`) **cannot be produced at `runSoundnessFuzz`'s literal
+default configuration** (`options.maxDepth` omitted) by any deep chain,
+at any depth — an architectural fact, not a generator-depth shortfall.
+At that configuration, production uses `env.CHECK_MAX_DEPTH` (25) while
+the reference resolver independently defaults to `DEFAULT_REFERENCE_
+MAX_DEPTH` (1000) — 40x larger. Any real chain buggy production can
+find (bounded to roughly 2×25=50 hops even with the bug, since the
+bug's own worst case is still capped at the nominal ceiling in each of
+the two places it can bite) is trivially within reference's 1000-hop
+reach too, so reference always independently agrees — never a
+divergence, regardless of the bug. Confirmed three ways before being
+trusted: hand-derivation; a live `(D=20, k=1..30)` sweep against real
+Postgres showing the exact predicted allow/deny boundary for the fixed
+resolver and full agreement (never a `false_grant`) for the buggy one
+at every `k`; and the actual, real, standard-configuration 5,000-query
+`runSoundnessFuzz` run itself, across 10 fresh seeds with the bug
+reintroduced — **0/10 unsound, `false_grant` totalling 0**. What
+_does_ reliably close it: pinning `maxDepth` explicitly via
+`runSoundnessFuzz`'s own already-existing option
+(`{ maxDepth: env.CHECK_MAX_DEPTH }`) — the same 10 seeds, same bug,
+same real 5,000-query budget: **10/10 unsound, `false_grant: 1` on
+every single seed**, deterministic — a dramatic reliability
+improvement over D-069's own disclosed "33/40 seeds at `maxDepth: 2`."
+Closing the literal-default-config half of this gap needs a
+`runner.ts`-scoped change (defaulting `SoundnessRunOptions.maxDepth` to
+`env.CHECK_MAX_DEPTH` instead of leaving both resolvers at independently
+mismatched defaults) — out of scope for this fix's own task boundary,
+disclosed in D-070 rather than smoothed over, exactly as D-069 disclosed
+the generator half of the same gap for this fix to pick up.
+
+**What the deep chain closes unconditionally, no `maxDepth` pinning
+needed:** D-069's other two bugs (both `false_deny`-shaped) — confirmed
+live, each reintroduced alone at the literal default configuration:
+bug 2 (tupleToUserset double-charging) raises the guaranteed baseline
+`false_deny` count from 1 to exactly 4 on every seed; bug 3 (the
+`>=`/`>` ceiling comparator) raises it from 1 to exactly 2. Neither
+flips `verdict` (§6.5/D-006: `false_deny` never blocks alone), but both
+are now a real, deterministic, always-visible signal in every run's own
+report where before this fix neither bug moved that number at standard
+scale at all.
+
+**Tests:** `test/unit/soundness/generators.test.ts` (new, DB-free) — 37
+tests across 5 distinct seeds asserting the exact hand-derived tuple and
+query shape of the guaranteed deep chain (every edge, both plain
+grants, exactly two tuples on `dc_h0`'s `editor` relation and exactly
+one on every interior chain node, proving no random tuple ever lands on
+a reserved object), the four reserved queries' exact shape, that
+`referenceCheck` allows all four (confirming they're real chains, not
+phantoms), reproducibility, and graceful degradation for small
+`queryCount`. `test/isolation/differential-soundness.fuzz.test.ts` (the
+pre-existing suite) needed zero changes — all 8 tests still pass
+unmodified.
+
+**Verification:** `npx tsc --noEmit`/`npx eslint .`/`npx prettier
+--check .` all clean; `npx vitest run` 276/276 passing (239 pre-existing
+
+- 37 new); `test/isolation/differential-soundness.fuzz.integration.test
+.ts` and `test/unit/resolve/production/cross-resolver-agreement
+.integration.test.ts` (D-069's own regression suite) both re-run via
+  LOCALVERIFY-against-real-local-Postgres, 1/1 and 20/20 passing; every
+  live probe described above (bug 1 at default and pinned `maxDepth`, and
+  bugs 2/3 individually at default) performed via a temporary,
+  single-line edit to `src/resolve/production/resolver.ts`, rebuilt, run,
+  and restored byte-identical (`md5sum`-confirmed) before the next probe
+  — never left in place, never committed. Every real 5,000-query
+  `runSoundnessFuzz` call completed in 5-10 seconds; the deep chain adds
+  `O(depth)` tuples (~40), not `O(depth²)`.
+
+**Final state:** the standard-configuration fuzz run now reliably
+exercises real depth-budget accounting near the actual ceiling on every
+run (a guaranteed, deterministic `false_deny` from the chain's own
+"just past the boundary" witness, at default config); D-069's bug 1 is
+now reliably (10/10, deterministic) caught the moment a caller pins
+`maxDepth`, and bugs 2/3 are now visibly, deterministically caught at
+the literal default configuration too. The literal-default-config half
+of bug 1's own gap remained open and disclosed, with its own "Revisit
+if," as `runner.ts`-scoped follow-up work, not implemented in this
+entry — **closed immediately after by the very next entry below
+(D-071)**, in the same worktree/PR, per the coordinator's own
+follow-up instruction. Left uncommitted in the worktree for the main
+agent to review, per this task's own instruction.
+
+## `runSoundnessFuzz` now resolves one effective maxDepth for both resolvers, closing D-070's own disclosed gap for real (D-071)
+
+**Owner:** the same fix-agent as D-070, on the same branch
+(`fix/soundness-generators-deep-chain-coverage`), same worktree, same
+uncommitted PR — a direct coordinator-requested follow-up closing the
+"Revisit if" D-070 itself named as `runner.ts`-scoped, out-of-boundary
+work for that entry.
+
+**What was wrong:** `runSoundnessFuzz`'s `checkAllQueries` let each
+resolver silently fall back to its own default whenever a caller
+omitted `options.maxDepth` (true of every real invocation path — CLI,
+CI, API; there is no `--max-depth` flag anywhere) —
+`productionCheck` to `env.CHECK_MAX_DEPTH` (25), `referenceCheck` to
+the independent, 40x-larger `DEFAULT_REFERENCE_MAX_DEPTH` (1000). D-070
+proved by hand-derivation and live Postgres testing that this exact
+mismatch makes D-069's own critical bug (a real `false_grant`)
+structurally undetectable by the standard-configuration fuzz run, no
+matter how deep the fixture generator's chains are — a buggy
+production resolver can never find a real chain reference doesn't also
+independently find within its own much larger budget, so the two
+always agree, bug or no bug.
+
+**The fix:** `runSoundnessFuzz` now resolves
+`options.maxDepth ?? env.CHECK_MAX_DEPTH` exactly once and passes that
+single value to _both_ `referenceCheck` and `productionCheck`,
+unconditionally, for every query — `checkAllQueries`'s own signature
+tightened to require a concrete number rather than accept `undefined`
+and silently omit the option. An explicit `options.maxDepth` still
+overrides both resolvers uniformly, exactly as before — only the
+omitted case's behavior changed.
+
+**Live-verified, the actual acceptance criterion:** D-069 bug 1
+reintroduced (temporary, single-line, restored byte-identical after via
+`md5sum`), real standard-configuration `runSoundnessFuzz` (5,000
+queries, real Postgres, `maxDepth` genuinely omitted, not pinned),
+across 10 fresh seeds: **10/10 `unsound`, `false_grant: 1` on every
+seed** — the same deterministic reliability D-070 had only been able to
+show for a `maxDepth`-pinned invocation, now true of the literal
+default too. Resolver restored, same 10 seeds: **10/10 `sound`,
+`false_grant: 0`**.
+
+**Design questions resolved, with reasoning (full detail in D-071,
+`docs/DECISIONS.md`):** the `SoundnessRunOptions.maxDepth` doc comment
+updated to describe the new default behavior; **no** new field added to
+`SoundnessRunResult`/`soundness_runs` for the resolved `maxDepth` value
+— checked whether an existing field already served this purpose (it
+doesn't — `graph_seed`/`queryCount` are recorded because they're
+required inputs to `generateFixture` itself, `maxDepth` never is) and
+concluded a persisted field isn't justified until a real caller can
+actually vary it (no `--max-depth` flag exists anywhere today) rather
+than added speculatively; D-070's own query 5 ("outside" combo witness)
+re-verified live under the new default — its guaranteed `false_deny`
+(1 on every prior run) is now `0` on every seed, because reference now
+also shares the real ceiling — confirmed to be agreement (the correct
+outcome), never a new `false_grant` risk; every existing test calling
+`runSoundnessFuzz` without an explicit `maxDepth` audited and re-run,
+none needed a change.
+
+**Tests:** `test/unit/soundness/runner-maxdepth-resolution.test.ts`
+(new, DB-free, mocked I/O + a delegating spy on `referenceCheck` to
+observe its real call arguments) — asserts both resolvers receive
+`{ maxDepth: env.CHECK_MAX_DEPTH }` on every query when omitted, and
+the exact explicit override value when set.
+
+**Verification:** `npx tsc --noEmit`/`eslint`/`prettier --check` all
+clean; `npx vitest run` 278/278 passing (276 + 2 new); the live probe
+above; a separate 10-fresh-seed run of the fixed resolver at the
+genuinely-default configuration (10/10 `sound`, `false_grant: 0`,
+`false_deny: 0`, confirming no spurious divergence); explicit-override
+sanity checks at `maxDepth: 25` and `maxDepth: 2`; three
+`*.integration.test.ts` files (`differential-soundness.fuzz`,
+`dry-run-cleanup`, `cross-resolver-agreement`) all re-run via
+LOCALVERIFY against real local Postgres, 1/1, 5/5, 20/20 passing,
+unmodified. **Fail-check performed:** `referenceCheck`'s own call
+temporarily reverted to omit `{ maxDepth }` entirely (reproducing the
+pre-fix behavior) — both new tests failed for the right reason
+(`expected undefined to deeply equal { maxDepth: 25 }`); restored,
+`md5sum`-confirmed byte-identical.
+
+**Final state:** D-070's own disclosed gap is now fully closed — the
+standard-configuration fuzz run (no `maxDepth` override, exactly what
+CI/CLI actually run) reliably, deterministically catches D-069 bug 1's
+`false_grant` shape, D-070's own deep chain does not introduce any
+spurious divergence at the new default, and D-070's own doc comments
+(in `src/soundness/generators.ts`) were updated in place to describe
+the new default behavior accurately rather than left describing a
+mismatch that no longer exists. Left uncommitted in the worktree for
+the main agent to review, commit, and push as one PR covering both
+D-070 and D-071 together, per the coordinator's own instruction.
