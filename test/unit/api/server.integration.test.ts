@@ -306,7 +306,11 @@ describe('/health reports green against a real, reachable Postgres and reflects 
     expect(healthRes.statusCode).toBe(200);
     expect(healthBody.status).toBe('ok');
     expect(healthBody.database).toEqual({ reachable: true });
-    const nsEntry = (healthBody.namespaces as any[]).find((n) => n.namespace === ns);
+    // `namespaces` is `HealthNamespaceListStatus` (docs/DECISIONS.md D-073),
+    // not a bare array — `{ ok: true, namespaces: [...] }` here since both
+    // the connectivity probe and the listing query genuinely succeeded.
+    expect(healthBody.namespaces.ok).toBe(true);
+    const nsEntry = (healthBody.namespaces.namespaces as any[]).find((n) => n.namespace === ns);
     expect(nsEntry).toEqual({ namespace: ns, version: 1 });
 
     // Publish a second version of the same namespace — /health must report
@@ -330,7 +334,8 @@ describe('/health reports green against a real, reachable Postgres and reflects 
 
     const healthRes2 = await app.inject({ method: 'GET', url: '/health' });
     const healthBody2 = await parseBody(healthRes2);
-    const nsEntry2 = (healthBody2.namespaces as any[]).find((n) => n.namespace === ns);
+    expect(healthBody2.namespaces.ok).toBe(true);
+    const nsEntry2 = (healthBody2.namespaces.namespaces as any[]).find((n) => n.namespace === ns);
     expect(nsEntry2).toEqual({ namespace: ns, version: 2 });
   });
 });
