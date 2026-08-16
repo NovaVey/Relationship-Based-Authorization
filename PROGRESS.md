@@ -1431,6 +1431,174 @@ approaches on top of the implementing/testing subagents' own; the
 README's walkthrough now leaves zero trace by default; D-060's "revisit
 if" fired and is closed.
 
+## API auth-gating and dry-run cleanup fixes (D-064, D-065, D-066)
+
+**Owner:** main agent (all three findings — API/CLI surface, own turf).
+Not a numbered build phase — a full-repo audit (2026-08-16) found three
+HIGH-severity findings this entry closes, part of the batch the direct
+user instruction "fix the critical and high findings" covers.
+
+**Finding #4 — `/check`/`/expand` unauthenticated (D-064):**
+`requireAdminAuth` now gates `/check` and `/expand` in
+`src/api/server.ts`, exactly as it already gated the three write routes.
+Both get a new, more generous rate-limit budget (`gatedReadRateLimit`,
+200/minute) than writes' 20/minute. `/schema/compile` and `/health`
+remain the only unauthenticated routes — both answer questions about the
+caller's own supplied input or non-sensitive schema metadata, never the
+real tuple graph.
+
+**Finding #5 — rate-limit counted before auth ran (D-065):** every
+gated route's `config.rateLimit` now sets `hook: 'preHandler'`
+(`@fastify/rate-limit`'s own option, default `onRequest`), confirmed by
+reading the installed plugin's own source
+(`node_modules/@fastify/rate-limit/index.js`'s `addRouteRateHook`) to
+append onto the route's already-declared `preHandler: requireAdminAuth`
+rather than run as an earlier, separate hook — so a flood of failed-auth
+requests can no longer exhaust a route's rate-limit budget before ever
+being compared against the real key. `trustProxy: true` added to the
+`Fastify(...)` constructor so `request.ip` (the rate-limiter's default
+key) resolves from `X-Forwarded-For` behind a reverse proxy (Railway),
+rather than collapsing every real caller onto the proxy's own shared
+budget.
+
+**Finding #7 — a dry-run cleanup failure could discard a real,
+already-computed verdict (D-066):** `runSoundnessFuzz`'s
+(`src/soundness/runner.ts`) success-path `cleanupIfDryRun()` call is now
+wrapped in its own `try`/`catch` — a cleanup failure is logged via
+`console.error`, never thrown, so it can no longer fall into the
+function's own outer `catch` and get mapped by
+`src/cli/commands/soundness.ts` to exit code 3
+("infrastructure failure — no verdict exists") for a run that actually
+succeeded, possibly with a critical `unsound`/`false_grant` verdict that
+was about to be silently lost.
+
+**Files touched:**
+
+- `src/api/server.ts` — `trustProxy: true`; `hook: 'preHandler'` on
+  `writeRateLimit`; new `gatedReadRateLimit`; `/check`/`/expand` gated
+  with `requireAdminAuth`.
+- `src/api/auth.ts` — doc comment updated (no functional change) to
+  drop the write-exclusive framing now that `requireAdminAuth` gates
+  five routes, not three.
+- `src/soundness/runner.ts` — success-path cleanup wrapped in
+  `try`/`catch`; doc comments updated.
+- `test/unit/api/server.test.ts` — extensive updates for the new
+  auth contract on `/check`/`/expand` (renamed describe blocks, new
+  positive/negative auth cases), plus a new dedicated regression test
+  proving D-065: 25 wrong-key requests against `POST /tuples` (five past
+  `writeRateLimit`'s own `max: 20`) all return 401 (never 429) and never
+  call `writeTuple`, then a request with the correct key right after
+  still succeeds.
+- `test/unit/api/server.integration.test.ts` — added auth headers to
+  the three `/check`/`/expand` calls that previously ran unauthenticated
+  (now correctly required); re-verified against real local Postgres via
+  this project's established LOCALVERIFY technique.
+- `test/unit/soundness/runner-dry-run-cleanup-failure.test.ts` (new) —
+  DB-free, mocks every I/O dependency `runSoundnessFuzz` has to force a
+  successful dry run whose cleanup then fails; proves the real result is
+  still returned and the failure is logged, not swallowed or thrown.
+- `docs/DECISIONS.md` — D-064, D-065, D-066.
+
+**Verification:**
+
+- `test/unit/api/server.test.ts`: 27/27 passing (was 26; +1 new
+  regression test for D-065).
+- `test/unit/api/server.integration.test.ts`: 4/4 passing against real
+  local Postgres via LOCALVERIFY (copied, connection string swapped,
+  run for real, deleted — never committed).
+- `test/unit/soundness/runner-dry-run-cleanup-failure.test.ts`: 2/2
+  passing. Fail-checked directly: reverted the `try`/`catch` back to a
+  bare `await cleanupIfDryRun();`, confirmed the test fails for the
+  right reason (the simulated cleanup error propagates uncaught instead
+  of being logged and swallowed), restored, confirmed byte-identical via
+  `md5sum`.
+- `npx tsc --noEmit`, `npx eslint`, `npx prettier --check` all clean on
+  every touched file.
+
+**Final state:** all three findings closed; `test/unit/api/server.test.ts`
+and the new soundness unit test both pass, the integration test
+re-verified live against real Postgres, and the dry-run cleanup fix's
+fail-check confirms the regression it closes is real and now caught.
+
+## Schema DSL unbounded-recursion DoS fix (D-067)
+
+**Owner:** `schema-compiler` (the actual parser/compiler fix, its
+regression test) + main agent (independent live re-verification,
+`docs/DECISIONS.md`/`PROGRESS.md`, review). Not a numbered build phase —
+a full-repo audit (2026-08-16) found two independent, unauthenticated
+denial-of-service paths in `src/schema/dsl/` reachable from `POST
+/schema/compile`, both HIGH severity; this closes one of them (the
+critical + high finding set the direct user instruction "fix the
+critical and high findings" covers).
+
+**What was wrong:** `parser.ts`'s `parseAtom`/`parseTerm`/
+`parseExpression` (mutually recursive, one native call-stack frame per
+level of `(` nesting) threw a raw, unhandled `RangeError` at ~3,000
+nested parens. Independently, `compiler.ts`'s `checkCircularPermissions`
+walked its permission-dependency graph via a second, structurally
+separate native recursion (`dfs`, one frame per chain edge in a flat
+`permission pN = pN+1` chain) that overflowed on its own between 5,000
+and 10,000 permissions — confirmed by a captured stack trace to never
+touch the parser at all, proving a paren-only fix would have left this
+second path open.
+
+**The fix:**
+
+- `src/schema/dsl/types.ts` — new `MAX_EXPRESSION_NESTING_DEPTH = 100`.
+- `src/schema/dsl/errors.ts` — new `SchemaErrorCode`,
+  `'expression_nesting_too_deep'`.
+- `src/schema/dsl/parser.ts` — `ParserState.parenDepth`, checked in
+  `parseAtom` on every `(`; past the ceiling, throws the existing
+  `SchemaParseError` machinery instead of letting native recursion run
+  unbounded.
+- `src/schema/dsl/compiler.ts` — `checkCircularPermissions`'s `dfs`
+  rewritten from native recursion to an explicit iterative worklist
+  (`dfsFrom`/`DfsFrame`), removing the native-recursion depth limit
+  entirely (the right fix here, since there's no principled reason to
+  cap a legitimate acyclic permission chain's length, unlike `(`
+  nesting).
+- A second, latent bug found live while load-testing the iterative
+  rewrite: `reportCycle` rebuilt the same `cycle.join(' -> ')` string
+  once per cycle member — O(N²), invisible before because the recursive
+  `dfs` always stack-overflowed first at N≈5,000-10,000. Fixed by
+  hoisting the join outside the loop (20,000-permission cycle: 33.8s →
+  140ms; 100,000-permission cycle: OOM crash → ~800ms).
+- `test/unit/schema/recursion-depth-guards.test.ts` (new) — the paren
+  ceiling accepted at exactly 100 / rejected at 101 / rejected cleanly at
+  6,000; a 10,000-permission legitimate acyclic chain compiling
+  successfully and fast; a 10,000-permission adversarial flat cycle
+  rejected cleanly with exactly 10,000 located errors, fast.
+
+**Verification, independent of the implementing subagent's own report:**
+
+- Read the full diff by hand — confirmed the `parenDepth` counter is
+  incremented/decremented at exactly the right points, and that the
+  iterative `dfsFrom` rewrite preserves the original recursive `dfs`'s
+  GREY/BLACK coloring, shared-`path` semantics, and cycle-reporting
+  exactly (frames pushed/popped in lock-step with `path`, deps snapshot
+  taken at push time).
+- Ran the full existing suite myself in the subagent's own worktree:
+  `npx vitest run` — 226/226 passed, zero DB required; `npx tsc --noEmit`,
+  `npx eslint .`, `npx prettier --check` all clean.
+- Performed an original live spot-check, independent of the subagent's
+  own 255-case differential comparison and fail-check: compiled a fresh
+  4,000-nested-paren schema and a fresh 7,000-permission adversarial flat
+  cycle directly against the built compiler — both rejected cleanly
+  (`expression_nesting_too_deep`, `circular_permission_definition`
+  respectively), the cycle case in 68ms with exactly 7,000 located
+  errors, and confirmed a small legitimate schema still compiles
+  correctly.
+- Renumbered the subagent's own `docs/DECISIONS.md` entry from D-064 to
+  D-067 before merging — D-064/D-065 were independently claimed in
+  parallel by the main agent's own concurrent auth-ordering fix on a
+  different branch; caught before push, not after.
+
+**Final state:** `npm run verify`-equivalent checks clean throughout;
+both DoS paths independently confirmed closed via a live, original
+reproduction distinct from the implementing subagent's own; pushed as
+its own branch/PR, per this project's one-fix-per-PR convention for this
+audit's findings.
+
 ## Production resolver depth-budget accounting fixes (D-069)
 
 **Owner:** `soundness-engineer` (resolver.ts fix, regression tests) +

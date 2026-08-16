@@ -36,6 +36,16 @@
  * request shape across all five operations beats strict verb-purity for an
  * API with no caching layer that would benefit from `GET`'s cacheability.
  * See `docs/DECISIONS.md`.
+ *
+ * **`check` and `expand` require `ADMIN_API_KEY` too, not just the write
+ * routes** (D-064). Either one, unauthenticated, is a public authorization
+ * oracle: repeated `/check` calls let any network caller enumerate "does
+ * subject X have permission Y on object Z" across the whole graph, and one
+ * `/expand` call dumps the complete resolved membership tree for an
+ * `object#relation` — every transitive group member, every subject with
+ * access — which is exactly the kind of implicit disclosure build spec
+ * rule 10 and D-050's own reasoning already rule out for writes, applied
+ * here to read access instead. See `docs/DECISIONS.md` D-064.
  */
 import Fastify, {
   type FastifyError,
@@ -167,7 +177,20 @@ async function runOrInfrastructureError<T>(
  * the plugin registration below.
  */
 export async function buildServer(pool: Pool): Promise<FastifyInstance> {
-  const app = Fastify({ logger: { level: env.LOG_LEVEL } });
+  // `trustProxy: true` (D-065) — `serve.ts` binds `0.0.0.0` specifically so
+  // this process can be reached "from outside the process (a container, a
+  // platform like Railway)" (see that file's own doc comment) — a
+  // platform-hosted deployment reached this way typically sits behind that
+  // platform's own reverse proxy/load balancer rather than answering client
+  // sockets directly. Without this, every request's rate-limit key
+  // (`request.ip`, the default `keyGenerator`) resolves to the proxy's own
+  // address for every caller alike, collapsing every distinct real client
+  // onto one shared budget — a single caller could exhaust it for everyone
+  // behind the same proxy. `true` trusts `X-Forwarded-For` unconditionally;
+  // see `docs/DECISIONS.md` D-065 for the tradeoff this accepts and when to
+  // revisit it (e.g. a deployment that genuinely answers raw sockets
+  // directly, where this would let a client spoof its own rate-limit key).
+  const app = Fastify({ logger: { level: env.LOG_LEVEL }, trustProxy: true });
 
   // Framework-level errors (malformed JSON body, etc.), the rate-limit
   // plugin's own thrown rejection (see the `retryAfterSeconds` marker below
@@ -235,20 +258,38 @@ export async function buildServer(pool: Pool): Promise<FastifyInstance> {
   });
 
   /**
-   * Attached per-route (via each write route's own `{ preHandler }` option
+   * Attached per-route (via each gated route's own `{ preHandler }` option
    * below), not as a global `app.addHook('preHandler', ...)` matched
    * against `request.url` — a URL-string match is exactly the kind of
    * fragile, easy-to-typo gate a new route could accidentally fall outside
-   * of (or a read route could accidentally fall inside of) with no type
+   * of (or a public route could accidentally fall inside of) with no type
    * error to catch it. Fastify's own route-level `preHandler` option keeps
    * "which routes are gated" declared right next to each route
-   * registration instead of in a separately-maintained URL list.
+   * registration instead of in a separately-maintained URL list. Gates the
+   * three write routes and, since D-064, `/check`/`/expand` too — despite
+   * this function's name, it is no longer write-specific; every route
+   * below except `/schema/compile` and `/health` calls it.
    *
    * If this sends a response (an unauthorized request), Fastify's own hook
    * lifecycle stops there — the route handler below it is never invoked;
    * see `test/unit/api/server.test.ts`'s own fail-check confirming this
    * (the domain call itself is spied on and asserted never-called for a
    * rejected write).
+   *
+   * **This must run before rate-limit counting on every route it gates**
+   * (D-065) — every `config.rateLimit` below that pairs with this
+   * preHandler sets `hook: 'preHandler'` for exactly that reason. Fastify
+   * runs preHandlers in array order; `@fastify/rate-limit`'s own `onRoute`
+   * hook (`node_modules/@fastify/rate-limit/index.js`'s `addRouteRateHook`)
+   * appends its handler onto whatever `preHandler` a route already declared
+   * at registration time rather than replacing it — since this function is
+   * always assigned first, in the route's own `preHandler` option, it
+   * always runs first, and if it rejects, the array short-circuits there
+   * (Fastify's own preHandler chain stops at the first response-sending
+   * hook) — the rate-limit handler after it never runs, so a caller who
+   * never even attempts a key can never consume the budget meant to
+   * protect the one who holds it. Confirmed directly by reading that
+   * plugin's own source, not assumed from its public docs alone.
    */
   async function requireAdminAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const result = checkAdminAuth(request.headers.authorization);
@@ -261,38 +302,59 @@ export async function buildServer(pool: Pool): Promise<FastifyInstance> {
     }
   }
 
-  app.post('/check', async (request, reply) => {
-    const parsed = checkBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
-      return;
-    }
-    const { subject, relation, object, atToken } = parsed.data;
-    const result = await runOrInfrastructureError(reply, () =>
-      performCheck(pool, subject, object, relation, atToken !== undefined ? { atToken } : {}),
-    );
-    if (result === undefined) return;
-    const resp = checkResponse(subject, relation, object, result, atToken);
-    await reply.code(resp.status).send(resp.body);
-  });
-
-  app.post('/expand', async (request, reply) => {
-    const parsed = expandBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
-      return;
-    }
-    const { object, relation } = parsed.data;
-    const tree = await runOrInfrastructureError(reply, () => expand(pool, object, relation));
-    if (tree === undefined) return;
-    const resp = expandResponse(object, relation, tree);
-    await reply.code(resp.status).send(resp.body);
-  });
-
   // A stricter budget than the global default (D-056): defense-in-depth
   // against ADMIN_API_KEY-guessing and write-flooding, even from a caller
-  // who does hold a valid key.
-  const writeRateLimit = { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } };
+  // who does hold a valid key. `hook: 'preHandler'` (D-065) — see
+  // `requireAdminAuth`'s own doc comment for why this must run after auth,
+  // not before.
+  const writeRateLimit = {
+    config: { rateLimit: { max: 20, timeWindow: '1 minute', hook: 'preHandler' as const } },
+  };
+
+  // A more generous budget than writes get (D-064): once gated, `/check`/
+  // `/expand` are expected to be called far more often in normal use than
+  // an admin write is — a real integrated caller might run a check per
+  // incoming request to whatever it protects. Still `hook: 'preHandler'`
+  // for the identical reason `writeRateLimit` needs it.
+  const gatedReadRateLimit = {
+    config: { rateLimit: { max: 200, timeWindow: '1 minute', hook: 'preHandler' as const } },
+  };
+
+  app.post(
+    '/check',
+    { preHandler: requireAdminAuth, ...gatedReadRateLimit },
+    async (request, reply) => {
+      const parsed = checkBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const { subject, relation, object, atToken } = parsed.data;
+      const result = await runOrInfrastructureError(reply, () =>
+        performCheck(pool, subject, object, relation, atToken !== undefined ? { atToken } : {}),
+      );
+      if (result === undefined) return;
+      const resp = checkResponse(subject, relation, object, result, atToken);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
+
+  app.post(
+    '/expand',
+    { preHandler: requireAdminAuth, ...gatedReadRateLimit },
+    async (request, reply) => {
+      const parsed = expandBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const { object, relation } = parsed.data;
+      const tree = await runOrInfrastructureError(reply, () => expand(pool, object, relation));
+      if (tree === undefined) return;
+      const resp = expandResponse(object, relation, tree);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
 
   app.post(
     '/tuples',
