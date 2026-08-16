@@ -164,7 +164,8 @@ the only paid dependency this project has.
 ## API and CLI
 
 ```
-authz schema compile <file>                        parse + compile a namespace DSL file
+authz doctor                                        confirm DATABASE_URL is reachable, apply migrations, report status
+authz schema compile <file>                         parse + compile a namespace DSL file
 authz schema publish <file>                         compile and publish a new namespace_configs version
 authz tuple write <object> <relation> <subject>     write a tuple, prints the returned consistency token
 authz tuple delete <object> <relation> <subject>
