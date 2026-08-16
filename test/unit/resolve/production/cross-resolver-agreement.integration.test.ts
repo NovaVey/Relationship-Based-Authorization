@@ -1034,4 +1034,174 @@ describe('depth-budget accounting parity — deep fixtures the earlier 3-level f
       expect(productionResult.allowed).toBe(referenceResult.allowed);
     });
   });
+
+  describe('a combined chain mixing tuple-to-userset AND nested-group membership in the same fixture, at a small explicit ceiling — full-repo audit finding #10', () => {
+    // The three describe blocks above (this file's own pre-existing
+    // depth-budget-accounting-parity section, added for D-069) each
+    // exercise ONE of the two mechanisms D-069's bugs lived in, never both
+    // together in a single fixture: the first sub-block's fixture is a
+    // computedUserset hop + nested-group `subject_relation` chain (no `->`
+    // anywhere); the second and third sub-blocks' fixtures are pure
+    // `parent->view` tuple-to-userset chains (no nested-group membership at
+    // all). Full-repo audit finding #10: no fixture anywhere in this file
+    // forces BOTH mechanisms to contribute to the SAME boundary at once —
+    // a future regression that only manifested when a tuple-to-userset hop
+    // was immediately followed by a nested-group SQL walk (rather than
+    // either in isolation) could ship undetected the same way D-069's own
+    // bugs did before this file grew a 3-level-deep-fixture ceiling.
+    //
+    // doc:d1 --parent->view--> folder:f1 (tuple-to-userset)
+    //   folder:f1's `view = viewer`, viewer: user | grp#member
+    //   folder:f1 --viewer--> grp:g0#member (nested-group membership starts)
+    //     grp:g0 --member--> grp:g1#member
+    //       grp:g1 --member--> user:alice (direct grant)
+    //
+    // The exact allow/deny boundary below (denied at `maxDepth: 3`, allowed
+    // at `maxDepth: 4`) was confirmed empirically against this project's
+    // own real local Postgres fixture, with BOTH resolvers, before being
+    // trusted — this project's own established "verify by actually running
+    // it" standard (`docs/DECISIONS.md` D-008/D-009/D-070) — rather than
+    // hand-counted from the informal per-hop cost language in D-069's own
+    // writeup, which is about a budget threshold, not a promise that every
+    // possible mixed-mechanism fixture costs the same as a same-shaped
+    // single-mechanism one.
+    function combinedFixtureSource(gns: string, fns: string, dns: string): string {
+      return [
+        `namespace ${gns} {`,
+        `  relation member: user | ${gns}#member`,
+        '}',
+        `namespace ${fns} {`,
+        `  relation viewer: user | ${gns}#member`,
+        '  permission view = viewer',
+        '}',
+        `namespace ${dns} {`,
+        `  relation parent: ${fns}`,
+        '  permission view = parent->view',
+        '}',
+      ].join('\n');
+    }
+
+    it('both-resolvers-deny-the-combined-tuple-to-userset-plus-nested-group-chain-at-maxDepth-3-one-hop-short-of-its-real-cost', async () => {
+      const gns = uniqueName('grp');
+      const fns = uniqueName('fld');
+      const dns = uniqueName('doc');
+      const schema = await setUpSchema(combinedFixtureSource(gns, fns, dns));
+      const d1 = uniqueName('d1');
+      const f1 = uniqueName('f1');
+      const g0 = uniqueName('g0');
+      const g1 = uniqueName('g1');
+
+      const tuples: TupleKey[] = [
+        tuple(dns, d1, 'parent', fns, f1),
+        tuple(fns, f1, 'viewer', gns, g0, 'member'),
+        tuple(gns, g0, 'member', gns, g1, 'member'),
+        tuple(gns, g1, 'member', 'user', 'alice'),
+      ];
+      for (const t of tuples) await writeOk(t);
+
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        { maxDepth: 3 },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        {
+          maxDepth: 3,
+        },
+      );
+
+      expect(referenceResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+
+    it('both-resolvers-allow-the-identical-combined-chain-once-maxDepth-is-raised-by-exactly-one-to-cover-its-real-cost', async () => {
+      const gns = uniqueName('grp');
+      const fns = uniqueName('fld');
+      const dns = uniqueName('doc');
+      const schema = await setUpSchema(combinedFixtureSource(gns, fns, dns));
+      const d1 = uniqueName('d1');
+      const f1 = uniqueName('f1');
+      const g0 = uniqueName('g0');
+      const g1 = uniqueName('g1');
+
+      const tuples: TupleKey[] = [
+        tuple(dns, d1, 'parent', fns, f1),
+        tuple(fns, f1, 'viewer', gns, g0, 'member'),
+        tuple(gns, g0, 'member', gns, g1, 'member'),
+        tuple(gns, g1, 'member', 'user', 'alice'),
+      ];
+      for (const t of tuples) await writeOk(t);
+
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        { maxDepth: 4 },
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'alice'),
+        ref(dns, d1),
+        'view',
+        {
+          maxDepth: 4,
+        },
+      );
+
+      expect(referenceResult.allowed).toBe(true);
+      expect(productionResult.allowed).toBe(true);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+
+    it('both-resolvers-deny-a-subject-absent-from-the-combined-chain-entirely-a-plain-denial-control-not-just-a-depth-boundary-one', async () => {
+      // Control distinct from the two boundary tests above: proves the
+      // combined fixture's "allowed" result genuinely depends on alice's
+      // real membership, not on the mixed-mechanism shape alone always
+      // resolving true regardless of subject.
+      const gns = uniqueName('grp');
+      const fns = uniqueName('fld');
+      const dns = uniqueName('doc');
+      const schema = await setUpSchema(combinedFixtureSource(gns, fns, dns));
+      const d1 = uniqueName('d1');
+      const f1 = uniqueName('f1');
+      const g0 = uniqueName('g0');
+      const g1 = uniqueName('g1');
+
+      const tuples: TupleKey[] = [
+        tuple(dns, d1, 'parent', fns, f1),
+        tuple(fns, f1, 'viewer', gns, g0, 'member'),
+        tuple(gns, g0, 'member', gns, g1, 'member'),
+        tuple(gns, g1, 'member', 'user', 'alice'),
+      ];
+      for (const t of tuples) await writeOk(t);
+
+      const referenceResult = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'henry'),
+        ref(dns, d1),
+        'view',
+      );
+      const productionResult = await productionCheck(
+        pool,
+        ref('user', 'henry'),
+        ref(dns, d1),
+        'view',
+      );
+
+      expect(referenceResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(false);
+      expect(productionResult.allowed).toBe(referenceResult.allowed);
+    });
+  });
 });

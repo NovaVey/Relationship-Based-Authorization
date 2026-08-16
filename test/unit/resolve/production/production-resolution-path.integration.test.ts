@@ -657,6 +657,99 @@ describe('checks.depth reflects the actual recursion depth reached, not just the
     expect(result.depth).toBeLessThan(25);
     expect(result.depth).toBeGreaterThanOrEqual(1);
   });
+
+  /**
+   * Full-repo audit finding #11: the test directly above reaches its grant
+   * via a *direct* tuple on the permission's own relation — SQL-side
+   * frontier depth 0 — so its assertion (`depth` between 1 and 25) is
+   * fully satisfied by TypeScript-level `resolve()`/`evalRewrite` depth
+   * bookkeeping alone; if `sqlRelationMembershipWithWitness`'s own
+   * frontier-depth folding into `WalkContext.depthReached` (see
+   * `docs/DECISIONS.md` D-038: `checks.depth` is "the max of both [the
+   * TS-level walk and every SQL-level recursive CTE it issued], not a
+   * separately-reported pair") were deleted entirely, this test would
+   * still pass. This fixture closes that gap: the permission itself is
+   * shallow in the rewrite-rule tree (`permission view = viewer`, a single
+   * computedUserset hop — one level, same as the fixture above), but
+   * `viewer`'s own relation is reached only via three levels of nested-
+   * group tuples (`group:g0#member -> group:g1#member -> group:g2#member ->
+   * user:alice`), forcing the real SQL-side recursive CTE to walk several
+   * frontier levels deep to find alice's membership before this check can
+   * resolve `allowed: true` at all.
+   *
+   * The exact expected `depth` value (3) was confirmed empirically against
+   * this project's own real local Postgres fixture before being trusted —
+   * this project's own established "verify by actually running it"
+   * standard (`docs/DECISIONS.md` D-008/D-009/D-070) — rather than assumed
+   * from the informal per-hop cost language in D-069's own writeup (which
+   * describes a *budget* threshold, not this field's own exact numbering
+   * scheme): at `maxDepth: 25` (this permission's default-sized ceiling,
+   * unconstrained for this fixture's real cost), `productionCheck` returns
+   * `allowed: true, depth: 3` — strictly greater than the `direct-grant-
+   * path-reverifies` fixture's own `depth: 1` for a permission of the
+   * identical rewrite-rule shape, which is the load-bearing contrast: the
+   * only structural difference between the two fixtures is how many levels
+   * of real, stored `relation_tuples` rows separate the object from the
+   * subject, and that difference is exactly what shows up in `depth` here.
+   * Also independently confirmed via the same live probe that this
+   * fixture's own allow/deny boundary matches `cross-resolver-agreement
+   * .integration.test.ts`'s already-verified boundary for the identical
+   * tuple shape (denied at `maxDepth: 3`, allowed at `maxDepth: 4`) — the
+   * two files agree on where this fixture's real cost sits, from two
+   * independently written test files.
+   */
+  it('depth-reflects-real-sql-side-recursive-cte-traversal-through-nested-group-membership-not-just-the-ts-level-walk', async () => {
+    const groupNs = uniqueName('group');
+    const docNs = uniqueName('doc');
+    const source = [
+      `namespace ${groupNs} {`,
+      `  relation member: user | ${groupNs}#member`,
+      '}',
+      '',
+      `namespace ${docNs} {`,
+      `  relation viewer: user | ${groupNs}#member`,
+      '  permission view = viewer',
+      '}',
+    ].join('\n');
+    await publishOk(source);
+
+    const objectId = uniqueName('obj');
+    const g0 = uniqueName('g0');
+    const g1 = uniqueName('g1');
+    const g2 = uniqueName('g2');
+
+    // doc:obj --viewer--> group:g0#member --member--> group:g1#member
+    //   --member--> group:g2#member --member--> user:alice (direct grant)
+    await writeOk(tuple(docNs, objectId, 'viewer', groupNs, g0, 'member'));
+    await writeOk(tuple(groupNs, g0, 'member', groupNs, g1, 'member'));
+    await writeOk(tuple(groupNs, g1, 'member', groupNs, g2, 'member'));
+    await writeOk(tuple(groupNs, g2, 'member', 'user', 'alice'));
+
+    const result = await productionCheck(pool, ref('user', 'alice'), ref(docNs, objectId), 'view', {
+      maxDepth: 25,
+    });
+
+    expect(result.allowed).toBe(true);
+    // The literal claim: a check whose permission is exactly as shallow as
+    // the direct-grant fixture above (one computedUserset hop) still
+    // reports a deeper `depth` here, because real SQL-side recursion was
+    // genuinely required to find the grant — the number is not an echo of
+    // rewrite-rule-tree shallowness alone.
+    expect(result.depth).toBe(3);
+    expect(result.depth).toBeGreaterThan(1);
+    expect(result.depth).toBeLessThan(25);
+
+    // Independently re-verify the produced path against fresh Postgres
+    // queries too, matching this file's own established discipline for
+    // every other positive fixture — a deep `depth` number paired with a
+    // resolution path that doesn't actually check out would be its own
+    // kind of bug.
+    expect(result.path).toBeDefined();
+    if (!result.path) return;
+    expect(
+      await verifyResolutionStep(ref('user', 'alice'), ref(docNs, objectId), 'view', result.path),
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

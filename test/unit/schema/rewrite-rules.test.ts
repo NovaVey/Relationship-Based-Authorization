@@ -245,6 +245,89 @@ describe('every rewrite-rule kind compiles correctly in isolation, with no other
   });
 });
 
+describe('a-permission-expression-mixing-and-with-or-parses-with-and-binding-tighter-per-docs-decisions-md-d-011', () => {
+  // docs/DECISIONS.md D-011, read directly against `src/schema/dsl/
+  // parser.ts`'s own grammar comment before writing this test (per this
+  // task's explicit instruction, since the operator-precedence choice is a
+  // deliberate design decision §5 itself is silent on — the sibling
+  // describe block above ("a-schema-with-every-rewrite-rule-kind-compiles")
+  // explicitly declined to test any mixed-operator expression for exactly
+  // that reason, before D-011 existed to pin it down): `&` binds tighter
+  // than `|`/`-`, which share precedence and associate left-to-right.
+  // `a & b | c` must therefore parse as `(a & b) | c` — a top-level union
+  // of an intersection and a plain reference — never `a & (b | c)`.
+  const source = [
+    'namespace document {',
+    '  relation a: user',
+    '  relation b: user',
+    '  relation c: user',
+    '',
+    '  permission p = a & b | c',
+    '}',
+  ].join('\n');
+
+  it('a-permission-expression-mixing-and-with-or-parses-with-and-binding-tighter-per-docs-decisions-md-d-011', () => {
+    const schema = compileOk(source);
+    const rewrite = schema.namespaces['document']?.permissions['p']?.rewrite;
+
+    // Pin the exact tree shape, not just "it compiles" — a compiler that
+    // silently inverted precedence to `intersection(a, union(b, c))` would
+    // still compile this source successfully, so `toEqual` on the whole
+    // structure is the load-bearing assertion here, not a `.kind` check
+    // alone.
+    const expected: RewriteRule = {
+      kind: 'union',
+      children: [
+        {
+          kind: 'intersection',
+          children: [
+            { kind: 'computedUserset', name: 'a' },
+            { kind: 'computedUserset', name: 'b' },
+          ],
+        },
+        { kind: 'computedUserset', name: 'c' },
+      ],
+    };
+    expect(rewrite).toEqual(expected);
+
+    // Belt-and-suspenders against the specific wrong answer D-011 names as
+    // the rejected alternative: this must NOT be an intersection at the
+    // top level.
+    expect(rewrite?.kind).not.toBe('intersection');
+  });
+
+  it('the-mirror-case-or-then-and-also-binds-and-tighter-regardless-of-which-side-it-appears-on', () => {
+    // `a | b & c` must parse as `a | (b & c)` — confirms the precedence
+    // isn't an artifact of `&` appearing textually first in the fixture
+    // above.
+    const mirrorSource = [
+      'namespace document {',
+      '  relation a: user',
+      '  relation b: user',
+      '  relation c: user',
+      '',
+      '  permission p = a | b & c',
+      '}',
+    ].join('\n');
+    const schema = compileOk(mirrorSource);
+    const rewrite = schema.namespaces['document']?.permissions['p']?.rewrite;
+    const expected: RewriteRule = {
+      kind: 'union',
+      children: [
+        { kind: 'computedUserset', name: 'a' },
+        {
+          kind: 'intersection',
+          children: [
+            { kind: 'computedUserset', name: 'b' },
+            { kind: 'computedUserset', name: 'c' },
+          ],
+        },
+      ],
+    };
+    expect(rewrite).toEqual(expected);
+  });
+});
+
 describe('compiling-the-same-source-twice-produces-identical-output', () => {
   // §5 doesn't say this explicitly, but the build spec's broader
   // reproducibility culture (§6.8: every fuzz/soundness run is seeded and

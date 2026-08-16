@@ -83,6 +83,19 @@ describe('an-empty-source-string-is-rejected-not-silently-compiled-as-zero-names
   it('a-source-with-only-whitespace-is-also-rejected-not-treated-as-zero-namespaces', () => {
     const result = compileSchema('   \n\n  \t\n');
     expect(result.ok).toBe(false);
+    if (result.ok) return; // narrows for TS; unreachable given the assertion above
+    // The test's own name promises "not treated as zero namespaces" — that's
+    // a claim about *which* SchemaErrorCode fires, not just that some error
+    // does. A whitespace-only source must fail the same up-front
+    // `source.trim().length === 0` guard the empty-string case above does
+    // (`empty_source`), never fall through to `no_namespaces_declared` (the
+    // code reserved for a source that has real, non-whitespace content —
+    // e.g. only comments — but parses to zero namespace blocks). Asserting
+    // only `result.ok === false` (as this test previously did) would still
+    // pass if a future change silently reclassified whitespace-only input
+    // under the wrong code, or merged the two codes into one.
+    expect(result.errors.some((e) => e.code === 'empty_source')).toBe(true);
+    expect(result.errors.some((e) => e.code === 'no_namespaces_declared')).toBe(false);
   });
 });
 
@@ -160,6 +173,67 @@ describe('a-self-referential-permission-is-rejected-not-left-to-hang-whatever-ev
     ].join('\n');
     const errors = compileErr(cyclicSource);
     expect(errors.some((e) => e.code === 'circular_permission_definition')).toBe(true);
+  });
+});
+
+describe('a tuple-to-userset target namespace absent from the compilation unit is always rejected; a plain relation subject-type namespace absent from it is tolerated — docs/DECISIONS.md D-012', () => {
+  // D-012, read directly against `src/schema/dsl/compiler.ts` before writing
+  // these two tests (per this task's own explicit instruction to confirm
+  // the documented asymmetry against the real, current code rather than
+  // guess from the finding's one-line description): tuple-to-userset
+  // (`rel->perm`) always requires every namespace the followed relation's
+  // subject types can point to be present in *this same compilation unit*
+  // — no exceptions, `tuple_to_userset_unknown_namespace` if not. A plain
+  // relation's own `ns#relation` subject type is checked only when `ns`
+  // happens to be present in the same call; if it isn't, the `#relation`
+  // suffix goes unverified rather than rejected — deliberately, so
+  // `document.authz` and `group.authz` can each compile standalone
+  // referencing `group#member` without requiring one giant combined
+  // compilation unit.
+
+  it('the-strict-half-a-tuple-to-userset-rule-whose-followed-relations-subject-type-namespace-is-absent-from-this-compilation-unit-is-rejected', () => {
+    // `doc`'s only relation, `parent`, declares its subject type as
+    // `external_ns` — a namespace never declared anywhere in this source.
+    // `permission view = parent->view` then tuple-to-userset's through
+    // `parent`, which is exactly the construct D-012 says must always be
+    // rejected, with no dependency on whether `external_ns` happens to be
+    // present elsewhere.
+    const source = [
+      'namespace doc {', // line 1
+      '  relation parent: external_ns', // line 2
+      '', // line 3
+      '  permission view = parent->view', // line 4
+      '}', // line 5
+    ].join('\n');
+    const errors = compileErr(source);
+    const error = errors.find((e) => e.code === 'tuple_to_userset_unknown_namespace');
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('external_ns');
+    expect(error?.line).toBe(4);
+  });
+
+  it('the-soft-half-a-plain-relations-hash-relation-subject-type-naming-a-namespace-absent-from-this-compilation-unit-compiles-without-error', () => {
+    // `doc`'s `editor` relation declares subject types `user` and
+    // `external_group#member` — `external_group` is never declared
+    // anywhere in this source, mirroring the strict fixture above almost
+    // exactly except the reference is a plain relation subject type, never
+    // followed by tuple-to-userset. Per D-012 this must compile clean: the
+    // `#member` suffix goes unverified, not rejected, precisely because
+    // this construct is checked only when the target namespace happens to
+    // be present in the same compilation unit.
+    const source = [
+      'namespace doc {', // line 1
+      '  relation editor: user | external_group#member', // line 2
+      '}', // line 3
+    ].join('\n');
+    const result = compileSchema(source);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const editor = result.schema.namespaces['doc']?.relations['editor'];
+    expect(editor?.subjectTypes).toContainEqual({
+      namespace: 'external_group',
+      relation: 'member',
+    });
   });
 });
 

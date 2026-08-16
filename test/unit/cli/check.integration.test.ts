@@ -104,4 +104,48 @@ describe('authz check really persists a checks row, end to end through the CLI',
     expect(rows[0]?.resolution_path).not.toBeNull();
     expect(Number.isInteger(rows[0]?.depth)).toBe(true);
   });
+
+  /**
+   * The denied half — full-repo audit finding #20: the CLI's only prior
+   * test covered exclusively the allowed path. §9 Phase 6's own exit
+   * criterion states "every check, allowed or denied, is logged" — a
+   * `checks` row for a denial that never got written (or got written with
+   * `allowed: true` by mistake) would be exactly the kind of gap that
+   * criterion exists to rule out, and nothing previously exercised it
+   * through the real CLI command function.
+   */
+  it('a-real-cli-check-invocation-with-no-matching-tuple-prints-denied-exits-0-and-still-writes-a-checks-row-with-allowed-false', async () => {
+    const ns = uniqueName('doc');
+    await publishOk(
+      [`namespace ${ns} {`, '  relation viewer: user', '', '  permission view = viewer', '}'].join(
+        '\n',
+      ),
+    );
+    const objectId = uniqueName('obj');
+    // Deliberately never written to — no tuple names 'heidi' anywhere on
+    // this object, so the check must resolve denied.
+
+    process.exitCode = undefined;
+    await check('user:heidi', 'view', `${ns}:${objectId}`, {});
+
+    // Denial is information, not an error — §7's own exit-code table (see
+    // check.ts's own doc comment): 0, not 1, not 3.
+    expect(process.exitCode).toBeUndefined();
+
+    const { rows } = await verifyPool.query(
+      `select allowed, resolution_path, depth from checks
+       where subject_ns = 'user' and subject_id = 'heidi' and relation = 'view'
+         and object_ns = $1 and object_id = $2
+       order by checked_at desc
+       limit 1`,
+      [ns, objectId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.allowed).toBe(false);
+    // `performCheck`'s own contract: `resolution_path` populated iff
+    // `allowed` is true — a denial must never carry a stale or fabricated
+    // path.
+    expect(rows[0]?.resolution_path).toBeNull();
+    expect(Number.isInteger(rows[0]?.depth)).toBe(true);
+  });
 });
