@@ -785,6 +785,62 @@ export function renderDivergenceMarkdown(divergence: DivergenceRecord, index: nu
   return lines;
 }
 
+/**
+ * Rendered when `authz soundness run --format markdown` cannot produce a
+ * verdict at all — `runSoundnessFuzz` threw (DB unreachable, a generator
+ * bug, anything not caught internally) or a precondition like
+ * `DATABASE_URL` was never set, before any `SoundnessRunResult` ever
+ * existed to render via `renderSoundnessMarkdown` above. Called from
+ * `src/cli/commands/soundness.ts`'s own `catch` block and its
+ * `DATABASE_URL`-missing early return — both are the exit-code-3
+ * "infrastructure failure" case (`src/report/exitCodes.ts`'s own doc
+ * comment). Exists specifically because `.github/workflows/soundness.yml`
+ * captures this command's stdout verbatim as `soundness-report.md`, which
+ * `scripts/post-soundness-comment.mjs` posts — or PATCHes the existing
+ * *tracked* comment to, unconditionally — as the literal PR-comment body.
+ * Before this function existed, that `catch` block printed nothing to
+ * stdout at all: a single infra hiccup captured a 0-byte file and silently
+ * blanked the PR's last known-good soundness comment, with no report and no
+ * visible sign anything had gone wrong to a human reading the PR thread
+ * (the CI job itself still went red via `exitCode 3` — the job's own
+ * pass/fail state was never the problem; the *comment* going silently blank
+ * was).
+ *
+ * Starts with `SOUNDNESS_REPORT_MARKER` for the same reason every real
+ * report does: `decidePrCommentAction` (`src/report/prComment.ts`) matches
+ * a prior comment against that exact string to decide "update this one" vs.
+ * "post a new one." Omitting it here would mean the *next successful* run
+ * doesn't recognize this failure comment as "the" tracked soundness
+ * comment, creates a brand-new comment instead, and this one sits on the PR
+ * forever, orphaned — breaking the "update in place, never stack" contract
+ * for exactly the run that most needs a human to notice it.
+ *
+ * Deliberately **not** shaped like a real verdict line: no `SOUND`/
+ * `UNSOUND`/`INSUFFICIENT_COVERAGE` word, no `false_grant`/`false_deny`
+ * count, because none was ever computed — reporting `0 false_grant` here
+ * would be indistinguishable from a genuine, measured `sound` result, and
+ * this project's own copy rules forbid reporting `0 false_grant` as
+ * anything other than "a measured result of a specific fuzz budget." This
+ * message says plainly that no check ran at all, and includes the real
+ * error text rather than a vague "something went wrong."
+ */
+export function renderSoundnessInfrastructureFailureMarkdown(message: string): string {
+  return [
+    SOUNDNESS_REPORT_MARKER,
+    '',
+    '## INFRASTRUCTURE_FAILURE — soundness check did not run',
+    '',
+    'No verdict was produced — the run did not reach a single query check. This is not a ' +
+      '`sound` result: `0 false_grant` is never reported here, because no queries ran to report ' +
+      'it about.',
+    '',
+    `Error: \`${message}\``,
+    '',
+    'Check that the target database is reachable and correctly configured, then rerun `authz ' +
+      'soundness run`.',
+  ].join('\n');
+}
+
 export interface RenderSoundnessMarkdownOptions {
   /**
    * Soft cap on how many `false_deny` entries render their full path before

@@ -17,7 +17,26 @@
  * script imports the real, tested `decidePrCommentAction` from the build
  * output directly, so there is exactly one implementation of "which
  * comment to update," never two that could drift). See
- * `docs/DECISIONS.md`.
+ * `docs/DECISIONS.md` (D-046, D-068).
+ *
+ * **This script refuses to post or update the tracked comment with an
+ * empty body (D-068).** `authz soundness run --format markdown`'s own
+ * `catch` block (`src/cli/commands/soundness.ts`) is the primary fix for
+ * "stdout must never be empty on an infrastructure failure" — this is a
+ * narrow, second-layer check, not a substitute for that fix: it protects
+ * against any *other*, unforeseen way `soundness-report.md` could end up
+ * empty (a crash before `soundnessRun` even runs, a future regression that
+ * reintroduces a silent-stdout code path, a disk/redirection problem in the
+ * workflow step itself) that the CLI-level fix, by construction, can't
+ * reach. It checks for literally empty-or-whitespace-only content only —
+ * never a length threshold or any other heuristic — because a genuine
+ * `sound` verdict's own rendered markdown is legitimately short, and this
+ * script must never treat "short" as suspect the way it correctly treats
+ * "blank" as suspect. On a blank report, this script throws (failing the
+ * step, and the job) *before* calling the GitHub API at all — the existing,
+ * already-tracked comment (if any) is left completely untouched rather than
+ * being overwritten with a placeholder, so the last known-good report stays
+ * visible on the PR either way.
  */
 import { readFileSync } from 'node:fs';
 import { decidePrCommentAction } from '../dist/report/prComment.js';
@@ -55,6 +74,19 @@ if (typeof prNumberRaw !== 'number' || !Number.isInteger(prNumberRaw) || prNumbe
 const prNumber = prNumberRaw;
 
 const body = readFileSync(reportPath, 'utf8');
+
+// See this file's own top-of-file doc comment ("This script refuses to
+// post or update the tracked comment with an empty body") — a
+// literally-blank report is never a legitimate soundness result, and must
+// never silently become (or overwrite) a PR comment.
+if (body.trim().length === 0) {
+  throw new Error(
+    `${reportPath} is empty — \`authz soundness run --format markdown\` produced no report on ` +
+      `stdout. Refusing to post or overwrite the tracked soundness PR comment with a blank body ` +
+      `(that would silently erase the last known-good report). See the "Run soundness fuzz" ` +
+      `step's own logged output, above, for the real underlying error.`,
+  );
+}
 
 const apiBase = `https://api.github.com/repos/${repo}`;
 const headers = {

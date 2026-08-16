@@ -47,12 +47,36 @@
  *      compile/publish (a generator bug, not a resolver finding — see
  *      `runner.ts`)
  *   3  infrastructure failure (DB unreachable, etc.)
+ *
+ * **Exit code 3 (infrastructure failure) still prints a stdout report for
+ * `markdown`/`json`, never a silent, empty stdout.** `.github/workflows/
+ * soundness.yml` captures this command's stdout verbatim into
+ * `soundness-report.md`, which `scripts/post-soundness-comment.mjs` posts —
+ * or PATCHes the existing tracked comment to, unconditionally — as the
+ * literal PR-comment body. Both places this function can reach exit code 3
+ * (the `DATABASE_URL`-missing early return, and `runSoundnessFuzz` throwing
+ * from the `try` block below) go through `printInfrastructureFailure`,
+ * which prints `renderSoundnessInfrastructureFailureMarkdown`/
+ * `renderSoundnessInfrastructureFailureJsonString` to stdout for those two
+ * formats — never leaving `soundness-report.md` a 0-byte file that would
+ * either post a blank PR comment or silently blank out the last known-good,
+ * already-tracked one via PATCH. `--format text` is unaffected: its
+ * existing `console.error`-only behavior already surfaces the failure
+ * where a human running the CLI directly actually looks (stderr), and
+ * nothing in this repository captures its stdout as a report body the way
+ * the workflow does for `markdown`.
  */
 import { runSoundnessFuzz, type SoundnessRunResult } from '../../soundness/runner.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
-import { renderSoundnessMarkdown } from '../../report/markdown.js';
-import { renderSoundnessJsonString } from '../../report/json.js';
+import {
+  renderSoundnessMarkdown,
+  renderSoundnessInfrastructureFailureMarkdown,
+} from '../../report/markdown.js';
+import {
+  renderSoundnessJsonString,
+  renderSoundnessInfrastructureFailureJsonString,
+} from '../../report/json.js';
 import { soundnessExitCode } from '../../report/exitCodes.js';
 
 export interface SoundnessRunCliOptions {
@@ -103,6 +127,30 @@ function printText(result: SoundnessRunResult, dryRun: boolean): void {
   }
 }
 
+/**
+ * The exit-code-3 ("infrastructure failure") counterpart to `printText` —
+ * called from both places `soundnessRun` can reach that exit code: the
+ * `DATABASE_URL`-missing early return below, and the `catch` block wrapping
+ * `runSoundnessFuzz`. Always logs the real error text to stderr (unchanged
+ * from this command's original, pre-existing behavior, and the only output
+ * `--format text` ever gets for this case); additionally prints an honest
+ * stdout report for `markdown`/`json` specifically, because those two
+ * formats' own contract — stated in this file's own top-of-file doc
+ * comment — is "stdout is the report and nothing else," and
+ * `.github/workflows/soundness.yml` depends on `markdown`'s stdout being
+ * exactly that, never empty. See `renderSoundnessInfrastructureFailureMarkdown`/
+ * `renderSoundnessInfrastructureFailureJsonString` (`src/report/markdown.ts`,
+ * `src/report/json.ts`) for why each is shaped the way it is.
+ */
+function printInfrastructureFailure(format: Format, message: string): void {
+  if (format === 'markdown') {
+    console.log(renderSoundnessInfrastructureFailureMarkdown(message));
+  } else if (format === 'json') {
+    console.log(renderSoundnessInfrastructureFailureJsonString(message));
+  }
+  console.error(`Postgres: ${message}`);
+}
+
 export async function soundnessRun(options: SoundnessRunCliOptions): Promise<void> {
   let queryCount: number | undefined;
   if (options.queries !== undefined) {
@@ -125,7 +173,7 @@ export async function soundnessRun(options: SoundnessRunCliOptions): Promise<voi
   const seed = options.seed ?? env.SOUNDNESS_FUZZ_SEED;
 
   if (!env.DATABASE_URL) {
-    console.error('Postgres: DATABASE_URL is not set — see .env.example.');
+    printInfrastructureFailure(format, 'DATABASE_URL is not set — see .env.example.');
     process.exitCode = 3;
     return;
   }
@@ -155,7 +203,7 @@ export async function soundnessRun(options: SoundnessRunCliOptions): Promise<voi
     }
     // exit code 0 ('sound') leaves process.exitCode unset.
   } catch (err) {
-    console.error(`Postgres: ${(err as Error).message}`);
+    printInfrastructureFailure(format, (err as Error).message);
     process.exitCode = 3;
   } finally {
     await closePool();
