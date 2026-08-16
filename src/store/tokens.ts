@@ -50,9 +50,32 @@ export async function currentToken(pool: Pool): Promise<number | null> {
  * type doesn't survive a value's actual round trip through JSON or a
  * database driver, so this is a real runtime hazard, not a redundant
  * defensive check.
+ *
+ * `Number.isInteger(requested)` is checked explicitly, before the
+ * `observed` comparison, rather than left to fall out of `requested >
+ * observed` on its own (full-repo audit finding #9, MEDIUM, 2026-08-16):
+ * `NaN > observed` — and every other `>`/`<`/`>=`/`<=` comparison
+ * involving `NaN` — evaluates to `false` in JavaScript, never `true`, so a
+ * malformed token (`Number('not-a-token')`, `Number(undefined)`, a caller
+ * that passed a non-integer) would silently pass this "has this been
+ * observed" check instead of throwing — the exact inverse of what a
+ * consistency check must do with an input it cannot make sense of. Every
+ * *current* caller (`src/api/server.ts`'s Zod `atToken: z.number().int()
+ * .nonnegative().optional()` schema, `src/cli/commands/check.ts`'s own
+ * `Number.isInteger(atToken)` guard) already validates before reaching
+ * here, so this never fires against either of today's real call paths —
+ * this is a defensive boundary check for `ProductionCheckOptions.atToken`,
+ * a public type any future caller could hand a malformed value through
+ * directly, not a fix for an observed bug in either existing caller.
  */
 export async function assertTokenObserved(pool: Pool, token: number): Promise<void> {
   const requested = Number(token);
+  if (!Number.isInteger(requested) || requested < 0) {
+    throw new Error(
+      `consistency token ${JSON.stringify(token)} is not a valid token — a consistency token ` +
+        `must be a non-negative integer returned by an earlier write or delete`,
+    );
+  }
   const observed = await currentToken(pool);
   if (observed === null || requested > observed) {
     throw new Error(

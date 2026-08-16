@@ -126,13 +126,20 @@ governance tier:
 - Require signed commits. **Not done** — a real workflow-friction cost (every
   contributor needs a configured signing key) for a benefit that mostly
   matters once commits come from more than one trusted person.
-- Promote `security-audit` from advisory to a required status check, and
-  promote `test-integration` from advisory to required once it's carrying
-  real (non-`.todo()`) assertions. **Not done** — `npm audit` can fail on a
-  transitive dev-only advisory with no available fix, which would block
-  every merge until upstream ships one; a still-`.todo()` integration suite
-  has nothing to fail on yet either way. Advisory keeps both visible
-  without a false-failure mode.
+- Promote `security-audit` and `test-integration` from advisory to required
+  status checks. **Not done** — `npm audit` can fail on a transitive
+  dev-only advisory with no available fix, which would block every merge
+  until upstream ships one; `test-integration` runs a real, non-`.todo()`
+  suite today (13 files, zero remaining `.todo()`s as of full-repo audit
+  finding #18, MEDIUM, 2026-08-16 — this bullet previously, incorrectly,
+  gave "a still-`.todo()` integration suite has nothing to fail on yet" as
+  its own reason, which had been stale since roughly Phase 2), but
+  container-based tests carry more infra-flakiness risk than the pure unit
+  suite (`.github/workflows/ci.yml`'s own `test-integration` job comment
+  makes the identical point) — a flaky Postgres testcontainer spin-up
+  failing an unrelated PR's merge is a worse failure mode than the
+  advisory status quo. Advisory keeps both visible without a false-failure
+  mode.
 
 The items above are intentionally left as a manual choice for whoever is
 running this repo, not something to silently flip on.

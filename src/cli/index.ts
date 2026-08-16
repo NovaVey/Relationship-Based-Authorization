@@ -6,7 +6,7 @@
  * be exactly the "half-finished implementation" this project's own rules
  * warn against.
  */
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 
 import { doctor } from './commands/doctor.js';
 import { compileSchemaFile, publishSchemaFile } from './commands/schema.js';
@@ -24,7 +24,11 @@ const program = new Command();
 program
   .name(packageName)
   .description('Relationship-based authorization service CLI')
-  .version(packageVersion);
+  .version(packageVersion)
+  // Makes Commander throw a `CommanderError` instead of calling
+  // `process.exit` directly on a usage error (its own documented
+  // mechanism) — see the `try`/`catch` around `parseAsync` below for why.
+  .exitOverride();
 
 program
   .command('doctor')
@@ -131,4 +135,39 @@ program
     await serve();
   });
 
-await program.parseAsync(process.argv);
+/**
+ * With no `exitOverride()`, Commander calls `process.exit` directly from
+ * deep inside `parseAsync` on any usage error (a typo'd flag, a missing
+ * argument, an unknown subcommand) — *before* control ever reaches an
+ * individual command's own `.action()` handler. That default exit code is
+ * always `1` (confirmed by reading `node_modules/commander/lib/command.js`
+ * directly: every real usage error funnels through `Command.error()`,
+ * whose own `exitCode = config.exitCode || 1` default is never overridden
+ * with anything else anywhere in that library) — which collides with
+ * `authz soundness run`'s own security-significant exit code 1 ("verdict
+ * unsound — at least one `false_grant`, always blocking", see
+ * `src/cli/commands/soundness.ts`'s own top-of-file exit-code table): a
+ * plain CLI usage mistake would exit with the exact same code this project
+ * reserves for a real, blocking security finding, indistinguishable to any
+ * script or CI step that branches on exit code alone (full-repo audit
+ * finding #16, MEDIUM, 2026-08-16 — see `docs/DECISIONS.md`).
+ *
+ * `exitOverride()` above makes Commander throw that same `CommanderError`
+ * here instead, so it can be remapped before anything actually exits.
+ * Commander itself only ever constructs two exit codes — confirmed by the
+ * same source read, no other value is ever passed to `_exit`/`CommanderError`
+ * anywhere in `commander/lib/*.js`: `0` for `--help`/`--version` (a
+ * non-error display, left untouched) and `1` for every real usage error,
+ * remapped here to `2` — this project's own established "malformed
+ * argument" convention, already used by every command's own argument
+ * validation (e.g. `soundnessRun`'s `--queries`/`--format` checks,
+ * `check.ts`'s `--at-token` check) — so a Commander-level usage error now
+ * reads identically to every other kind of malformed-CLI-input failure,
+ * and never collides with `0`, `1`, or `3` as used anywhere in this CLI.
+ */
+try {
+  await program.parseAsync(process.argv);
+} catch (err) {
+  if (!(err instanceof CommanderError)) throw err;
+  process.exitCode = err.exitCode === 1 ? 2 : err.exitCode;
+}

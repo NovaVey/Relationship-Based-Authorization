@@ -296,18 +296,54 @@ export function schemaPublishResponse(result: PublishResult): SchemaPublishApiRe
 
 export type HealthDatabaseStatus = { reachable: true } | { reachable: false; error: string };
 
+/**
+ * The outcome of the downstream `listLatestNamespaceVersions` query,
+ * deliberately independent of `HealthDatabaseStatus` above — full-repo
+ * audit finding #22 (docs/DECISIONS.md, MEDIUM, 2026-08-16). Before this
+ * type existed, `src/api/server.ts`'s `/health` handler wrapped both the
+ * `select 1` connectivity probe *and* this listing query in one try/catch,
+ * so a listing-query failure with a perfectly reachable database (e.g. an
+ * unapplied migration leaving the underlying table missing or malformed)
+ * was reported as `database.reachable: false` — a claim about the database
+ * that was simply untrue; Postgres answered `select 1` fine. Splitting the
+ * two lets each answer only the question it actually observed:
+ * `HealthDatabaseStatus.reachable` answers "did the connectivity probe
+ * succeed," this type answers "did the namespace-listing query succeed" —
+ * and the two are now free to disagree (`reachable: true` alongside
+ * `{ ok: false, ... }` here is exactly the case this type exists to make
+ * representable, where before it was structurally impossible to say).
+ *
+ * Mirrors `HealthDatabaseStatus`'s own `{ x: true } | { x: false; error:
+ * string }` shape, with `ok` in place of `reachable` — matching this
+ * codebase's own established "did this operation succeed" naming
+ * (`WriteTupleResult`/`DeleteTupleResult`/`PublishResult`/
+ * `SchemaCompileResult`, every one `{ ok: true, ... } | { ok: false, ... }`)
+ * rather than reusing `reachable`, which names a connectivity probe
+ * specifically and would misdescribe a query that ran against a reachable
+ * database and still failed.
+ */
+export type HealthNamespaceListStatus =
+  { ok: true; namespaces: PublishedNamespace[] } | { ok: false; error: string };
+
 export interface HealthResponseBody {
   status: 'ok' | 'unavailable';
   database: HealthDatabaseStatus;
   /**
-   * Every currently-published namespace's latest version — §9 Phase 8's own
-   * exact wording ("reporting DB connectivity and the current namespace
-   * config versions"). Always `[]` when `database.reachable` is `false`:
-   * this list can only be trustworthy if it was actually just fetched from
-   * a reachable database, never a stale value from a previous successful
-   * call held onto across a later failure.
+   * The downstream namespace-listing query's own outcome — see
+   * `HealthNamespaceListStatus`'s own doc comment and full-repo audit
+   * finding #22. `{ ok: false, error }` covers two distinct real causes,
+   * both forced by `healthResponse` rather than left for a caller to get
+   * right: the connectivity probe itself failed (the listing query was
+   * never even attempted — `error` says so explicitly, never a stale or
+   * invented namespace list), or the probe succeeded but the listing query
+   * itself failed. `{ ok: true, namespaces }` — `namespaces` possibly a
+   * genuinely empty array for a deployment with nothing published yet, and
+   * that emptiness is exactly what makes this an honest signal: only
+   * reachable *here* by both the probe and the query actually succeeding,
+   * never confusable with "the query failed," which is the other, `ok:
+   * false` branch of this same field.
    */
-  namespaces: PublishedNamespace[];
+  namespaces: HealthNamespaceListStatus;
 }
 
 export type HealthApiResponse =
@@ -318,35 +354,62 @@ export type HealthApiResponse =
  * (report-designer brief: "keep the same 'someone skimming decides what
  * they need to know from this alone' discipline already applied to
  * `renderHeadline`"). Three things, in the order they matter: is the
- * service's one real dependency reachable, what does that make the overall
- * `status`, and — only when reachable — what schema state is actually live
- * right now. `database.reachable: false` always forces `status: 'unavailable'`
- * and an empty `namespaces` list regardless of what the caller passes for
- * it — see `namespaces`'s own doc comment — so this function is the single
- * place that invariant holds, not something every future caller has to
- * remember to enforce itself.
+ * service's one real dependency reachable, did the one query this route
+ * actually needs from it succeed, and what does that make the overall
+ * `status`.
  *
- * **503, not 500, when unreachable** — same reasoning as
- * `infrastructureUnavailableError` in `src/api/errors.ts`: "Postgres is
- * down" is a distinct, well-understood condition from "this route's own
- * code has a bug," and 503 is what most uptime/load-balancer tooling
- * specifically polls a health endpoint to detect. A monitoring setup that
- * alerts on any non-2xx from `/health` gets the right signal either way;
- * one that specifically distinguishes 503 from 500 gets the *more useful*
- * signal — "the dependency is down," not "the health check itself broke."
+ * **Fails closed on either failure, independently diagnosed** (full-repo
+ * audit finding #22). `database.reachable: false` always forces
+ * `status: 'unavailable'`, `503`, and `namespaces: { ok: false, error: ... }`
+ * stating plainly that listing was never attempted — regardless of whatever
+ * `namespaceList` its caller passes for that case, since a failed probe
+ * means the listing query genuinely never ran and nothing the caller passes
+ * could be trustworthy. A *reachable* database whose namespace-listing query
+ * itself failed (`namespaceList.ok === false`) still forces the identical
+ * `status: 'unavailable'` / `503` outcome — a credible skeptic in the audit
+ * report argued fail-closed is operationally correct regardless of which of
+ * the two failed, and that argument is accepted here — but `database`
+ * still, truthfully, reports `{ reachable: true }`, and `namespaces` still
+ * carries the real query error rather than a generic "unreachable" claim.
+ * This function is the single place both invariants hold, not something
+ * every future caller has to remember to enforce itself.
+ *
+ * **503, not 500, on either failure** — same reasoning as
+ * `infrastructureUnavailableError` in `src/api/errors.ts`: "a dependency (or
+ * a query against it) is down" is a distinct, well-understood condition
+ * from "this route's own code has a bug," and 503 is what most
+ * uptime/load-balancer tooling specifically polls a health endpoint to
+ * detect. A monitoring setup that alerts on any non-2xx from `/health` gets
+ * the right signal either way; one that specifically distinguishes 503 from
+ * 500 gets the *more useful* signal — "something downstream is down," not
+ * "the health check itself broke."
  */
 export function healthResponse(
   database: HealthDatabaseStatus,
-  namespaces: readonly PublishedNamespace[],
+  namespaceList: HealthNamespaceListStatus,
 ): HealthApiResponse {
   if (!database.reachable) {
     return {
       status: 503,
-      body: { status: 'unavailable', database, namespaces: [] },
+      body: {
+        status: 'unavailable',
+        database,
+        namespaces: { ok: false, error: 'not attempted — database unreachable' },
+      },
+    };
+  }
+  if (!namespaceList.ok) {
+    return {
+      status: 503,
+      body: { status: 'unavailable', database, namespaces: namespaceList },
     };
   }
   return {
     status: 200,
-    body: { status: 'ok', database, namespaces: [...namespaces] },
+    body: {
+      status: 'ok',
+      database,
+      namespaces: { ok: true, namespaces: [...namespaceList.namespaces] },
+    },
   };
 }

@@ -18,7 +18,10 @@ import { describe, expect, it } from 'vitest';
 import { compileSchema } from '../../../src/schema/dsl/compiler.js';
 import { formatSchemaError } from '../../../src/schema/dsl/errors.js';
 import type { CompiledSchema } from '../../../src/schema/dsl/types.js';
-import { referenceCheck } from '../../../src/resolve/reference/resolver.js';
+import {
+  referenceCheck,
+  DEFAULT_REFERENCE_MAX_DEPTH,
+} from '../../../src/resolve/reference/resolver.js';
 import type { EntityRef, ReferenceTuple } from '../../../src/resolve/reference/resolver.js';
 
 function compileOk(source: string): CompiledSchema {
@@ -116,5 +119,68 @@ describe('the-depth-budget-bounds-an-acyclic-but-very-deep-chain', () => {
       { maxDepth: 5 },
     );
     expect(result.allowed).toBe(true);
+  });
+});
+
+describe('a genuinely omitted maxDepth falls back to DEFAULT_REFERENCE_MAX_DEPTH, not some other implicit ceiling', () => {
+  // Every other test in this file passes an explicit `maxDepth` (by this
+  // file's own top-of-file doc comment, deliberately, "so the test runs
+  // fast and is unambiguously testing the ceiling itself"). None of them
+  // proves the *fallback* actually works — a `referenceCheck` call with
+  // the whole 6th argument left out entirely (not `{}`, not
+  // `{ maxDepth: DEFAULT_REFERENCE_MAX_DEPTH }` spelled out — genuinely
+  // absent) exercises `ReferenceCheckOptions`'s own default value
+  // (`options: ReferenceCheckOptions = {}`) composing correctly with
+  // `options.maxDepth ?? DEFAULT_REFERENCE_MAX_DEPTH`'s own fallback. A
+  // regression that broke either default (e.g. the parameter default
+  // silently becoming required, or the `??` becoming `||` and treating
+  // `maxDepth: 0` as "unset") would only show up on a call site that
+  // truly omits the option, which is exactly what this test is.
+  it('a-check-with-maxDepth-genuinely-omitted-from-the-call-still-resolves-a-grant-well-past-any-of-this-files-own-small-explicit-ceilings', () => {
+    const schema = compileOk(SOURCE);
+    // Reuses this file's own 14-hop chain (CHAIN_LENGTH = 15) — deep enough
+    // to exceed every small explicit `maxDepth` used elsewhere in this file
+    // (5), while remaining trivially within `DEFAULT_REFERENCE_MAX_DEPTH`
+    // (1000) — so an allowed result here can only be explained by the
+    // fallback actually landing on the real default, not on some smaller
+    // implicit ceiling silently substituted in the option's absence.
+    const tuples = buildChainTuples('priya');
+
+    // The literal point of the test: no 6th argument at all.
+    const result = referenceCheck(
+      schema,
+      tuples,
+      ref('user', 'priya'),
+      ref('folder', 'f0'),
+      'view',
+    );
+
+    expect(result.allowed).toBe(true);
+  });
+
+  it('the-fallback-genuinely-is-DEFAULT_REFERENCE_MAX_DEPTH-a-chain-built-to-sit-exactly-one-hop-past-it-is-denied-with-the-option-omitted', () => {
+    // The positive case above alone can't rule out an accidentally-huge
+    // fallback (e.g. `Infinity`) standing in for the real, finite default —
+    // it would also resolve this fixture allowed. This control pins the
+    // fallback to the *exact* documented constant: a chain one hop longer
+    // than `DEFAULT_REFERENCE_MAX_DEPTH` must be denied, with `maxDepth`
+    // still genuinely omitted from the call.
+    const schema = compileOk(SOURCE);
+    const overLength = DEFAULT_REFERENCE_MAX_DEPTH + 1;
+    const tuples: ReferenceTuple[] = [];
+    for (let i = 0; i < overLength; i++) {
+      tuples.push(tuple('folder', `g${i}`, 'parent', 'folder', `g${i + 1}`));
+    }
+    tuples.push(tuple('folder', `g${overLength}`, 'editor', 'user', 'quinn'));
+
+    const result = referenceCheck(
+      schema,
+      tuples,
+      ref('user', 'quinn'),
+      ref('folder', 'g0'),
+      'view',
+    );
+
+    expect(result.allowed).toBe(false);
   });
 });

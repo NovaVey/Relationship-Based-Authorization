@@ -42,40 +42,60 @@
  *   0  verdict `sound`
  *   1  verdict `unsound` — at least one `false_grant` (§6.5: always
  *      blocking, regardless of aggregate rate or critical-namespace status)
- *   2  verdict `insufficient_coverage`, or a malformed `--queries`/`--seed`/
- *      `--format` argument, or the generated fixture itself failed to
- *      compile/publish (a generator bug, not a resolver finding — see
- *      `runner.ts`)
- *   3  infrastructure failure (DB unreachable, etc.)
+ *   2  verdict `insufficient_coverage`, a malformed `--queries`/`--seed`/
+ *      `--format` argument, or `runSoundnessFuzz` threw a
+ *      `SoundnessFixtureError` — the generated fixture itself failed to
+ *      compile/publish/write (a generator bug, not a resolver finding —
+ *      see `runner.ts`). **Implemented by an `instanceof
+ *      SoundnessFixtureError` check in the `catch` block below** (full-repo
+ *      audit finding #12, MEDIUM, 2026-08-16 — before this class existed,
+ *      every thrown error, fixture bug or not, fell into the exit-code-3
+ *      branch below; see `docs/DECISIONS.md`).
+ *   3  infrastructure failure (DB unreachable, an unexpected
+ *      `soundness_runs` insert response, etc.) — any `runSoundnessFuzz`
+ *      throw that is *not* a `SoundnessFixtureError`.
  *
- * **Exit code 3 (infrastructure failure) still prints a stdout report for
- * `markdown`/`json`, never a silent, empty stdout.** `.github/workflows/
- * soundness.yml` captures this command's stdout verbatim into
- * `soundness-report.md`, which `scripts/post-soundness-comment.mjs` posts —
- * or PATCHes the existing tracked comment to, unconditionally — as the
- * literal PR-comment body. Both places this function can reach exit code 3
- * (the `DATABASE_URL`-missing early return, and `runSoundnessFuzz` throwing
- * from the `try` block below) go through `printInfrastructureFailure`,
- * which prints `renderSoundnessInfrastructureFailureMarkdown`/
- * `renderSoundnessInfrastructureFailureJsonString` to stdout for those two
- * formats — never leaving `soundness-report.md` a 0-byte file that would
- * either post a blank PR comment or silently blank out the last known-good,
- * already-tracked one via PATCH. `--format text` is unaffected: its
- * existing `console.error`-only behavior already surfaces the failure
- * where a human running the CLI directly actually looks (stderr), and
- * nothing in this repository captures its stdout as a report body the way
- * the workflow does for `markdown`.
+ * **Exit codes 2 and 3 each still print a stdout report for
+ * `markdown`/`json`, never a silent, empty stdout — but never each
+ * other's.** `.github/workflows/soundness.yml` captures this command's
+ * stdout verbatim into `soundness-report.md`, which
+ * `scripts/post-soundness-comment.mjs` posts — or PATCHes the existing
+ * tracked comment to, unconditionally — as the literal PR-comment body.
+ * Every place this function can reach exit code 3 (the `DATABASE_URL`-
+ * missing early return, and a non-fixture throw from the `try` block below)
+ * goes through `printInfrastructureFailure`, which prints
+ * `renderSoundnessInfrastructureFailureMarkdown`/
+ * `renderSoundnessInfrastructureFailureJsonString` — framed as a database
+ * problem, `"Postgres: <message>"` on stderr included. A
+ * `SoundnessFixtureError` instead goes through `printFixtureFailure`,
+ * which prints `renderSoundnessFixtureFailureMarkdown`/
+ * `renderSoundnessFixtureFailureJsonString` — deliberately *never* that
+ * `"Postgres: "` framing, since the fixture generator, not the database,
+ * is what actually failed. Neither path ever leaves `soundness-report.md`
+ * a 0-byte file, which would either post a blank PR comment or silently
+ * blank out the last known-good, already-tracked one via PATCH.
+ * `--format text` is unaffected either way: its existing
+ * `console.error`-only behavior already surfaces the failure where a human
+ * running the CLI directly actually looks (stderr), and nothing in this
+ * repository captures its stdout as a report body the way the workflow
+ * does for `markdown`.
  */
-import { runSoundnessFuzz, type SoundnessRunResult } from '../../soundness/runner.js';
+import {
+  runSoundnessFuzz,
+  SoundnessFixtureError,
+  type SoundnessRunResult,
+} from '../../soundness/runner.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
 import {
   renderSoundnessMarkdown,
   renderSoundnessInfrastructureFailureMarkdown,
+  renderSoundnessFixtureFailureMarkdown,
 } from '../../report/markdown.js';
 import {
   renderSoundnessJsonString,
   renderSoundnessInfrastructureFailureJsonString,
+  renderSoundnessFixtureFailureJsonString,
 } from '../../report/json.js';
 import { soundnessExitCode } from '../../report/exitCodes.js';
 
@@ -151,6 +171,29 @@ function printInfrastructureFailure(format: Format, message: string): void {
   console.error(`Postgres: ${message}`);
 }
 
+/**
+ * The exit-code-2 ("fixture failure") counterpart to
+ * `printInfrastructureFailure`, called only when `runSoundnessFuzz` threw a
+ * `SoundnessFixtureError` — the generated fuzz fixture itself was invalid
+ * (a schema compile, publish, or tuple-write failure), never a database
+ * problem (full-repo audit finding #12, MEDIUM, 2026-08-16 — see
+ * `docs/DECISIONS.md`). Deliberately does **not** reuse
+ * `printInfrastructureFailure`: that function's own `"Postgres: "` stderr
+ * prefix and its `renderSoundnessInfrastructureFailureMarkdown`/`Json`
+ * calls both actively mislead a reader into thinking Postgres is the
+ * problem, which is exactly the mislabeling this finding named. Same
+ * "stdout is the report and nothing else" contract for `markdown`/`json`
+ * as its sibling — see that function's own doc comment.
+ */
+function printFixtureFailure(format: Format, message: string): void {
+  if (format === 'markdown') {
+    console.log(renderSoundnessFixtureFailureMarkdown(message));
+  } else if (format === 'json') {
+    console.log(renderSoundnessFixtureFailureJsonString(message));
+  }
+  console.error(message);
+}
+
 export async function soundnessRun(options: SoundnessRunCliOptions): Promise<void> {
   let queryCount: number | undefined;
   if (options.queries !== undefined) {
@@ -203,8 +246,20 @@ export async function soundnessRun(options: SoundnessRunCliOptions): Promise<voi
     }
     // exit code 0 ('sound') leaves process.exitCode unset.
   } catch (err) {
-    printInfrastructureFailure(format, (err as Error).message);
-    process.exitCode = 3;
+    // `SoundnessFixtureError` (`src/soundness/runner.ts`) is thrown only
+    // when the generated fuzz fixture itself was invalid — a generator
+    // bug, per build spec §7's exit-code-2 bucket ("insufficient fuzz
+    // coverage or a schema/tuple validation failure"), never the
+    // exit-code-3 "infrastructure failure" every other thrown error here
+    // still means (full-repo audit finding #12, MEDIUM, 2026-08-16 — this
+    // `catch` previously mapped both identically; see docs/DECISIONS.md).
+    if (err instanceof SoundnessFixtureError) {
+      printFixtureFailure(format, err.message);
+      process.exitCode = 2;
+    } else {
+      printInfrastructureFailure(format, (err as Error).message);
+      process.exitCode = 3;
+    }
   } finally {
     await closePool();
   }

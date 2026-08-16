@@ -530,10 +530,20 @@ describe('GET /health wires pool.query and listLatestNamespaceVersions into heal
     expect(res.statusCode).toBe(200);
     expect(body.status).toBe('ok');
     expect(body.database).toEqual({ reachable: true });
-    expect(body.namespaces).toEqual([{ namespace: 'document', version: 3 }]);
+    // `body.namespaces` is `HealthNamespaceListStatus`
+    // (`src/api/responses.ts`), not a bare array — full-repo audit finding
+    // #22 (a separate, concurrently-landed fix, not one of this phase's own
+    // assigned findings — see `test/unit/api/responses.test.ts`, already
+    // updated for it): the namespace-listing query's own success/failure is
+    // now reported independently of the connectivity probe, so a real
+    // success is always wrapped `{ ok: true, namespaces: [...] }`.
+    expect(body.namespaces).toEqual({
+      ok: true,
+      namespaces: [{ namespace: 'document', version: 3 }],
+    });
   });
 
-  it('an-unreachable-pool-produces-503-status-unavailable-and-an-empty-namespaces-array', async () => {
+  it('an-unreachable-pool-produces-503-status-unavailable-and-a-not-attempted-namespace-listing-failure', async () => {
     poolQuery.mockRejectedValue(new Error('connection refused'));
 
     const res = await app.inject({ method: 'GET', url: '/health' });
@@ -542,8 +552,47 @@ describe('GET /health wires pool.query and listLatestNamespaceVersions into heal
     expect(res.statusCode).toBe(503);
     expect(body.status).toBe('unavailable');
     expect(body.database.reachable).toBe(false);
-    expect(body.database.error).toContain('connection refused');
-    expect(body.namespaces).toEqual([]);
+    // See the sibling reachable-pool test above for why this is a wrapped
+    // `HealthNamespaceListStatus`, not a bare `[]`, since finding #22 —
+    // `reachable: false` always forces `{ ok: false, error: ... }` here,
+    // stating plainly that the listing query was never attempted.
+    expect(body.namespaces).toEqual({ ok: false, error: expect.any(String) });
+
+    // Full-repo audit finding #15 (MEDIUM, 2026-08-16): the raw Postgres
+    // driver error must never reach the wire — this route is deliberately
+    // unauthenticated (load-balancer/uptime-monitor convention, see
+    // server.ts's own doc comment on GET /health), so any network caller
+    // could previously read whatever internal hostname/port/username text
+    // happened to be in the real connection error. Proven as a real
+    // security property, not a renamed string match: the raw thrown
+    // message must not appear ANYWHERE in the response body — not just
+    // absent from `body.database.error`, the one field a narrower
+    // assertion would think to check — and `body.database.error` must be a
+    // fixed, non-empty, generic string instead.
+    expect(JSON.stringify(body)).not.toContain('connection refused');
+    expect(typeof body.database.error).toBe('string');
+    expect(body.database.error.length).toBeGreaterThan(0);
+  });
+
+  it('an-unreachable-pool-produces-the-same-fixed-database-error-text-regardless-of-what-the-real-driver-error-says', async () => {
+    // The generic message must be genuinely fixed — not merely "doesn't
+    // contain THIS error's text" (which a message that echoed some OTHER
+    // substring of the real error could still pass) — proven by triggering
+    // two structurally different real failures and confirming the wire
+    // response is byte-identical either way.
+    poolQuery.mockRejectedValue(new Error('connection refused'));
+    const first = await app.inject({ method: 'GET', url: '/health' });
+    const firstBody = await parseBody(first);
+
+    poolQuery.mockRejectedValue(
+      new Error('password authentication failed for user "internal_admin" at host 10.0.4.12'),
+    );
+    const second = await app.inject({ method: 'GET', url: '/health' });
+    const secondBody = await parseBody(second);
+
+    expect(JSON.stringify(secondBody)).not.toContain('internal_admin');
+    expect(JSON.stringify(secondBody)).not.toContain('10.0.4.12');
+    expect(secondBody.database.error).toBe(firstBody.database.error);
   });
 });
 
@@ -636,5 +685,75 @@ describe("D-065: failed-auth requests never consume a gated route's rate-limit b
     expect(res.statusCode).toBe(200);
     expect(writeSpy).toHaveBeenCalledTimes(1);
     expect(await parseBody(res)).toEqual({ token: 99, created: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. Full-repo audit findings #13/#14 (MEDIUM, 2026-08-16) — server.ts's own
+//    `setNotFoundHandler({ preHandler: app.rateLimit() }, ...)` doc comment:
+//    before this fix, a request to an unmatched path/method never ran any
+//    route's own `onRoute` hook (which is how `@fastify/rate-limit` wires
+//    itself in), so it was rate-limited by nothing at all, AND it returned
+//    Fastify's own raw default 404 body (`{ statusCode, error, message }`,
+//    `error` a bare string) instead of this API's one documented
+//    `{ error: { code, message } }` envelope every other response uses.
+// ---------------------------------------------------------------------------
+
+describe("finding #14: an unmatched route returns this API's own documented 404 envelope, never Fastify's raw default 404 body", () => {
+  it('a-request-to-a-path-matching-no-registered-route-returns-404-with-the-error-code-not-found-message-envelope', async () => {
+    const res = await app.inject({ method: 'GET', url: '/this-route-does-not-exist' });
+    const body = await parseBody(res);
+
+    expect(res.statusCode).toBe(404);
+    expect(body).toEqual({ error: { code: 'not_found', message: expect.any(String) } });
+  });
+
+  it('a-request-to-an-unmatched-route-never-carries-fastifys-own-raw-default-404-shape', async () => {
+    const res = await app.inject({ method: 'GET', url: '/another-path-nothing-registers' });
+    const body = await parseBody(res);
+
+    // Fastify's own default 404 body is `{ statusCode, error, message }`
+    // with `error` a bare string (e.g. `"Not Found"`) — neither key/shape
+    // may appear once this API's own `notFoundError`-built envelope is
+    // wired in via `setNotFoundHandler`.
+    expect(body).not.toHaveProperty('statusCode');
+    expect(typeof body.error).toBe('object');
+    expect(typeof body.error).not.toBe('string');
+  });
+
+  it('an-unmatched-route-404-also-applies-to-a-method-with-no-handler-on-an-otherwise-real-path', async () => {
+    // `/check` is a real path, but only POST is registered on it — PUT
+    // matches no route either, and must hit the exact same handler as a
+    // wholly unknown path.
+    const res = await app.inject({ method: 'PUT', url: '/check' });
+    const body = await parseBody(res);
+
+    expect(res.statusCode).toBe(404);
+    expect(body.error.code).toBe('not_found');
+  });
+});
+
+describe('finding #13: an unmatched route is rate-limited by the same global budget a real route gets, never an unbounded stream of 404s', () => {
+  it('slightly-more-than-100-consecutive-requests-to-a-bogus-path-eventually-return-429-not-404-forever', async () => {
+    // The global default registered in buildServer is `max: 100,
+    // timeWindow: '1 minute'` — this loop deliberately goes slightly past
+    // that ceiling. Before this fix, none of these 105 requests would ever
+    // return anything but 404 (the audit's own reproduction: "150
+    // consecutive requests to a non-existent path never hit a 429").
+    let sawRateLimited = false;
+    for (let i = 0; i < 105; i += 1) {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/yet-another-bogus-path-for-rate-limit-flooding',
+      });
+      if (res.statusCode === 429) {
+        sawRateLimited = true;
+        const body = await parseBody(res);
+        expect(body.error.code).toBe('rate_limited');
+        break;
+      }
+      expect(res.statusCode).toBe(404);
+    }
+    expect(sawRateLimited).toBe(true);
   });
 });

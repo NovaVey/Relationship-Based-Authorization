@@ -52,6 +52,7 @@ export type ApiErrorCode =
   | 'tuple_validation_failed'
   | 'schema_compile_failed'
   | 'unauthorized'
+  | 'not_found'
   | 'rate_limited'
   | 'infrastructure_unavailable'
   | 'internal_error';
@@ -99,6 +100,16 @@ export interface ApiErrorResponse {
  *   than splitting some codes into a 404-shaped response.
  * - `unauthorized` — 401. A missing/wrong `ADMIN_API_KEY` on a gated write
  *   route.
+ * - `not_found` — 404. An HTTP request whose method and path match no route
+ *   this API registers at all — a genuine 404, distinct from a domain-level
+ *   "no published schema for this namespace," which stays
+ *   `tuple_validation_failed`/400 (see `tupleValidationError`'s own doc
+ *   comment for why that stays 400; not repeated here). Added by
+ *   `src/api/server.ts` (main agent, Phase 8): Fastify's own
+ *   `setNotFoundHandler` calls `notFoundError` so an unmatched route still
+ *   gets this API's own consistent error envelope instead of Fastify's
+ *   default 404 body — the same division of labor already documented for
+ *   `rate_limited` below.
  * - `rate_limited` — 429. Added by `src/api/server.ts` (main agent, Phase 8,
  *   alongside the `@fastify/rate-limit` registration — see that file's own
  *   doc comment and `docs/DECISIONS.md`): a caller exceeded the per-route
@@ -122,6 +133,7 @@ export const API_ERROR_STATUS: Readonly<Record<ApiErrorCode, number>> = {
   tuple_validation_failed: 400,
   schema_compile_failed: 400,
   unauthorized: 401,
+  not_found: 404,
   rate_limited: 429,
   infrastructure_unavailable: 503,
   internal_error: 500,
@@ -261,6 +273,22 @@ export function schemaPublishError(errors: readonly string[]): ApiErrorResponse 
  */
 export function unauthorizedError(detail = 'missing or invalid admin API key'): ApiErrorResponse {
   return apiError('unauthorized', `unauthorized — ${detail}`);
+}
+
+/**
+ * An HTTP request whose method and path match no route this API registers —
+ * a genuine 404, never any of this file's other domain-shaped failures (see
+ * `API_ERROR_STATUS`'s own doc comment for the distinction from
+ * `tuple_validation_failed`'s `no_published_schema` case). Called from
+ * `src/api/server.ts`'s Fastify `setNotFoundHandler` (main agent's own
+ * wiring, not this file's concern — see this file's own top-of-file doc
+ * comment, and the same division of labor already documented for
+ * `rateLimitedError` immediately below), so an unmatched route still gets
+ * this API's own consistent error envelope shape instead of Fastify's
+ * default 404 body.
+ */
+export function notFoundError(detail = 'no route matches this method and path'): ApiErrorResponse {
+  return apiError('not_found', `not found — ${detail}`);
 }
 
 /**

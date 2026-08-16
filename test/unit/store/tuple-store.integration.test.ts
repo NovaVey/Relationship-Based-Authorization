@@ -319,6 +319,35 @@ describe('a malformed namespace, relation, or id is rejected before it reaches t
       }
     }
   });
+
+  /**
+   * The mirror image of the `writeTuple` test directly above, against the
+   * identical corpus and the identical unreachable-database pool — full-
+   * repo audit finding #32: `writeTuple`'s malformed-identifier rejection
+   * had this exact injection-shaped/malformed corpus behind it;
+   * `deleteTuple` (`src/store/tuples.ts`) shares `validateIdentifiers` per
+   * its own doc comment ("`const identifierErrors =
+   * validateIdentifiers(tuple);`" appears at the top of both `writeTuple`
+   * and `deleteTuple`), but nothing previously exercised that sharing for
+   * `deleteTuple` specifically. A future refactor that gave `deleteTuple`
+   * its own, weaker validation path (e.g. skipping validation on the
+   * reasoning that "a delete can't create anything, so a malformed
+   * identifier is harmless") would go undetected without this.
+   */
+  it('a-malformed-namespace-relation-or-id-is-also-rejected-by-deleteTuple-before-it-reaches-the-database', async () => {
+    for (const { label, build } of fieldPositions) {
+      for (const payload of INJECTION_PAYLOAD_CORPUS) {
+        const result = await deleteTuple(unreachablePool, build(payload));
+        expect(
+          result.ok,
+          `expected ${label} payload ${JSON.stringify(payload)} to be rejected by deleteTuple`,
+        ).toBe(false);
+        if (result.ok) continue;
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+      }
+    }
+  });
 });
 
 describe('a tuple write is validated against the latest published schema for its namespace', () => {

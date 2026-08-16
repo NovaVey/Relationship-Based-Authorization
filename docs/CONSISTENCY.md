@@ -25,14 +25,23 @@ this document states plainly rather than leaving implicit.
 
 ```sql
 create table write_log (
-  id         bigint generated always as identity primary key,  -- the token
-  operation  text not null,          -- "write" | "delete"
-  tuple      jsonb not null,
-  written_at timestamptz not null default now()
+  id            bigint generated always as identity primary key,
+  token         bigint generated always as (id) stored,  -- the token
+  operation     text not null check (operation in ('write', 'delete')),
+  tuple         jsonb not null,
+  written_at    timestamptz not null default now()
 );
 ```
 
-`write_log.id` is a plain, monotonically increasing integer — every single
+`token` is a generated column, always equal to that row's own `id` —
+deliberately a _separate_ column from `id`, not `id` reused directly under
+a second name. One source of truth (`id` is what Postgres actually
+increments), exposed under the name callers actually reason about ("pin to
+token N") — see `docs/DECISIONS.md` for why this project chose that over
+either a second, independently-tracked counter (which could drift from
+`id`) or having every caller pin to `id` itself (which would leak an
+internal primary-key detail into this project's own public consistency
+vocabulary). Either way, it's monotonically increasing — every single
 `tuple write` or `tuple delete`, across every namespace, advances it by
 one. The CLI prints it (`authz tuple write ... ` → `token 1160`); the API
 returns it (`{"token": 1160, "created": true}`). It is nothing more

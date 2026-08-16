@@ -58,11 +58,73 @@ export async function publishSchema(pool: Pool, sourceDsl: string): Promise<Publ
   }
 }
 
+/**
+ * `select max(version)+1, then insert` is a read-then-write race: two
+ * concurrent `publishSchema` calls targeting the *same* namespace can both
+ * read the same `next_version` before either inserts, and the loser's
+ * `INSERT` then dies on `namespace_configs`'s own uniqueness constraint —
+ * a raw Postgres error thrown out of `publishSchema` instead of its own
+ * `{ ok: false, errors: [...] }` shape. `pg_advisory_xact_lock(hashtext($1))`
+ * closes that window by serializing every `publishOne` call for a given
+ * `namespace` string: the first transaction to reach this line for a
+ * namespace holds the lock until it commits or rolls back, so a second,
+ * concurrent transaction publishing the same namespace blocks *before* it
+ * ever reads `max(version)`, and always computes the next version after the
+ * first one's insert (or its rollback) is visible — never in a lost-update
+ * race with it.
+ *
+ * Two alternatives considered and rejected in favor of this one:
+ *  - `SELECT ... FOR UPDATE`: needs a row to lock, and there may be none
+ *    yet — a namespace's very first publish has no existing
+ *    `namespace_configs` row, so a row lock can't close the race for
+ *    exactly the case (`coalesce(max(version), 0)` defaulting to 0) where
+ *    it matters as much as any later one.
+ *  - Catch the `INSERT`'s unique-constraint violation and retry the whole
+ *    select-then-insert cycle: works, but adds a real retry loop (bounded
+ *    attempts, and code to distinguish *this* constraint violation from any
+ *    other reason the insert could fail) to handle a narrow, admin-gated,
+ *    already-low-probability race after the fact. An advisory lock makes
+ *    the race structurally impossible instead, for less code.
+ *
+ * `hashtext($1)` (int4) rather than `hashtextextended($1, 0)` (bigint,
+ * wider hash space, no implicit cast needed): the task this lock closes is
+ * serializing writes to *this specific, small, admin-curated set of
+ * namespace names* — collisions are already vanishingly unlikely at 32
+ * bits for that population, and even a hash collision between two
+ * different namespace names would only ever cost a spurious lock wait
+ * (briefly, harmlessly serializing two unrelated namespaces' publishes),
+ * never a correctness bug — so `hashtext`'s narrower hash space isn't worth
+ * `hashtextextended`'s marginally less obvious call shape here.
+ * `pg_advisory_xact_lock` is transaction-scoped and needs no matching
+ * unlock call: Postgres releases it automatically at this transaction's own
+ * `COMMIT` or `ROLLBACK` (confirmed against the Postgres advisory-locks
+ * docs, not assumed), which exactly matches `publishSchema`'s own
+ * `BEGIN`/`COMMIT`/`ROLLBACK` transaction wrapping every `publishOne` call
+ * in its loop — no separate release path to remember or leak.
+ *
+ * Multiple namespaces published together (one `pg_advisory_xact_lock` call
+ * per loop iteration in `publishSchema`, one per namespace) could in
+ * principle deadlock against another concurrent multi-namespace publish
+ * that acquires the same two namespaces' locks in the opposite order —
+ * Postgres's own deadlock detector would resolve that by aborting one side
+ * with an ordinary error (the same failure class `ROLLBACK` already handles
+ * here, not a hang). Namespace lock order here is exactly each source DSL
+ * text's own namespace declaration order (`compileParsedNamespaces` builds
+ * `CompiledSchema.namespaces` by iterating parsed namespaces in that order,
+ * and object key insertion order is what `Object.values` in
+ * `publishSchema`'s loop walks), so this only bites two *different* source
+ * texts publishing the same overlapping namespaces in reversed order at the
+ * same time — narrow on top of already-narrow (admin-gated), and left
+ * undefended rather than adding lock-order normalization (e.g. sorting
+ * namespaces before acquiring locks) that would also reorder
+ * `PublishResult.published`, a behavior change out of scope for this fix.
+ */
 async function publishOne(
   client: { query: Pool['query'] },
   config: NamespaceConfig,
   sourceDsl: string,
 ): Promise<number> {
+  await client.query('select pg_advisory_xact_lock(hashtext($1))', [config.namespace]);
   const { rows } = await client.query<{ next_version: number }>(
     `select coalesce(max(version), 0) + 1 as next_version
      from namespace_configs where namespace = $1`,
@@ -113,6 +175,38 @@ export async function getLatestNamespaceConfig(
  * observed as real schema history by anything in between. This is not a
  * general "unpublish a namespace" feature and must not be reached for
  * that purpose — nothing in the CLI or API surface exposes it.
+ *
+ * That "must not" was, until now, enforced only by this comment — nothing
+ * structurally stopped a future caller from `import`ing this function from
+ * anywhere else in `src/` and calling it (full-repo audit finding #26, low
+ * severity: real but narrow, since it requires a future developer to both
+ * ignore this doc comment and reach for a function whose name and doc
+ * comment both say not to). `eslint.config.js` now closes this: a
+ * `no-restricted-imports` block restricting
+ * `importNames: ['deletePublishedNamespaceVersion']` for every file under
+ * `src/**\/*.ts` except `src/soundness/runner.ts` (that config object's own
+ * `ignores`) — a future non-`runner.ts` caller fails `npx eslint .`, not
+ * just a code review that happened to notice this comment. It matches via
+ * `patterns` (gitignore-style, e.g. `**\/schema/publish.js`, plus a second
+ * unanchored `publish.js` entry for a same-directory `./publish.js` import
+ * from a hypothetical future file added directly inside src/schema/ itself)
+ * rather than `paths` (exact string) because ESLint's import rules see each
+ * importer's own literal specifier text, not a resolved module path —
+ * `paths` would need one exact entry per distinct `../` depth every current
+ * and future importer happens to use, `patterns`' glob matches all of them
+ * uniformly (verified directly against the `ignore` package this rule uses
+ * internally, across every real specifier shape in this repo plus that one
+ * same-directory case, not assumed). Scoped to `src/**` only, deliberately not
+ * `test/**`: `test/unit/soundness/runner-dry-run-cleanup-failure.test.ts`
+ * legitimately does `import * as publishModule from '.../schema/publish.js'`
+ * and then `vi.spyOn(publishModule, 'deletePublishedNamespaceVersion')` to
+ * test this exact cleanup path, and `no-restricted-imports` flags *any*
+ * namespace (`import * as x`) import of a path once one of its named
+ * exports is restricted — regardless of which properties are actually read
+ * off that namespace object — so a `test/**` rule would need its own
+ * per-file exemption for that test too, for no benefit: the risk this
+ * closes is a future *production* caller, not a test mocking the one
+ * sanctioned one.
  */
 export async function deletePublishedNamespaceVersion(
   pool: Pool,

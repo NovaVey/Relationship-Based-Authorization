@@ -990,7 +990,7 @@
   // `user | group#member` is what makes nested group membership possible
   // with zero special-cased recursion: a tuple can name another group's
   // *member set* as its subject
-  // (`group:eng#member@group:eng-backend#member`), not just a plain user.
+  // (`group:eng#member@group:eng_backend#member`), not just a plain user.
   // See docs/RELATIONS.md's own walkthrough of the seeded graph's
   // two-level nesting case.
   relation member: user | group#member

@@ -19,14 +19,23 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
       include: ['src/**/*.ts'],
       exclude: ['src/**/index.ts', 'src/**/types.ts'],
-      // No thresholds yet: src/ is currently just Phase 0's env loader, and
-      // the isolation suite is intentionally all `.todo()` until the
-      // phases in .claude/commands/build-authz-service.md that implement
-      // what it tests land — see docs/DECISIONS.md. Restore thresholds
-      // (this repo's previous identity ran 95/95/90/95 stmt/func/branch/
-      // line) once there's real implementation coverage to hold a floor
-      // under; a threshold gate against near-zero coverage would either
-      // fail immediately or be set so low it catches nothing.
+      // Still no thresholds — but not for the reason this comment used to
+      // give (full-repo audit finding #35, MEDIUM, 2026-08-16): it
+      // previously said "src/ is currently just Phase 0's env loader, and
+      // the isolation suite is intentionally all `.todo()`," which was
+      // true when written but has been stale since roughly Phase 2. As of
+      // this fix, src/ has 33 files across all 9 build-spec phases, and
+      // `test/isolation/` carries zero remaining live `.todo()`s (see
+      // docs/github-governance.md's own note on this same finding). A
+      // threshold gate isn't restored here regardless — that's a real,
+      // separate decision (what floor, and against which report — this
+      // config excludes `**/*.integration.test.ts`, so a threshold here
+      // would only ever measure the fast unit suite's own coverage, never
+      // the isolation suite's) worth making deliberately with real
+      // coverage numbers in hand, not as a side effect of correcting a
+      // stale comment. This repo's previous identity ran 95/95/90/95
+      // stmt/func/branch/line — a reasonable starting point to evaluate
+      // against current real numbers when that decision is made.
     },
   },
 });
