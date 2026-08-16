@@ -133,13 +133,25 @@ async function parseBody(res: { payload: string }): Promise<any> {
 
 describe('a structurally malformed request body is rejected with 400 invalid_request, per route', () => {
   it('a-structurally-malformed-check-body-is-rejected-with-400-invalid-request', async () => {
-    const res = await app.inject({ method: 'POST', url: '/check', payload: {} });
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: {},
+      headers: authHeaders(CORRECT_KEY),
+    });
     expect(res.statusCode).toBe(400);
     expect((await parseBody(res)).error.code).toBe('invalid_request');
   });
 
   it('a-structurally-malformed-expand-body-is-rejected-with-400-invalid-request', async () => {
-    const res = await app.inject({ method: 'POST', url: '/expand', payload: {} });
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const res = await app.inject({
+      method: 'POST',
+      url: '/expand',
+      payload: {},
+      headers: authHeaders(CORRECT_KEY),
+    });
     expect(res.statusCode).toBe(400);
     expect((await parseBody(res)).error.code).toBe('invalid_request');
   });
@@ -192,7 +204,7 @@ describe('a structurally malformed request body is rejected with 400 invalid_req
 //    domain call, not just before the response.
 // ---------------------------------------------------------------------------
 
-describe('with ADMIN_API_KEY unset, every gated write route rejects with 401 and never calls its domain function', () => {
+describe('with ADMIN_API_KEY unset, every gated route rejects with 401 and never calls its domain function', () => {
   it('with-admin-api-key-unset-post-tuples-returns-401-and-writetuple-is-never-called', async () => {
     env.ADMIN_API_KEY = undefined;
     const spy = vi
@@ -230,6 +242,32 @@ describe('with ADMIN_API_KEY unset, every gated write route rejects with 401 and
       url: '/schema/publish',
       payload: validSchemaSourceBody,
     });
+
+    expect(res.statusCode).toBe(401);
+    expect((await parseBody(res)).error.code).toBe('unauthorized');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('with-admin-api-key-unset-post-check-returns-401-and-performcheck-is-never-called', async () => {
+    env.ADMIN_API_KEY = undefined;
+    const spy = vi
+      .spyOn(checksModule, 'performCheck')
+      .mockRejectedValue(new Error('performCheck must not be called when ADMIN_API_KEY is unset'));
+
+    const res = await app.inject({ method: 'POST', url: '/check', payload: validCheckBody });
+
+    expect(res.statusCode).toBe(401);
+    expect((await parseBody(res)).error.code).toBe('unauthorized');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('with-admin-api-key-unset-post-expand-returns-401-and-expand-is-never-called', async () => {
+    env.ADMIN_API_KEY = undefined;
+    const spy = vi
+      .spyOn(expandModule, 'expand')
+      .mockRejectedValue(new Error('expand must not be called when ADMIN_API_KEY is unset'));
+
+    const res = await app.inject({ method: 'POST', url: '/expand', payload: validExpandBody });
 
     expect(res.statusCode).toBe(401);
     expect((await parseBody(res)).error.code).toBe('unauthorized');
@@ -291,6 +329,42 @@ describe('with ADMIN_API_KEY set, a wrong bearer key rejects with 401 and never 
     expect((await parseBody(res)).error.code).toBe('unauthorized');
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it('a-wrong-bearer-key-on-post-check-returns-401-and-performcheck-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi
+      .spyOn(checksModule, 'performCheck')
+      .mockRejectedValue(new Error('performCheck must not be called with a wrong key'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: validCheckBody,
+      headers: authHeaders('the-wrong-key'),
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect((await parseBody(res)).error.code).toBe('unauthorized');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a-wrong-bearer-key-on-post-expand-returns-401-and-expand-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi
+      .spyOn(expandModule, 'expand')
+      .mockRejectedValue(new Error('expand must not be called with a wrong key'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/expand',
+      payload: validExpandBody,
+      headers: authHeaders('the-wrong-key'),
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect((await parseBody(res)).error.code).toBe('unauthorized');
+    expect(spy).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -298,7 +372,47 @@ describe('with ADMIN_API_KEY set, a wrong bearer key rejects with 401 and never 
 //    verbatim.
 // ---------------------------------------------------------------------------
 
-describe('with the correct admin key, each gated write route calls its domain function and returns its result verbatim', () => {
+describe('with the correct admin key, each gated route calls its domain function and returns its result verbatim', () => {
+  it('a-correct-admin-key-on-post-check-calls-performcheck-and-returns-its-result-verbatim', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const canned: PerformCheckResult = { allowed: false, depth: 0 };
+    const spy = vi.spyOn(checksModule, 'performCheck').mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: validCheckBody,
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(200);
+    expect((await parseBody(res)).allowed).toBe(false);
+  });
+
+  it('a-correct-admin-key-on-post-expand-calls-expand-and-returns-its-result-verbatim', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const canned: ExpandNode = {
+      kind: 'relation',
+      object: { ns: 'document', id: 'readme' },
+      relation: 'viewer',
+      directSubjects: [{ ns: 'user', id: 'alice' }],
+      usersets: [],
+    };
+    const spy = vi.spyOn(expandModule, 'expand').mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/expand',
+      payload: validExpandBody,
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(200);
+    expect((await parseBody(res)).tree).toEqual(canned);
+  });
+
   it('a-correct-admin-key-on-post-tuples-calls-writetuple-and-returns-its-result-verbatim', async () => {
     env.ADMIN_API_KEY = CORRECT_KEY;
     const canned: WriteTupleResult = { ok: true, token: 42, created: true };
@@ -352,43 +466,13 @@ describe('with the correct admin key, each gated write route calls its domain fu
 });
 
 // ---------------------------------------------------------------------------
-// 4. check/expand/schema-compile require no auth at all.
+// 4. schema-compile requires no auth at all — the only route left that
+//    doesn't, since D-064 gated check/expand alongside the write routes.
+//    check/expand's own auth-required behavior is covered above, in
+//    sections 2/3 alongside the write routes they now share a gate with.
 // ---------------------------------------------------------------------------
 
-describe('check, expand, and schema/compile require no admin key', () => {
-  it('post-check-with-no-authorization-header-reaches-performcheck-and-succeeds', async () => {
-    // Deliberately configured (not unset) — proves the absence of an
-    // Authorization header is fine specifically because this route is
-    // unauthenticated by design, not because no key happens to be set.
-    env.ADMIN_API_KEY = CORRECT_KEY;
-    const canned: PerformCheckResult = { allowed: false, depth: 0 };
-    const spy = vi.spyOn(checksModule, 'performCheck').mockResolvedValue(canned);
-
-    const res = await app.inject({ method: 'POST', url: '/check', payload: validCheckBody });
-
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(res.statusCode).toBe(200);
-    expect((await parseBody(res)).allowed).toBe(false);
-  });
-
-  it('post-expand-with-no-authorization-header-reaches-expand-and-succeeds', async () => {
-    env.ADMIN_API_KEY = CORRECT_KEY;
-    const canned: ExpandNode = {
-      kind: 'relation',
-      object: { ns: 'document', id: 'readme' },
-      relation: 'viewer',
-      directSubjects: [{ ns: 'user', id: 'alice' }],
-      usersets: [],
-    };
-    const spy = vi.spyOn(expandModule, 'expand').mockResolvedValue(canned);
-
-    const res = await app.inject({ method: 'POST', url: '/expand', payload: validExpandBody });
-
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(res.statusCode).toBe(200);
-    expect((await parseBody(res)).tree).toEqual(canned);
-  });
-
+describe('schema/compile requires no admin key', () => {
   it('post-schema-compile-with-no-authorization-header-reaches-compileschema-and-succeeds', async () => {
     env.ADMIN_API_KEY = CORRECT_KEY;
     const canned: SchemaCompileResult = {
@@ -470,9 +554,15 @@ describe('GET /health wires pool.query and listLatestNamespaceVersions into heal
 
 describe('an infrastructure failure inside a route handler maps to 503 infrastructure_unavailable, never a bare 500', () => {
   it('performcheck-rejecting-maps-to-503-infrastructure-unavailable', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
     vi.spyOn(checksModule, 'performCheck').mockRejectedValue(new Error('connection terminated'));
 
-    const res = await app.inject({ method: 'POST', url: '/check', payload: validCheckBody });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: validCheckBody,
+      headers: authHeaders(CORRECT_KEY),
+    });
     const body = await parseBody(res);
 
     expect(res.statusCode).toBe(503);
@@ -498,5 +588,53 @@ describe('a syntactically invalid JSON body is rejected with 400 invalid_request
 
     expect(res.statusCode).toBe(400);
     expect(body.error.code).toBe('invalid_request');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. D-065's actual claim, proven directly rather than just by reading
+//    `requireAdminAuth`'s doc comment: a flood of *failed*-auth requests
+//    against a gated route can never exhaust that route's own rate-limit
+//    budget, because `requireAdminAuth` (in the route's `preHandler` array,
+//    ahead of `@fastify/rate-limit`'s own appended handler — see that
+//    function's doc comment) rejects and short-circuits the hook chain
+//    before the rate-limit handler ever runs. If auth ran *after*
+//    rate-limit counting instead, this test's 21st request — one past
+//    `writeRateLimit`'s own `max: 20` — would already be a `429`, and the
+//    genuine admin's request right after it would be locked out too.
+// ---------------------------------------------------------------------------
+
+describe("D-065: failed-auth requests never consume a gated route's rate-limit budget", () => {
+  it('twenty-five-wrong-key-requests-to-post-tuples-all-return-401-and-a-correct-key-request-immediately-after-still-succeeds', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const writeSpy = vi.spyOn(tuplesModule, 'writeTuple');
+
+    // One more than writeRateLimit's own `max: 20` — if rate-limit counting
+    // ran before auth, request #21 here would already be a 429, not a 401.
+    const FLOOD_SIZE = 25;
+    for (let i = 0; i < FLOOD_SIZE; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/tuples',
+        payload: validTupleBody,
+        headers: authHeaders('wrong-key'),
+      });
+      expect(res.statusCode).toBe(401);
+    }
+    expect(writeSpy).not.toHaveBeenCalled();
+
+    const canned: WriteTupleResult = { ok: true, token: 99, created: true };
+    writeSpy.mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: validTupleBody,
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(await parseBody(res)).toEqual({ token: 99, created: true });
   });
 });
