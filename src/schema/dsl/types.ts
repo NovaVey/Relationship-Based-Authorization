@@ -28,6 +28,17 @@
  * limit is accepted, and one character over is rejected"). Every namespace,
  * relation, and permission name in a compiled schema matches this pattern;
  * the parser enforces it at the point each name is declared.
+ *
+ * This pattern and length cap are necessary but not sufficient for a
+ * *namespace* name specifically: `namespace`/`relation`/`permission`
+ * themselves each satisfy both yet are rejected as reserved words
+ * (`RESERVED_WORDS`, `src/schema/dsl/parser.ts`) — a real, narrow gap
+ * between this exported grammar and what the parser actually enforces for
+ * that one position, found and folded into the property-fuzz test's own
+ * oracle rather than filtered around (see that test's own doc comment).
+ * A subject/object id (`src/store/tuples.ts`'s `validateIdentifiers`) has
+ * no such carve-out — this pattern and length cap are both necessary and
+ * sufficient there.
  */
 export const IDENTIFIER_PATTERN = /^[a-z][a-z0-9_]*$/;
 export const MAX_IDENTIFIER_LENGTH = 63;

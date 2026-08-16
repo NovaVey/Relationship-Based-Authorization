@@ -22,10 +22,16 @@
  */
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
+import { assert, asyncProperty, property, string } from 'fast-check';
 
 import { compileSchema } from '../../src/schema/dsl/compiler.js';
-import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../../src/schema/dsl/types.js';
-import { writeTuple, type TupleKey } from '../../src/store/tuples.js';
+import {
+  IDENTIFIER_PATTERN,
+  MAX_IDENTIFIER_LENGTH,
+  type NamespaceConfig,
+} from '../../src/schema/dsl/types.js';
+import { writeTuple, deleteTuple, type TupleKey } from '../../src/store/tuples.js';
+import { publishSchema } from '../../src/schema/publish.js';
 import {
   tupleWrite,
   parseObjectRef,
@@ -254,9 +260,208 @@ describe('namespace and relation identifiers reject the injection payload corpus
     }
   });
 
-  it.todo(
-    'the compiled namespace config never contains an interpolated raw namespace or relation name in any generated SQL/DDL — only a parameter placeholder or a value that already passed validation',
-  );
+  /**
+   * A DB-free stand-in for a real `Pool`/`PoolClient` that records the
+   * exact SQL text and parameter array of every `query()` call made
+   * against it — whether issued directly against the pool
+   * (`getLatestNamespaceConfig`, called from inside `writeTuple`) or
+   * against a client obtained via `pool.connect()` (`publishSchema`,
+   * `writeTuple`, `deleteTuple` all do `BEGIN`/`COMMIT`/`ROLLBACK` plus
+   * their real statement against a connected client). `handlers` supplies
+   * just enough canned response data — matched by a regex against the
+   * query text — for the function under test to complete its own control
+   * flow (`ok: true`); `calls` is what the test itself inspects
+   * afterward, and is the entire point: this never touches a real
+   * socket, matching this suite's own DB-free discipline.
+   */
+  interface CapturedQuery {
+    text: string;
+    params: unknown[];
+  }
+  interface CapturingPoolHandler {
+    match: RegExp;
+    respond: (params: unknown[]) => unknown;
+  }
+  function makeCapturingPool(handlers: CapturingPoolHandler[]): {
+    pool: Pool;
+    calls: CapturedQuery[];
+  } {
+    const calls: CapturedQuery[] = [];
+    const respond = (text: string, params: unknown[]): unknown => {
+      calls.push({ text, params });
+      for (const handler of handlers) {
+        if (handler.match.test(text)) return handler.respond(params);
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const fakeClient = {
+      query: vi.fn(async (text: string, params?: unknown[]) => respond(text, params ?? [])),
+      release: vi.fn(),
+    };
+    const pool = {
+      query: vi.fn(async (text: string, params?: unknown[]) => respond(text, params ?? [])),
+      connect: vi.fn(async () => fakeClient),
+    } as unknown as Pool;
+    return { pool, calls };
+  }
+
+  /**
+   * The core assertion for "never interpolated, only ever a placeholder":
+   * for every captured call, none of `suspects` (namespace/relation/id
+   * values the test deliberately fed in — including, where applicable, an
+   * actual `INJECTION_PAYLOAD_CORPUS` entry) appears as a literal
+   * substring of the query text itself, and every `$`-prefixed token in
+   * the text is a numeric placeholder within range of that call's own
+   * `params` array — never a spliced-in value masquerading as one.
+   */
+  function assertNoLiteralSplicing(calls: CapturedQuery[], suspects: string[]): void {
+    for (const { text, params } of calls) {
+      for (const suspect of suspects) {
+        if (suspect.length === 0) continue; // an empty string is trivially "contained" in everything — not a meaningful check
+        expect(text).not.toContain(suspect);
+      }
+      const placeholders = text.match(/\$\d+/g) ?? [];
+      for (const placeholder of placeholders) {
+        const index = Number(placeholder.slice(1));
+        expect(index).toBeGreaterThanOrEqual(1);
+        expect(index).toBeLessThanOrEqual(params.length);
+      }
+    }
+  }
+
+  it('the compiled namespace config never contains an interpolated raw namespace or relation name in any generated SQL/DDL — only a parameter placeholder or a value that already passed validation', async () => {
+    // Part A: publishSchema. Every namespace/relation/permission name
+    // inside a *compiled* NamespaceConfig has already been forced through
+    // IDENTIFIER_PATTERN by the parser (the two `it`s directly above) —
+    // INJECTION_PAYLOAD_CORPUS can never survive into `config.namespace`
+    // or a relation/permission key. The one place a genuinely adversarial,
+    // wholly unvalidated string legitimately reaches a real query here is
+    // `sourceDsl` itself: `publishOne`'s own doc comment states it is
+    // stored "verbatim," and the DSL grammar's `//` line comments (see
+    // `parser.ts`'s tokenizer) let arbitrary text — including a real
+    // INJECTION_PAYLOAD_CORPUS entry — ride along inside an otherwise
+    // valid, compiling schema without ever being lexed as an identifier.
+    const injectionMarker = INJECTION_PAYLOAD_CORPUS[0];
+    expect(injectionMarker).toBeDefined();
+    if (!injectionMarker) return;
+    const validNamespace = 'sqlgen_marker_ns';
+    const source =
+      `namespace ${validNamespace} {\n` +
+      `  relation owner: user\n` +
+      `  relation editor: user | group#member\n` +
+      `  permission edit = editor | owner\n` +
+      `} // ${injectionMarker}\n`;
+    const compiled = compileSchema(source);
+    if (!compiled.ok) {
+      throw new Error(
+        `expected fixture schema to compile: ${compiled.errors.map((e) => e.message).join('; ')}`,
+      );
+    }
+
+    const { pool: publishPool, calls: publishCalls } = makeCapturingPool([
+      {
+        match: /select coalesce\(max\(version/i,
+        respond: () => ({ rows: [{ next_version: 1 }] }),
+      },
+      { match: /insert into namespace_configs/i, respond: () => ({ rows: [], rowCount: 1 }) },
+    ]);
+    const published = await publishSchema(publishPool, source);
+    expect(published.ok).toBe(true);
+    expect(publishCalls.length).toBeGreaterThan(0);
+
+    assertNoLiteralSplicing(publishCalls, [
+      injectionMarker,
+      validNamespace,
+      'owner',
+      'editor',
+      'edit',
+    ]);
+
+    // The adversarial text IS present somewhere in what was sent to
+    // Postgres — but only ever inside a captured *parameter*
+    // (`source_dsl`'s own `$4`), never inside any query's own SQL text
+    // (already proven above).
+    const insertCall = publishCalls.find((c) => /insert into namespace_configs/i.test(c.text));
+    expect(insertCall).toBeDefined();
+    expect(
+      insertCall?.params.some((p) => typeof p === 'string' && p.includes(injectionMarker)),
+    ).toBe(true);
+
+    // Part B: writeTuple. Every field `validateIdentifiers` checks is
+    // gated *before* any query is built (already proven behaviorally by
+    // the two `INJECTION_PAYLOAD_CORPUS` tests below in the next
+    // `describe` block) — proven here at the SQL-capture level too: zero
+    // queries are ever issued for a corpus payload, for real, not just
+    // "the return value looked like a rejection."
+    const markerTuple: TupleKey = {
+      objectNs: 'sqlgen_marker_object_ns',
+      objectId: 'sqlgen_marker_object_id',
+      relation: 'sqlgen_marker_relation',
+      subjectNs: 'sqlgen_marker_subject_ns',
+      subjectId: 'sqlgen_marker_subject_id',
+    };
+    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+      const { pool: rejectPool, calls: rejectCalls } = makeCapturingPool([]);
+      const rejected = await writeTuple(rejectPool, { ...markerTuple, subjectId: payload });
+      expect(rejected.ok).toBe(false);
+      expect(rejectCalls.length).toBe(0);
+    }
+
+    // Now a real, legitimate write — the one shape of call that DOES
+    // reach the database for writeTuple — proven parameterized end to
+    // end, using marker values salted distinctively enough that they
+    // can't coincidentally collide with a column/table name already
+    // present in the fixed SQL text.
+    const namespaceConfig: NamespaceConfig = {
+      namespace: markerTuple.objectNs,
+      relations: {
+        [markerTuple.relation]: {
+          kind: 'relation',
+          name: markerTuple.relation,
+          subjectTypes: [{ namespace: markerTuple.subjectNs }],
+        },
+      },
+      permissions: {},
+    };
+    const { pool: writePool, calls: writeCalls } = makeCapturingPool([
+      {
+        match: /select config from namespace_configs/i,
+        respond: () => ({ rows: [{ config: namespaceConfig }] }),
+      },
+      { match: /insert into relation_tuples/i, respond: () => ({ rowCount: 1 }) },
+      { match: /insert into write_log/i, respond: () => ({ rows: [{ token: '1' }] }) },
+    ]);
+    const written = await writeTuple(writePool, markerTuple);
+    expect(written.ok).toBe(true);
+    assertNoLiteralSplicing(writeCalls, Object.values(markerTuple));
+    // The interpolation claim would be vacuous if these values simply
+    // never appeared anywhere in the captured calls at all — confirm they
+    // genuinely flow through, just as *parameters*.
+    const writeParams = writeCalls.flatMap((c) => c.params);
+    expect(writeParams).toContain(markerTuple.objectNs);
+    expect(writeParams).toContain(markerTuple.subjectId);
+
+    // Part C: deleteTuple — its own dedicated call, so a bug specific to
+    // the DELETE statement (vs. the INSERT above) isn't masked by only
+    // ever exercising writeTuple.
+    const { pool: deletePool, calls: deleteCalls } = makeCapturingPool([
+      { match: /delete from relation_tuples/i, respond: () => ({ rowCount: 1 }) },
+      { match: /insert into write_log/i, respond: () => ({ rows: [{ token: '2' }] }) },
+    ]);
+    const deleted = await deleteTuple(deletePool, markerTuple);
+    expect(deleted.ok).toBe(true);
+    assertNoLiteralSplicing(deleteCalls, Object.values(markerTuple));
+    const deleteParams = deleteCalls.flatMap((c) => c.params);
+    expect(deleteParams).toContain(markerTuple.objectId);
+    expect(deleteParams).toContain(markerTuple.subjectNs);
+
+    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+      const { pool: rejectPool, calls: rejectCalls } = makeCapturingPool([]);
+      const rejected = await deleteTuple(rejectPool, { ...markerTuple, subjectId: payload });
+      expect(rejected.ok).toBe(false);
+      expect(rejectCalls.length).toBe(0);
+    }
+  });
 });
 
 describe('subject and object identifiers reject the injection payload corpus', () => {
@@ -554,15 +759,249 @@ describe('tuple-to-userset subject references reject malformed grammar', () => {
 });
 
 describe('fuzzing against the identifier grammar once it exists (property-based, mirrors the predecessor’s IDENTIFIER_PATTERN sweep)', () => {
-  it.todo(
-    'for 2,000 random generated strings, a namespace name is accepted if and only if it matches the published identifier grammar, with no third outcome (crash, hang, silent truncation)',
-  );
+  /**
+   * `namespace`/`relation`/`permission` are reserved words the parser's
+   * own `validateIdentifier` rejects (`RESERVED_WORDS`, `parser.ts`) even
+   * though each one, taken on its own, fully satisfies
+   * `IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH` — a real, narrow gap
+   * between the grammar as *published* (`IDENTIFIER_PATTERN`/
+   * `MAX_IDENTIFIER_LENGTH`, `src/schema/dsl/types.ts`'s own exported,
+   * documented contract) and the grammar as *enforced* specifically for a
+   * namespace name. Folded into `classifyNamespaceCandidate`'s
+   * `'invalid-word'` bucket below rather than filtered out of the fuzz
+   * run: the real, correct behavior for these three strings genuinely is
+   * "rejected, `code: 'invalid_identifier'`, message names the word" — the
+   * same shape as any other semantically-invalid single word — so the
+   * property below is written to expect that, not to look away from it.
+   * Reported as a finding regardless (see this file's own reporting
+   * agent's summary): the exported `IDENTIFIER_PATTERN`/
+   * `MAX_IDENTIFIER_LENGTH` alone do not fully describe what makes a valid
+   * namespace name.
+   */
+  const RESERVED_NAMESPACE_WORDS = new Set(['namespace', 'relation', 'permission']);
 
-  it.todo(
-    'for 2,000 random generated strings, a subject/object id is accepted if and only if it matches the published identifier grammar — the same property, run against the id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it',
-  );
+  type NamespaceCandidateCategory =
+    'valid' | 'empty' | 'whitespace-decorated' | 'invalid-word' | 'unlexable';
 
-  it.todo(
-    'an identifier at exactly the documented length limit is accepted, and one character over is rejected — the predecessor’s own regression (Postgres silently truncates at 63 bytes rather than rejecting) applies with equal force to any identifier this project persists as a lookup key',
-  );
+  /**
+   * The real oracle for "does this string, used as a namespace name,
+   * compile" — deliberately NOT the flatter `IDENTIFIER_PATTERN.test(str)
+   * && str.length > 0 && str.length <= MAX_IDENTIFIER_LENGTH` formula
+   * alone. That flatter formula is exactly right for a subject/object id
+   * (see the next `it` below) but demonstrably wrong here for the same
+   * structural reason `classifyPayload` above already documents: this
+   * DSL's tokenizer is whitespace-insensitive with no quoted-identifier
+   * syntax, so ASCII whitespace embedded in, leading, or trailing a
+   * candidate is stripped before the parser ever reads a "name" token at
+   * all — a candidate like `' ab '` can never itself be the compiled name
+   * (`IDENTIFIER_PATTERN` has no whitespace character class), but the
+   * *stripped* word `'ab'` legitimately can be, since the tokenizer treats
+   * the space as an insignificant separator rather than part of the
+   * token. `fc.string()` generates whitespace-containing candidates often
+   * enough (confirmed empirically before writing this test) that this
+   * isn't a corner case worth ignoring — a property test using the flat
+   * formula directly would misclassify a real, correct compile as a
+   * violation. Reuses this file's own `ASCII_WHITESPACE`/`WORD_CHARS`
+   * building blocks and the exact same four-category reasoning already
+   * established above for `INJECTION_PAYLOAD_CORPUS`, generalized to any
+   * string rather than a fixed, all-invalid corpus (hence the fifth
+   * `'valid'` outcome `classifyPayload` itself never needs, since every
+   * corpus entry is documented invalid).
+   */
+  function classifyNamespaceCandidate(candidate: string): NamespaceCandidateCategory {
+    const stripped = candidate.replace(ASCII_WHITESPACE, '');
+    if (stripped === '') return 'empty';
+    if (stripped !== candidate) {
+      return WORD_CHARS.test(stripped) ? 'whitespace-decorated' : 'unlexable';
+    }
+    if (!WORD_CHARS.test(candidate)) return 'unlexable';
+    if (
+      !RESERVED_NAMESPACE_WORDS.has(candidate) &&
+      IDENTIFIER_PATTERN.test(candidate) &&
+      candidate.length > 0 &&
+      candidate.length <= MAX_IDENTIFIER_LENGTH
+    ) {
+      return 'valid';
+    }
+    return 'invalid-word';
+  }
+
+  it('for 2,000 random generated strings, a namespace name is accepted if and only if it matches the published identifier grammar, with no third outcome (crash, hang, silent truncation)', () => {
+    assert(
+      property(string({ maxLength: 200 }), (candidate) => {
+        const category = classifyNamespaceCandidate(candidate);
+        const source = `namespace ${candidate} {\n  relation owner: user\n}`;
+
+        // "never hangs" — a synchronous call either returns or it doesn't;
+        // bound it explicitly rather than trust "it returned" alone.
+        const start = performance.now();
+        const result = compileSchema(source);
+        expect(performance.now() - start).toBeLessThan(1000);
+
+        if (category === 'valid') {
+          expect(result.ok).toBe(true);
+          if (result.ok) {
+            // "never silently truncates": the compiled name is the
+            // *actual full* candidate string, not a prefix/suffix of it.
+            expect(Object.keys(result.schema.namespaces)).toEqual([candidate]);
+          }
+        } else if (category === 'whitespace-decorated') {
+          if (result.ok) {
+            const names = Object.keys(result.schema.namespaces);
+            expect(names).not.toContain(candidate);
+            for (const name of names) expect(IDENTIFIER_PATTERN.test(name)).toBe(true);
+          } else {
+            expect(result.errors.length).toBeGreaterThan(0);
+          }
+        } else {
+          // 'empty' | 'invalid-word' | 'unlexable' — never accepted, full
+          // stop, regardless of which structural reason applies.
+          expect(result.ok).toBe(false);
+        }
+      }),
+      { numRuns: 2000 },
+    );
+  });
+
+  /**
+   * Unlike a namespace name (above), `TupleKey.subjectId`/`objectId` are
+   * plain JS string fields with no DSL tokenizer standing between the
+   * caller and `validateIdentifiers` (`src/store/tuples.ts`) — the raw
+   * candidate is checked against `IDENTIFIER_PATTERN`/
+   * `MAX_IDENTIFIER_LENGTH` directly, with no whitespace-stripping and no
+   * reserved-word carve-out (confirmed: `validateIdentifiers` has no
+   * `RESERVED_WORDS`-equivalent check at all). The flat "accepted iff
+   * matches the grammar" formula the namespace-name property above had to
+   * complicate is therefore exactly right here, unmodified — the two
+   * grammars *look* like they share one corpus (`IDENTIFIER_PATTERN`/
+   * `MAX_IDENTIFIER_LENGTH`) but do not share all of the same acceptance
+   * behavior, which is precisely the distinction this test's own name
+   * flags.
+   */
+  describe('subject/object id grammar', () => {
+    const idFuzzPool = new Pool({
+      connectionString: 'postgres://nobody:nothing@127.0.0.1:1/unreachable',
+      connectionTimeoutMillis: 300,
+    });
+
+    afterAll(async () => {
+      await idFuzzPool.end();
+    });
+
+    function tupleWith(overrides: Partial<TupleKey>): TupleKey {
+      return {
+        objectNs: 'document',
+        objectId: 'readme',
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId: 'alice',
+        ...overrides,
+      };
+    }
+
+    /**
+     * `writeTuple` validates every identifier field *before* ever calling
+     * `pool.connect()`/`pool.query()` (see the DB-free `unreachablePool`
+     * tests above) — so whether a candidate reaches the (deliberately
+     * unreachable) database at all is itself a real, structural signal
+     * for "did identifier validation accept it," without needing a new
+     * export of `validateIdentifiers` (which `src/store/tuples.ts` keeps
+     * private). A candidate that fails the grammar resolves with
+     * `{ ok: false, errors: [{ code: 'invalid_identifier' }] }` and never
+     * touches the pool; a candidate that passes proceeds into
+     * schema-validation, which for this pool can only ever manifest as a
+     * thrown/rejected connection error — never a resolved result.
+     */
+    async function proceedsPastIdentifierValidation(tuple: TupleKey): Promise<boolean> {
+      try {
+        const outcome = await writeTuple(idFuzzPool, tuple);
+        expect(outcome.ok).toBe(false);
+        if (!outcome.ok) {
+          expect(outcome.errors.length).toBeGreaterThan(0);
+          expect(outcome.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+        }
+        return false;
+      } catch {
+        return true;
+      }
+    }
+
+    it('for 2,000 random generated strings, a subject/object id is accepted if and only if it matches the published identifier grammar — the same property, run against the id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it', async () => {
+      await assert(
+        asyncProperty(string({ maxLength: 200 }), async (candidate) => {
+          const expected =
+            IDENTIFIER_PATTERN.test(candidate) &&
+            candidate.length > 0 &&
+            candidate.length <= MAX_IDENTIFIER_LENGTH;
+
+          const subjectProceeded = await proceedsPastIdentifierValidation(
+            tupleWith({ subjectId: candidate }),
+          );
+          expect(subjectProceeded).toBe(expected);
+
+          const objectProceeded = await proceedsPastIdentifierValidation(
+            tupleWith({ objectId: candidate }),
+          );
+          expect(objectProceeded).toBe(expected);
+        }),
+        { numRuns: 2000 },
+      );
+    });
+
+    it('an identifier at exactly the documented length limit is accepted, and one character over is rejected — the predecessor’s own regression (Postgres silently truncates at 63 bytes rather than rejecting) applies with equal force to any identifier this project persists as a lookup key', async () => {
+      const atLimit = 'a'.repeat(MAX_IDENTIFIER_LENGTH);
+      const oneOver = 'a'.repeat(MAX_IDENTIFIER_LENGTH + 1);
+      expect(atLimit.length).toBe(MAX_IDENTIFIER_LENGTH);
+      expect(oneOver.length).toBe(MAX_IDENTIFIER_LENGTH + 1);
+      // Both are built from nothing but valid identifier characters — the
+      // character class alone can never be the reason `oneOver` is
+      // rejected; only its length can be.
+      expect(IDENTIFIER_PATTERN.test(atLimit)).toBe(true);
+      expect(IDENTIFIER_PATTERN.test(oneOver)).toBe(true);
+
+      // Namespace name (compileSchema) — the "actual full string, not a
+      // truncated prefix" claim, pinned exactly at the boundary.
+      const atLimitResult = compileSchema(`namespace ${atLimit} {\n  relation owner: user\n}`);
+      expect(atLimitResult.ok).toBe(true);
+      if (atLimitResult.ok) {
+        expect(Object.keys(atLimitResult.schema.namespaces)).toEqual([atLimit]);
+      }
+
+      const oneOverResult = compileSchema(`namespace ${oneOver} {\n  relation owner: user\n}`);
+      expect(oneOverResult.ok).toBe(false);
+      if (!oneOverResult.ok) {
+        expect(oneOverResult.errors.length).toBe(1);
+        const [error] = oneOverResult.errors;
+        expect(error).toBeDefined();
+        // Rejected specifically for being too long — not, say, silently
+        // truncated to 63 characters and accepted, and not rejected for
+        // containing an invalid character (it doesn't).
+        expect(error?.code).toBe('invalid_identifier');
+        expect(error?.message).toContain('may be at most');
+        expect(error?.message).toContain(String(MAX_IDENTIFIER_LENGTH));
+      }
+
+      // Subject id (writeTuple) — the store's own independent length
+      // check (`validateIdentifiers`, `src/store/tuples.ts`), DB-free via
+      // the same unreachable-pool proof used throughout this file: a
+      // value that passes identifier validation proceeds far enough to
+      // hit the (deliberately unreachable) database and therefore
+      // throws, rather than resolving with an `invalid_identifier` error.
+      await expect(
+        writeTuple(idFuzzPool, tupleWith({ subjectId: atLimit })),
+      ).rejects.toBeInstanceOf(Error);
+
+      const oneOverWrite = await writeTuple(idFuzzPool, tupleWith({ subjectId: oneOver }));
+      expect(oneOverWrite.ok).toBe(false);
+      if (!oneOverWrite.ok) {
+        expect(oneOverWrite.errors.length).toBeGreaterThan(0);
+        expect(oneOverWrite.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+        expect(
+          oneOverWrite.errors.some((e) =>
+            e.message.includes('exceeds the maximum identifier length'),
+          ),
+        ).toBe(true);
+      }
+    });
+  });
 });

@@ -1267,27 +1267,42 @@ schema public cascade`) — completed in 6.41 real seconds, verdict
   the README's claims with a fresh run, not the same run already cited
   in the README's own text.
 
-**A real, disclosed gap, not silently glossed over:** four
+**A real, disclosed gap, found and then closed on the same PR:** four
 `test/isolation/identifier-and-tuple-validation.fuzz.test.ts` `it.todo()`s
-remain open with Phase 9 being the last phase this build spec names, so
-there is no further phase left to attribute them to. Recorded honestly
-per D-062 rather than left unmentioned.
+remained open with Phase 9 being the last phase this build spec names, so
+there was no further phase left to attribute them to — recorded honestly
+per D-062 rather than left unmentioned. Per direct user instruction ("fix
+the open gap"), dispatched a second `test-author` delegation to
+un-skip and implement all four for real: a DB-free SQL/DDL-splicing
+proof across `publishSchema`/`writeTuple`/`deleteTuple`, and two 2,000-run
+`fast-check` property tests plus a deterministic boundary case against
+the identifier grammar. Writing the namespace-name property surfaced a
+real, narrow gap between the _published_ grammar
+(`IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH`) and what the parser
+actually enforces (`namespace`/`relation`/`permission` are reserved
+words despite matching the pattern) — folded correctly into the test's
+own oracle, and `IDENTIFIER_PATTERN`'s doc comment updated to state it
+explicitly. Independently verified by the main agent (not accepted from
+`test-author`'s report alone): read the full diff; ran the file directly
+(11/11 passed, zero `it.todo()` left anywhere in `test/isolation/`); ran
+the full `npm run verify` pipeline (221/221, up from 217/4-todo);
+performed an independent fail-check of my own, distinct from
+`test-author`'s own four, targeting a different source location
+(`parser.ts`'s own length-boundary check) and confirmed byte-identical
+restoration via `git diff`/`md5sum`. Full detail in D-062's own
+resolution note.
 
 **Final state:** `npm run verify` clean (format:check, lint, typecheck,
-217 tests passed / 4 todo, build); the real demo-graph integration test
+221 tests passed, 0 todo, build); the real demo-graph integration test
 passes against real local Postgres (verified directly, twice, including
 one independent fail-check); all five screens independently confirmed
 well-formed, prettier-clean, and grounded in real captured data; the
 full README-documented 10-minute flow independently re-run end-to-end
-from a clean database in 6.41 seconds with a genuine `SOUND` verdict.
+from a clean database in 6.41 seconds with a genuine `SOUND` verdict;
+zero `it.todo()` remaining anywhere in `test/isolation/`.
 
 **Open questions carried forward:**
 
-- Four `test/isolation/` `.todo()`s remain open with no further phase to
-  attribute them to (D-062) — the natural moment to close them is
-  whenever future work next touches
-  `identifier-and-tuple-validation.fuzz.test.ts`, `src/schema/publish.ts`'s
-  SQL generation, or the identifier grammar itself.
 - `authz soundness run` writing real rows into whatever database it's
   pointed at (including a stranger's own freshly-seeded demo database)
   is disclosed plainly in the README rather than engineered around
