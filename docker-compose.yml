@@ -1,0 +1,31 @@
+# Local Postgres 16 for development — the one thing "Try it yourself" in
+# the README can't give you by cloning this repo alone (see .env.example's
+# own comment: "set DATABASE_URL to any reachable Postgres 16+"). This file
+# is that "any reachable Postgres" for anyone who doesn't already have one.
+#
+# Credentials here are deliberately identical to .env.example's own
+# DATABASE_URL placeholder (postgres://user:password@localhost:5432/authz_service)
+# — `cp .env.example .env && docker compose up -d` needs zero further edits
+# to work. Not meant for anything but local development; never use this
+# password anywhere real (Railway/hosted Postgres for that — see the
+# README's own Troubleshooting section).
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: authz_service
+    ports:
+      - '5432:5432'
+    volumes:
+      - authz-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U user -d authz_service']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  authz-postgres-data:
