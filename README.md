@@ -121,6 +121,29 @@ database is left exactly as `seed:example` left it. Drop `--dry-run` if
 you'd rather see the generated fixture persist in `namespace_configs`
 afterward — it's harmless either way, just no longer the default.
 
+### Troubleshooting: `authz doctor` says `Postgres: unreachable`
+
+`cp .env.example .env` alone leaves `DATABASE_URL` pointing at the
+placeholder in that file — a template connection string, not a real
+database. `doctor` reporting `Postgres: unreachable` means exactly that:
+nothing is listening wherever `DATABASE_URL` currently points. Three ways
+to fix it, in order of least setup required:
+
+1. **`docker compose up -d`** — this repo ships a `docker-compose.yml`
+   with credentials matched to `.env.example`'s own placeholder, so if you
+   haven't edited `DATABASE_URL` yet, this needs no further changes at
+   all. Requires Docker; nothing else.
+2. **A free hosted Postgres** — [Railway](https://railway.com),
+   [Neon](https://neon.tech), or [Supabase](https://supabase.com) all have
+   free tiers. Create a project, copy the connection string it gives you
+   into `DATABASE_URL`.
+3. **A native Postgres 16+ install** — via your OS's package manager or
+   [postgresql.org](https://www.postgresql.org/download/), then point
+   `DATABASE_URL` at the user/password/database you configured.
+
+Re-run `authz doctor` after any of these — it should report `Postgres:
+reachable` before you move on to `seed:example`.
+
 ## How it works
 
 Two kinds of facts live in a namespace: a **relation** is something you
