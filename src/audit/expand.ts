@@ -48,7 +48,7 @@
 import type { Pool } from 'pg';
 
 import { env } from '../config/env.js';
-import type { RewriteRule } from '../schema/dsl/types.js';
+import type { NamespaceConfig, RewriteRule } from '../schema/dsl/types.js';
 import { getLatestNamespaceConfig } from '../schema/publish.js';
 
 /** An object or subject reference — `ns:id`. */
@@ -109,9 +109,35 @@ export type ExpandNode =
   | { kind: 'depthLimitReached'; object: EntityRef; name: string }
   | { kind: 'undeclared'; object: EntityRef; name: string };
 
+/**
+ * `schemaCache` mirrors `src/resolve/production/resolver.ts`'s own
+ * identical-purpose field exactly — it exists purely to avoid re-querying
+ * `namespace_configs` for a namespace this same `expand()` call has already
+ * looked up (e.g. a `folder`'s `parent->view` revisiting `folder` itself at
+ * every hop of a parent chain). Rebuilt fresh on every `expand()` call,
+ * never shared or reused across calls, so it cannot become a
+ * correctness-relevant cache (build spec §6.1). Added by full-repo audit
+ * finding #5 (MEDIUM, 2026-08-16): this walk is deliberately sequential
+ * (`mapSequential`, not `Promise.all` — see this file's own top-of-file
+ * doc comment on why), so every extra round trip sits directly on the
+ * critical path; before this fix, a 20-level nested `group:member` chain
+ * issued 20 separate round trips to `namespace_configs` for the identical
+ * namespace, where the production resolver's equivalent walk issues
+ * exactly 1.
+ */
 interface WalkContext {
   pool: Pool;
   maxDepth: number;
+  schemaCache: Map<string, NamespaceConfig | null>;
+}
+
+async function getConfig(ctx: WalkContext, ns: string): Promise<NamespaceConfig | null> {
+  const cached = ctx.schemaCache.get(ns);
+  if (cached !== undefined) return cached;
+  const config = await getLatestNamespaceConfig(ctx.pool, ns);
+  const resolved = config ?? null;
+  ctx.schemaCache.set(ns, resolved);
+  return resolved;
 }
 
 function nameKey(object: EntityRef, name: string): string {
@@ -169,7 +195,7 @@ async function expandName(
   }
   visiting.add(key);
   try {
-    const config = await getLatestNamespaceConfig(ctx.pool, object.ns);
+    const config = await getConfig(ctx, object.ns);
     if (!config) return { kind: 'undeclared', object, name };
 
     const relation = config.relations[name];
@@ -282,6 +308,6 @@ export async function expand(
   options: ExpandOptions = {},
 ): Promise<ExpandNode> {
   const maxDepth = options.maxDepth ?? env.CHECK_MAX_DEPTH;
-  const ctx: WalkContext = { pool, maxDepth };
+  const ctx: WalkContext = { pool, maxDepth, schemaCache: new Map() };
   return expandName(ctx, object, relationOrPermission, new Set(), 0);
 }

@@ -26,6 +26,25 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         projectService: {
+          // 'scripts/*.mjs', not 'scripts/**/*.mjs': typescript-eslint's own
+          // `allowDefaultProject` hard-rejects any glob containing '**'
+          // ("Having many files run with the default project is known to
+          // cause performance issues" — confirmed live: `scripts/**/*.mjs`
+          // here throws `allowDefaultProject glob '...' contains a
+          // disallowed '**'` on every lint run, not silently ignored).
+          // scripts/ is flat today, so this single-star pattern covers
+          // every real file — but it will NOT match a file under a future
+          // scripts/ subdirectory (unlike the files:['scripts/**/*.mjs']
+          // block below, whose plain ESLint `files` glob has no such
+          // restriction). If scripts/ ever gains a subdirectory, either
+          // list it explicitly here too, or give scripts/ its own
+          // `tsconfig.json` (with a real `**`-capable `include`) referenced
+          // via `parserOptions.project` instead of the default-project
+          // fallback — do not "fix" this by adding '**' here, it will break
+          // linting entirely (full-repo audit finding #11, LOW,
+          // 2026-08-16 — the finding's own suggested fix was this exact
+          // '**' change; verified live that it doesn't work before landing
+          // this comment instead, see docs/DECISIONS.md).
           allowDefaultProject: ['*.config.js', '*.config.ts', 'scripts/*.mjs'],
         },
         tsconfigRootDir: import.meta.dirname,

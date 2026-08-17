@@ -42,6 +42,15 @@
  *   gets its own rendered block, every block gets its own resolution path
  *   (or an explicit note that none was recorded, which only happens for a
  *   `false_deny` produced by a synthetic test double, never a real run).
+ *   The one deliberate exception: once the running rendered body approaches
+ *   this report's own size budget (`DEFAULT_MAX_COMMENT_CHARS`, see
+ *   `RenderSoundnessMarkdownOptions.maxCommentChars`), further `false_grant`
+ *   entries stop rendering their own block — but the true total count and an
+ *   unmissable, un-muted truncation notice always render in their place; a
+ *   `false_grant` is never quietly summarized the casual way `false_deny`'s
+ *   own overflow is (see `docs/DECISIONS.md` D-084 — closes a real crash: an
+ *   uncapped `false_grant` count could itself cross GitHub's hard PR-comment
+ *   size limit and take down the comment poster before it posted anything).
  *
  * This module normalizes the reference resolver's and the production
  * resolver's independently-declared `ResolutionStep`/`DisproofStep` shapes
@@ -100,6 +109,29 @@ const FALSE_GRANT_LABEL = '**FALSE_GRANT**';
 const FALSE_DENY_LABEL = '`false_deny`';
 
 const DEFAULT_MAX_RENDERED_FALSE_DENY = 20;
+
+/**
+ * Soft ceiling, in characters, this renderer targets for the WHOLE rendered
+ * document — deliberately well under GitHub's real PR-comment/issue-comment
+ * body limit (~65,536 characters; empirically confirmed, not this project's
+ * own guess, by a real 422 rejection past that point — full-repo audit
+ * finding, 2026-08-16), to leave real headroom for the `false_deny` section,
+ * the headline, and everything else that renders after the `false_grant`
+ * section this budget actually governs (see the loop in
+ * `renderSoundnessMarkdown` below). Before this existed, `false_grant`
+ * rendered every entry unconditionally, in full, regardless of count —
+ * correct in spirit (§8/report-designer brief: a `false_grant` must never be
+ * summarized away) but with no ceiling at all, a genuine regression that
+ * flips a commonly-hit relation to always-allow could produce hundreds of
+ * `false_grant`s in one 5,000-query fuzz run, cross this exact limit, and
+ * crash `scripts/post-soundness-comment.mjs` on GitHub's own 422 before it
+ * ever posted a comment — silencing the report for exactly the worst-case
+ * finding it exists to surface. This value stays a soft, disclosed budget,
+ * never a silent hard cutoff: crossing it stops rendering further
+ * `false_grant` entries, but always states the true total count and an
+ * unmissable notice in their place — see `docs/DECISIONS.md` D-084.
+ */
+const DEFAULT_MAX_COMMENT_CHARS = 60_000;
 
 // ---------------------------------------------------------------------------
 // Internal normalized tree — see this file's own top-of-file doc comment.
@@ -896,15 +928,42 @@ export interface RenderSoundnessMarkdownOptions {
   /**
    * Soft cap on how many `false_deny` entries render their full path before
    * the rest are disclosed-and-omitted, never silently — GitHub caps a
-   * single comment/issue body at roughly 65,536 characters, and a run with
-   * a very large `false_deny` count (never `false_grant` — see below) could
-   * exceed that in full. Applies only to `false_deny`: every `false_grant`
-   * always renders in full, uncapped, regardless of count — a `false_grant`
-   * must never be summarized away or deferred to a link (report-designer
-   * brief), so this cap deliberately only ever protects the *muted*
-   * category. Default 20.
+   * single comment/issue body at roughly 65,536 characters. Applies only to
+   * `false_deny`. Default 20.
+   *
+   * `false_grant` is governed separately, by `maxCommentChars` below, never
+   * by a fixed entry-count cap: a `false_grant` must never be summarized
+   * away or deferred to a link just because it's the Nth one
+   * (report-designer brief) — the limit that matters for it is the
+   * document's own real, measured size, not an arbitrary count picked in
+   * advance.
    */
   maxRenderedFalseDeny?: number;
+  /**
+   * Soft ceiling, in characters, this renderer targets for the WHOLE
+   * document — see `DEFAULT_MAX_COMMENT_CHARS`'s own doc comment for why
+   * 60,000 rather than GitHub's literal ~65,536-character limit. Once the
+   * running rendered body would cross this while rendering the
+   * `false_grant` section, further `false_grant` entries stop rendering
+   * their own full resolution path — but the true total count, and an
+   * unmissable notice that this is not a clean or reduced-severity result,
+   * always render in their place. Never truncates `false_deny` — that
+   * section is already independently bounded by `maxRenderedFalseDeny`.
+   * Default `60_000`.
+   */
+  maxCommentChars?: number;
+}
+
+/**
+ * Sums `strs` the same way `lines.join('\n')` eventually will — every
+ * element's own length, plus one character per joining separator. Used only
+ * to track the running rendered-body size against `maxCommentChars` without
+ * re-joining and re-measuring the whole (potentially very large) `lines`
+ * array on every iteration of the `false_grant` loop below — O(n) total
+ * across the loop, not O(n²).
+ */
+function joinedLength(strs: readonly string[]): number {
+  return strs.reduce((sum, s) => sum + s.length + 1, 0);
 }
 
 /**
@@ -923,6 +982,7 @@ export function renderSoundnessMarkdown(
   options: RenderSoundnessMarkdownOptions = {},
 ): string {
   const maxFalseDeny = options.maxRenderedFalseDeny ?? DEFAULT_MAX_RENDERED_FALSE_DENY;
+  const maxCommentChars = options.maxCommentChars ?? DEFAULT_MAX_COMMENT_CHARS;
   const lines: string[] = [SOUNDNESS_REPORT_MARKER, '', `## ${renderHeadline(result)}`, ''];
 
   lines.push(
@@ -967,7 +1027,40 @@ export function renderSoundnessMarkdown(
 
   if (falseGrants.length > 0) {
     lines.push('### FALSE_GRANT findings', '');
-    falseGrants.forEach((d, i) => lines.push(...renderDivergenceMarkdown(d, i + 1)));
+
+    // Every entry renders in full, in order, until the running body would
+    // cross `maxCommentChars` — the same size-budget discipline
+    // `false_deny` already applies below, but never a fixed entry-count cap:
+    // a `false_grant` is truncated only by real, measured size, and the true
+    // total count always renders regardless (see `DEFAULT_MAX_COMMENT_CHARS`
+    // and `docs/DECISIONS.md` D-084).
+    let renderedFalseGrants = 0;
+    for (const [i, divergence] of falseGrants.entries()) {
+      const block = renderDivergenceMarkdown(divergence, i + 1);
+      if (joinedLength(lines) + joinedLength(block) > maxCommentChars) {
+        break;
+      }
+      lines.push(...block);
+      renderedFalseGrants += 1;
+    }
+
+    const omittedFalseGrants = falseGrants.length - renderedFalseGrants;
+    if (omittedFalseGrants > 0) {
+      const noun = omittedFalseGrants === 1 ? 'divergence' : 'divergences';
+      lines.push(
+        `**TRUNCATED — ${omittedFalseGrants} more FALSE_GRANT ${noun} not shown in this comment ` +
+          `(${falseGrants.length} total).**`,
+        '',
+        'This comment reached its own size budget — that is the only reason rendering stopped, never a ' +
+          `reduced severity: every omitted entry is a full ${FALSE_GRANT_LABEL} finding, the same as every ` +
+          'entry shown above — the production engine allowed a query with no real path found by the ' +
+          `reference oracle. The true, measured count (${falseGrants.length}) is stated in the headline at ` +
+          'the top of this comment, not summarized away here. The complete report, every finding included, ' +
+          'is printed in full in the workflow run\'s "Run soundness fuzz" step log. Reproduce the exact run ' +
+          'locally with the command above to inspect the rest.',
+        '',
+      );
+    }
   }
 
   if (falseDenies.length > 0) {

@@ -123,6 +123,72 @@ describe('a-cyclic-group-nesting-terminates-and-resolves-denied', () => {
   });
 });
 
+describe('a-tuple-to-userset-cycle-through-a-parent-chain-terminates-and-resolves-denied', () => {
+  // The cycle above is built entirely from mechanism 2 — userset-subject
+  // nesting (`group#member` as a tuple's subject). §6.4's cycle guard must
+  // also catch a cycle built from the *other* recursive mechanism this
+  // engine has: `tupleToUserset` (`parent->view`), which walks a stored
+  // relation to a different object and then recurses into a *permission* on
+  // it, never itself appearing as a tuple subject. folder:a's `parent` is
+  // folder:b; folder:b's `parent` is folder:a — so `view = viewer |
+  // parent->view` recurses view(a) -> view(b) -> view(a), a genuine cycle
+  // through the tupleToUserset rewrite rule with no userset-subject nesting
+  // anywhere in the graph. No `viewer` tuple exists on either folder, so the
+  // hand-derived answer is unambiguous: denied. As with the mechanism-2 test
+  // above, maxDepth is set enormous and explicit so a depth-ceiling backstop
+  // can't accidentally stand in for a broken (or absent) cycle detector.
+  const source = [
+    'namespace folder {',
+    '  relation parent: folder',
+    '  relation viewer: user',
+    '',
+    '  permission view = viewer | parent->view',
+    '}',
+  ].join('\n');
+
+  it('a-tuple-to-userset-cycle-through-a-parent-chain-terminates-and-resolves-denied', () => {
+    const schema = compileOk(source);
+    const tuples: ReferenceTuple[] = [
+      tuple('folder', 'a', 'parent', 'folder', 'b'),
+      tuple('folder', 'b', 'parent', 'folder', 'a'),
+    ];
+
+    const start = performance.now();
+    const result = referenceCheck(schema, tuples, ref('user', 'zoe'), ref('folder', 'a'), 'view', {
+      maxDepth: 1_000_000,
+    });
+    const elapsedMs = performance.now() - start;
+
+    expect(result.allowed).toBe(false);
+    expect(elapsedMs).toBeLessThan(4000);
+  });
+});
+
+describe('a-direct-self-loop-tuple-terminates-and-resolves-denied', () => {
+  // A third, independent cycle shape from both the mechanism-2 two-node
+  // nesting above and the tupleToUserset chain above it: a single stored
+  // tuple whose subject names its own object and relation —
+  // `group:a#member@group:a#member`, one row, zero hops before the walk
+  // would revisit its own starting `(namespace, id, relation)` triple. No
+  // tuple anywhere grants a real `user` membership, so the hand-derived
+  // answer is unambiguous: denied.
+  const source = ['namespace group {', '  relation member: user | group#member', '}'].join('\n');
+
+  it('a-direct-self-loop-tuple-terminates-and-resolves-denied', () => {
+    const schema = compileOk(source);
+    const tuples: ReferenceTuple[] = [tuple('group', 'a', 'member', 'group', 'a', 'member')];
+
+    const start = performance.now();
+    const result = referenceCheck(schema, tuples, ref('user', 'zoe'), ref('group', 'a'), 'member', {
+      maxDepth: 1_000_000,
+    });
+    const elapsedMs = performance.now() - start;
+
+    expect(result.allowed).toBe(false);
+    expect(elapsedMs).toBeLessThan(4000);
+  });
+});
+
 describe('a-diamond-shaped-non-cyclic-revisit-of-the-same-object-is-not-falsely-treated-as-a-cycle', () => {
   // folder:start reaches folder:shared via two distinct edges (`parent`
   // and `sibling_link`), each recursing into a *different* computed

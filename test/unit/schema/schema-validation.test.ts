@@ -176,6 +176,61 @@ describe('a-self-referential-permission-is-rejected-not-left-to-hang-whatever-ev
   });
 });
 
+describe('a-permission-with-a-live-relation-branch-alongside-a-dead-cyclic-branch-is-rejected-as-a-whole-not-partially-accepted', () => {
+  // `docs/DECISIONS.md` D-013's own decision text, verbatim: "a permission
+  // that has *any* non-cyclic branch reaching a real relation (e.g.
+  // `permission x = a | y` where `a` is a relation and `y` cycles back to
+  // `x`) is still rejected as a whole, even though a runtime walk could
+  // resolve `x` via the `a` branch alone." D-013's own "Alternative
+  // rejected" is exactly the thing this test guards against ever creeping
+  // back in: "A per-branch liveness proof — reject only if *every* path
+  // through the rewrite tree is unreachable, rather than rejecting the
+  // whole permission because *some* path cycles." The committed suite's
+  // existing self-referential-permission tests above (`permission view =
+  // view`, and the two-permission `a = b; b = a` mutual cycle with no
+  // relation anywhere in either) never construct a permission with a live
+  // grounding branch sitting next to a dead cyclic one — this is that
+  // missing case, built directly from D-013's own worked example: `x`'s
+  // `owner` branch is real and reachable on its own, and `y` is the dead
+  // branch that cycles straight back to `x`.
+  const source = [
+    'namespace document {', // line 1
+    '  relation owner: user', // line 2
+    '  permission x = owner | y', // line 3 — live branch (owner) beside a dead cyclic branch (y)
+    '  permission y = x', // line 4 — cycles back to x
+    '}', // line 5
+  ].join('\n');
+
+  it('a-permission-with-a-live-relation-branch-alongside-a-dead-cyclic-branch-is-rejected-as-a-whole-not-partially-accepted', () => {
+    const errors = compileErr(source);
+    // `error.member` (errors.ts: "The relation/permission name the error is
+    // about, when applicable") is used rather than a substring match on
+    // `message` — a cycle-path narrative like "(x -> y -> x)" embedded in
+    // *y*'s own message text would otherwise also contain the substring
+    // "x", making a `message.includes('x')` check pass even in a broken
+    // build that only ever flags `y` and silently rescues `x` through its
+    // live `owner` branch. `member` names exactly which permission each
+    // individual error is *about*, sidestepping that false-positive risk
+    // entirely.
+    const xError = errors.find(
+      (e) => e.code === 'circular_permission_definition' && e.member === 'x',
+    );
+    const yError = errors.find(
+      (e) => e.code === 'circular_permission_definition' && e.member === 'y',
+    );
+    // Both permissions participating in the cycle are individually flagged
+    // — `x` in particular is the permission D-013's own alternative-rejected
+    // clause is about: a per-branch liveness proof would have accepted `x`
+    // via its live `owner` branch alone, silently dropping only the `y`
+    // half. Asserting `x` is flagged (not just `y`) is what actually
+    // distinguishes this test from the pre-existing self-loop/mutual-cycle
+    // cases above, which have no live branch to accidentally rescue the
+    // permission through.
+    expect(xError).toBeDefined();
+    expect(yError).toBeDefined();
+  });
+});
+
 describe('a tuple-to-userset target namespace absent from the compilation unit is always rejected; a plain relation subject-type namespace absent from it is tolerated — docs/DECISIONS.md D-012', () => {
   // D-012, read directly against `src/schema/dsl/compiler.ts` before writing
   // these two tests (per this task's own explicit instruction to confirm

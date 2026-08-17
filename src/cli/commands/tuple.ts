@@ -4,7 +4,7 @@
  * for a plain reference, `namespace:id#relation` for a tuple-to-userset
  * subject (`group:eng#member`).
  */
-import { writeTuple, deleteTuple, type TupleKey } from '../../store/tuples.js';
+import { writeTuple, deleteTuple, validateIdentifiers, type TupleKey } from '../../store/tuples.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
 
@@ -81,6 +81,20 @@ export async function tupleWrite(
     process.exitCode = 2;
     return;
   }
+  // Pure, DB-free identifier-pattern check — run before the DATABASE_URL
+  // check below so a malformed identifier (e.g. an id containing a space)
+  // is reported as the argument error it is, exit code 2, regardless of
+  // whether a database happens to be configured. `writeTuple` itself runs
+  // this exact same check again once a pool exists (defense in depth, not
+  // redundant — a caller other than this CLI might call `writeTuple`
+  // directly without ever going through this pre-check).
+  const identifierErrors = validateIdentifiers(tuple);
+  if (identifierErrors.length > 0) {
+    console.error(`tuple write rejected:`);
+    for (const error of identifierErrors) console.error(`  ${error.message}`);
+    process.exitCode = 2;
+    return;
+  }
   if (!env.DATABASE_URL) {
     console.error('Postgres: DATABASE_URL is not set — see .env.example.');
     process.exitCode = 3;
@@ -113,6 +127,15 @@ export async function tupleDelete(
   const tuple = buildTupleKey(objectRaw, relation, subjectRaw);
   if (!tuple) {
     console.error(`invalid object/subject reference — ${REF_USAGE}`);
+    process.exitCode = 2;
+    return;
+  }
+  // See tupleWrite's identical check above for why this runs before the
+  // DATABASE_URL check.
+  const identifierErrors = validateIdentifiers(tuple);
+  if (identifierErrors.length > 0) {
+    console.error(`tuple delete rejected:`);
+    for (const error of identifierErrors) console.error(`  ${error.message}`);
     process.exitCode = 2;
     return;
   }

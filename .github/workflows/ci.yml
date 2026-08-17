@@ -32,10 +32,10 @@ jobs:
 
   # Single-entry matrix (not a plain step) deliberately kept as a matrix:
   # GitHub Actions still names the check "test (22)" with the parens suffix
-  # even with one value, so this required status check's name is unchanged
-  # from before Node 20 was dropped — no branch-protection rule update
-  # needed for this one, unlike `test (20)` itself (see
-  # docs/github-governance.md Step 2's migration note).
+  # even with one value, so dropping the matrix entirely would rename this
+  # required status check and need a branch-protection rule update
+  # (docs/github-governance.md Step 2 lists the exact current job names to
+  # select there — re-check it if this matrix's Node version ever changes).
   test:
     name: test
     runs-on: ubuntu-latest

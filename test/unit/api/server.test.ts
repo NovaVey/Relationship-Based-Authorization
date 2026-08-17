@@ -77,7 +77,7 @@ let poolQuery: ReturnType<typeof vi.fn<(...args: unknown[]) => Promise<unknown>>
 beforeEach(async () => {
   poolQuery = vi.fn<(...args: unknown[]) => Promise<unknown>>();
   const pool = { query: poolQuery } as unknown as Pool;
-  app = await buildServer(pool);
+  app = await buildServer(pool, { logger: false });
 });
 
 afterEach(async () => {
@@ -750,6 +750,47 @@ describe('finding #13: an unmatched route is rate-limited by the same global bud
         sawRateLimited = true;
         const body = await parseBody(res);
         expect(body.error.code).toBe('rate_limited');
+        break;
+      }
+      expect(res.statusCode).toBe(404);
+    }
+    expect(sawRateLimited).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Full-repo audit finding #3 / "trustProxy" (HIGH, 2026-08-16) —
+//     `trustProxy: true` (the original D-065 fix) trusts every hop an
+//     `X-Forwarded-For` header claims, including hops the *client itself*
+//     prepends ahead of the one real proxy-appended hop — so a caller could
+//     send a fresh, fabricated address on every request and get a brand new
+//     rate-limit budget each time, defeating the limit entirely.
+//     `trustProxy: 1` (this fix) trusts exactly one hop from the right —
+//     the address the real, single reverse proxy this deployment sits
+//     behind actually appended — never a client-supplied prefix. See
+//     `docs/DECISIONS.md` D-065's "Update:" note for the full history.
+// ---------------------------------------------------------------------------
+
+describe('finding #3: a spoofed X-Forwarded-For prefix cannot obtain a fresh rate-limit budget', () => {
+  it('a-fresh-fabricated-forwarded-for-address-on-every-request-still-shares-one-rate-limit-budget-not-a-new-one-each-time', async () => {
+    // The global default is `max: 100, timeWindow: '1 minute'`. Every
+    // request below claims a DIFFERENT fabricated client address ahead of
+    // the same real proxy hop (127.0.0.1, `.inject()`'s own default peer)
+    // — under the pre-fix `trustProxy: true`, each fabricated address would
+    // resolve to a distinct `request.ip`, so every request would land in
+    // its own separate, always-empty rate-limit bucket and never hit 429
+    // no matter how many requests were sent. Under `trustProxy: 1`, all of
+    // them resolve to the one real proxy-appended address (127.0.0.1) and
+    // correctly share a single budget.
+    let sawRateLimited = false;
+    for (let i = 0; i < 105; i += 1) {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/this-route-does-not-exist-either',
+        headers: { 'x-forwarded-for': `203.0.113.${i % 255}, 127.0.0.1` },
+      });
+      if (res.statusCode === 429) {
+        sawRateLimited = true;
         break;
       }
       expect(res.statusCode).toBe(404);
