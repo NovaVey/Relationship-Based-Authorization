@@ -34,6 +34,7 @@
     "start": "node dist/cli/index.js doctor && node dist/cli/index.js serve",
     "cli": "tsx src/cli/index.ts",
     "seed:example": "tsx scripts/seed-example.ts",
+    "benchmark": "tsx scripts/benchmark-check-depth.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
