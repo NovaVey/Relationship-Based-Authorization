@@ -126,6 +126,32 @@ export interface SoundnessRunOptions {
    * this option changes nothing about the default path.
    */
   dryRun?: boolean;
+  /**
+   * Called after each concurrency-sized batch of queries finishes checking
+   * (`checkAllQueries` below) — never more often than that, and never for
+   * anything else this function does (schema publish, tuple writes,
+   * cleanup). `completed` is always `<= total`; the final call in any run
+   * always has `completed === total`, so a caller doesn't need its own
+   * separate "done" signal.
+   *
+   * Added live, for a real reason: `soundness run`'s existing contract
+   * (nothing prints until the whole run finishes) looks identical to a
+   * hang on a slow connection — the checks phase is the one meaningfully
+   * long part of a run, and a real user with no visibility into that
+   * asked, mid-troubleshooting, "can you make it so it gives me a count
+   * every x amount." Omit for today's exact behavior: `checkAllQueries`
+   * skips the callback entirely when this is `undefined`, so nothing about
+   * the default path changes. Deliberately a plain callback, not a
+   * `console.log` call in this file directly — `runner.ts` does real I/O
+   * elsewhere (Postgres, in `checkAllQueries` itself) but has no opinion on
+   * *how* progress is displayed; `src/cli/commands/soundness.ts` supplies
+   * the actual stderr-writing implementation (`createProgressReporter`,
+   * `src/report/progress.ts`) — never stdout, since `--format
+   * markdown`/`json`'s own contract is "stdout is the report and nothing
+   * else" (this file's own sibling doc comments elsewhere in this
+   * codebase; see that CLI file's top-of-file comment).
+   */
+  onProgress?: (completed: number, total: number) => void;
 }
 
 /**
@@ -281,6 +307,7 @@ async function checkAllQueries(
   queries: readonly GeneratedQuery[],
   concurrency: number,
   maxDepth: number,
+  onProgress?: (completed: number, total: number) => void,
 ): Promise<CheckedQuery[]> {
   const results: CheckedQuery[] = [];
   for (let start = 0; start < queries.length; start += concurrency) {
@@ -312,6 +339,13 @@ async function checkAllQueries(
       }),
     );
     results.push(...batchResults);
+    // See `SoundnessRunOptions.onProgress`'s own doc comment — called once
+    // per batch, after that batch's queries have actually finished
+    // checking, never more often. `results.length` is always the true
+    // completed count regardless of `queries.length % concurrency`, since
+    // `batch` (and so `batchResults`) is only ever smaller than
+    // `concurrency` on the final iteration.
+    onProgress?.(results.length, queries.length);
   }
   return results;
 }
@@ -517,6 +551,7 @@ export async function runSoundnessFuzz(
       fixture.queries,
       concurrency,
       effectiveMaxDepth,
+      options.onProgress,
     );
 
     const divergences: DivergenceRecord[] = [];

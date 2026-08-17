@@ -121,6 +121,12 @@ database is left exactly as `seed:example` left it. Drop `--dry-run` if
 you'd rather see the generated fixture persist in `namespace_configs`
 afterward — it's harmless either way, just no longer the default.
 
+5,000 real queries against a database that isn't `localhost` (a hosted
+Postgres, say) can take a while, and this command otherwise prints nothing
+until it's completely done — silence that's easy to mistake for a hang.
+Add `--progress <n>` to get a `checked X/Y queries` line on stderr every
+`n` queries: `authz soundness run --dry-run --progress 500`.
+
 ### Troubleshooting: `authz doctor` says `Postgres: unreachable`
 
 `cp .env.example .env` alone leaves `DATABASE_URL` pointing at the
@@ -233,7 +239,7 @@ authz tuple write <object> <relation> <subject>     write a tuple, prints the re
 authz tuple delete <object> <relation> <subject>
 authz check <subject> <relation> <object> [--at-token <n>] [--path]   --path: print the real resolution path (see "What an allow actually looks like here" above)
 authz expand <object> <relation>                    print the resolved subject tree
-authz soundness run [--queries N] [--seed S] [--format text|markdown|json] [--dry-run]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted)
+authz soundness run [--queries N] [--seed S] [--format text|markdown|json] [--dry-run] [--progress N]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted; --progress: "checked X/Y queries" on stderr every N queries)
 authz serve                                         start the Fastify API server
 ```
 
