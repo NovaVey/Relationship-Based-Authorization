@@ -1,8 +1,20 @@
 # Relationship-Based Authorization
 
+A fine-grained authorization service, Zanzibar-style: relationship tuples
+and a graph-walking check engine, with a differential-fuzzing proof that
+the check engine never grants a permission no real path supports.
+
 [![CI](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/ci.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/ci.yml)
 [![Soundness](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/soundness.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/soundness.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
+**Live:** [`authz-api-production.up.railway.app`](https://authz-api-production.up.railway.app/health) —
+`GET /health` (unauthenticated) reports real database connectivity and every
+currently-published namespace's version. `POST /check`/`/expand`/`/schema/publish`
+and `/tuples` writes are `ADMIN_API_KEY`-gated (D-064) — this is a live instance
+of the real service, not a public sandbox, so read access is deliberately not
+open to anyone who finds the URL. `POST /schema/compile` (no write, no gate) is
+open if you want to try the DSL compiler itself against your own source.
 
 ## The failure this exists to stop
 
@@ -128,6 +140,29 @@ Spanner-style external consistency across a distributed deployment.
 **[`docs/CONSISTENCY.md`](docs/CONSISTENCY.md)** states the one property
 this must never violate, and what this project deliberately does not
 claim.
+
+## Latency
+
+`performCheck` (the check engine's own graph walk plus its real Postgres
+round trips — no HTTP/network transit, which is a property of where a
+caller is calling _from_, not a property of this engine) at increasing
+permission-chain depth, measured against real Postgres, 50 runs per depth:
+
+| Depth | p50    | p95    |
+| ----- | ------ | ------ |
+| 1     | 4.9ms  | 6.5ms  |
+| 3     | 9.6ms  | 12.6ms |
+| 5     | 12.6ms | 15.3ms |
+| 10    | 17.4ms | 21.5ms |
+
+Cost grows with depth — expected, since each hop is a real recursive step,
+not memoized (§6.1: no cached, precomputed permission anywhere). No cache
+is enabled by default (`CHECK_CACHE_TTL_MS=0` — see `docs/CONSISTENCY.md`'s
+own section on why, and what it would take to turn one on safely). Numbers
+are this repo's own, not a vendor claim — reproduce them yourself against
+your own database and hardware with `npm run benchmark`
+(`scripts/benchmark-check-depth.ts`), the same script that produced this
+table.
 
 ## What this is not
 
