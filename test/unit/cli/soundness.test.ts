@@ -284,3 +284,85 @@ describe('authz soundness run — SoundnessFixtureError vs. every other rejectio
     expect(process.exitCode).toBe(3);
   });
 });
+
+/**
+ * `--progress <n>` (D-090, `docs/DECISIONS.md`) — mirrors this file's own
+ * established `--queries` validation test shape (malformed input -> exit
+ * code 2) and the `vi.spyOn(runnerModule, 'runSoundnessFuzz')` pattern used
+ * throughout this file for asserting what `soundnessRun` actually passed
+ * through, without a real fuzz run or real Postgres. The cadence logic
+ * itself (`createProgressReporter`) is unit-tested directly and in full in
+ * `test/unit/report/progress.test.ts` — what's specifically under test here
+ * is narrower: does `soundnessRun` validate `--progress` the same way it
+ * already validates `--queries`, and does a valid value actually reach
+ * `runSoundnessFuzz` as a real `onProgress` function (not just some truthy
+ * value)?
+ */
+describe('authz soundness run — --progress', () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await closePool();
+    process.exitCode = undefined;
+  });
+
+  it.each(['0', '-5', 'abc', '3.5'])(
+    "invalid --progress '%s' exits 2 without ever calling runSoundnessFuzz",
+    async (badValue) => {
+      const spy = vi.spyOn(runnerModule, 'runSoundnessFuzz');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.exitCode = undefined;
+
+      await soundnessRun({ progress: badValue });
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(2);
+      expect(errorSpy).toHaveBeenCalled();
+    },
+  );
+
+  it('a-valid---progress-is-threaded-through-to-runsoundnessfuzz-as-a-real-onprogress-function', async () => {
+    const spy = vi.spyOn(runnerModule, 'runSoundnessFuzz').mockResolvedValue({
+      id: 'test-run-id-3',
+      graphSeed: 'test-seed-3',
+      namespaceCount: 1,
+      tupleCount: 1,
+      queryCount: 1,
+      falseGrantCount: 0,
+      falseDenyCount: 0,
+      criticalNamespaceFalseGrants: 0,
+      verdict: 'sound',
+      divergences: [],
+    });
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({ progress: '500' });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const passedOptions = spy.mock.calls[0]?.[1];
+    expect(typeof passedOptions?.onProgress).toBe('function');
+  });
+
+  it('omitting --progress passes no onProgress at all — the default path is unchanged', async () => {
+    const spy = vi.spyOn(runnerModule, 'runSoundnessFuzz').mockResolvedValue({
+      id: 'test-run-id-4',
+      graphSeed: 'test-seed-4',
+      namespaceCount: 1,
+      tupleCount: 1,
+      queryCount: 1,
+      falseGrantCount: 0,
+      falseDenyCount: 0,
+      criticalNamespaceFalseGrants: 0,
+      verdict: 'sound',
+      divergences: [],
+    });
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    process.exitCode = undefined;
+
+    await soundnessRun({});
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const passedOptions = spy.mock.calls[0]?.[1];
+    expect(passedOptions?.onProgress).toBeUndefined();
+  });
+});

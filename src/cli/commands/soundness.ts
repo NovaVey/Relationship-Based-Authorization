@@ -36,15 +36,26 @@
  * since both modes' own contract is "stdout is the report and nothing
  * else."
  *
+ * `--progress <n>` (D-090): prints `  checked X/Y queries` to **stderr**
+ * every `n` completed queries, plus once more on the final batch regardless
+ * of whether `n` evenly divides the total — see `createProgressReporter`
+ * (`src/report/progress.ts`) for the cadence logic and
+ * `SoundnessRunOptions.onProgress` (`src/soundness/runner.ts`) for how it's
+ * threaded into the actual check loop. Omit for today's exact behavior —
+ * no progress output at all, unchanged since before this option existed.
+ * Always stderr, in every `--format`, including `markdown`/`json` — never
+ * stdout, which those two formats' own contract (this comment, just above)
+ * requires stay exactly the report and nothing else.
+ *
  * Exit codes, per §7's table (distinct from `check`/`tuple`'s own table —
  * this command's `1` and `2` mean something specific to a soundness
  * verdict, not a generic validation/audit failure):
  *   0  verdict `sound`
  *   1  verdict `unsound` — at least one `false_grant` (§6.5: always
  *      blocking, regardless of aggregate rate or critical-namespace status)
- *   2  verdict `insufficient_coverage`, a malformed `--queries`/`--format`
- *      argument (`--seed` accepts any string, including empty — it is
- *      never itself "malformed"; full-repo audit finding #15, LOW,
+ *   2  verdict `insufficient_coverage`, a malformed `--queries`/`--format`/
+ *      `--progress` argument (`--seed` accepts any string, including empty
+ *      — it is never itself "malformed"; full-repo audit finding #15, LOW,
  *      2026-08-16), or `runSoundnessFuzz` threw a
  *      `SoundnessFixtureError` — the generated fixture itself failed to
  *      compile/publish/write (a generator bug, not a resolver finding —
@@ -100,12 +111,15 @@ import {
   renderSoundnessFixtureFailureJsonString,
 } from '../../report/json.js';
 import { soundnessExitCode } from '../../report/exitCodes.js';
+import { createProgressReporter } from '../../report/progress.js';
 
 export interface SoundnessRunCliOptions {
   queries?: string;
   seed?: string;
   format?: string;
   dryRun?: boolean;
+  /** See `--progress`'s own validation below and `createProgressReporter` (`src/report/progress.ts`). */
+  progress?: string;
 }
 
 const VALID_FORMATS = ['text', 'markdown', 'json'] as const;
@@ -207,6 +221,24 @@ export async function soundnessRun(options: SoundnessRunCliOptions): Promise<voi
     }
   }
 
+  // Omit `--progress` entirely for today's exact behavior (no stderr
+  // output during the run at all) — `onProgress` below stays `undefined`,
+  // and `checkAllQueries` (`src/soundness/runner.ts`) skips the callback
+  // entirely in that case. Always stderr, via `createProgressReporter`
+  // (`src/report/progress.ts`), never stdout — see that file's own doc
+  // comment on why `--format markdown`/`json`'s "stdout is the report and
+  // nothing else" contract makes that non-negotiable.
+  let onProgress: ((completed: number, total: number) => void) | undefined;
+  if (options.progress !== undefined) {
+    const every = Number(options.progress);
+    if (!Number.isInteger(every) || every <= 0) {
+      console.error(`invalid --progress '${options.progress}' — must be a positive integer`);
+      process.exitCode = 2;
+      return;
+    }
+    onProgress = createProgressReporter(every, (line) => process.stderr.write(line));
+  }
+
   const formatRaw = options.format ?? 'text';
   if (!isValidFormat(formatRaw)) {
     console.error(`invalid --format '${formatRaw}' — must be one of: ${VALID_FORMATS.join(', ')}`);
@@ -232,6 +264,7 @@ export async function soundnessRun(options: SoundnessRunCliOptions): Promise<voi
       dryRun,
       ...(seed !== undefined ? { seed } : {}),
       ...(queryCount !== undefined ? { queryCount } : {}),
+      ...(onProgress !== undefined ? { onProgress } : {}),
     });
 
     if (format === 'markdown') {

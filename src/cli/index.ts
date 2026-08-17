@@ -128,8 +128,18 @@ soundness
     '--dry-run',
     'run for real and print the same result, but delete every row this run creates before returning — nothing persists',
   )
+  .option(
+    '--progress <n>',
+    'print "checked X/Y queries" to stderr every n completed queries (default: no progress output)',
+  )
   .action(
-    async (options: { queries?: string; seed?: string; format?: string; dryRun?: boolean }) => {
+    async (options: {
+      queries?: string;
+      seed?: string;
+      format?: string;
+      dryRun?: boolean;
+      progress?: string;
+    }) => {
       await soundnessRun(options);
     },
   );
