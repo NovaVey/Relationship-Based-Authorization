@@ -9,12 +9,14 @@ the check engine never grants a permission no real path supports.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 **Live:** [`authz-api-production.up.railway.app`](https://authz-api-production.up.railway.app/health) —
-`GET /health` (unauthenticated) reports real database connectivity and every
-currently-published namespace's version. `POST /check`/`/expand`/`/schema/publish`
-and `/tuples` writes are `ADMIN_API_KEY`-gated (D-064) — this is a live instance
-of the real service, not a public sandbox, so read access is deliberately not
-open to anyone who finds the URL. `POST /schema/compile` (no write, no gate) is
-open if you want to try the DSL compiler itself against your own source.
+seeded with the exact demo graph below (`document`/`folder`/`group`/`org`,
+all four published); `GET /health` (unauthenticated) confirms this directly —
+real database connectivity, and the four namespaces above at their real
+versions. `POST /check`/`/expand`/`/schema/publish` and `/tuples` writes are
+`ADMIN_API_KEY`-gated (D-064) — this is a live instance of the real service,
+not a public sandbox, so read access is deliberately not open to anyone who
+finds the URL. `POST /schema/compile` (no write, no gate) is open if you want
+to try the DSL compiler itself against your own source.
 
 ## The failure this exists to stop
 
