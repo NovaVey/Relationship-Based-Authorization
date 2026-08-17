@@ -5,11 +5,21 @@
  * exits 3 (infrastructure failure, per §7's exit code table) — never a
  * bare stack trace, and never a silent hang on a dead connection string.
  */
+import { fileURLToPath } from 'node:url';
 import { getPool, closePool } from '../../store/client.js';
 import { discoverMigrations, runMigrations } from '../../store/migrate.js';
 import { env } from '../../config/env.js';
 
-const MIGRATIONS_DIR = new URL('../../store/migrations', import.meta.url).pathname;
+// fileURLToPath, not `new URL(...).pathname` — the latter leaves a leading
+// `/` in front of a Windows drive letter (`/C:/Users/...`), which isn't a
+// valid filesystem path on Windows. `existsSync` on that bogus path quietly
+// returns false, and `discoverMigrations` (deliberately lenient — see its
+// own doc comment, a missing dir is "zero migrations", not an error, for
+// the legitimate case of a fresh clone before Phase 2's first migration
+// existed) reports 0 total migrations with no error at all: `doctor` prints
+// "Migrations: 0/0 applied" and exits 0, looking identical to success.
+// `src/config/env.ts` already gets this right; this mirrors that.
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../store/migrations', import.meta.url));
 
 export async function doctor(): Promise<void> {
   console.log(`authz doctor — NODE_ENV=${env.NODE_ENV}`);
