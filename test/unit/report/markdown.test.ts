@@ -6,7 +6,10 @@
  * document:readme#view`), `docs/DECISIONS.md` D-036 (proof/disproof
  * symmetry for exclusion), D-043 (fenced-block rendering for non-linear
  * paths, and the annotation-placement bug this file's own tests must be
- * able to catch), D-044 (bold-label, never emoji, for `false_grant`).
+ * able to catch), D-044 (bold-label, never emoji, for `false_grant`), D-084
+ * (the `false_grant` size budget — a real crash this file's tests must be
+ * able to catch: uncapped `false_grant` rendering could itself cross
+ * GitHub's PR-comment limit).
  *
  * Fixtures below are hand-built `ResolutionStep`/`DisproofStep` trees using
  * the reference/production resolvers' own exported types
@@ -343,6 +346,111 @@ describe('renderSoundnessMarkdown — false_grant always renders in full, regard
     // to the word "false_grant".
     expect(output).not.toMatch(/further false_grant/i);
     expect(output).not.toMatch(/false_grant.*omitted/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Full-repo audit finding (HIGH, 2026-08-16): uncapped false_grant rendering
+// could itself cross GitHub's ~65,536-character PR-comment-body limit and
+// crash scripts/post-soundness-comment.mjs on GitHub's own 422, before it
+// ever posted a comment — exactly the worst-case finding this whole
+// reporting pipeline exists to surface. `renderSoundnessMarkdown` now
+// applies a real size budget (`maxCommentChars`, `docs/DECISIONS.md` D-084)
+// to the false_grant section specifically — never a fixed entry-count cap
+// (that stays the false_deny-only mechanism, see the describe block above
+// and below): once the running body would cross the budget, further
+// false_grant entries stop rendering their own resolution path, but the
+// true total count and an unmissable, un-muted truncation notice always
+// render in their place. This is deliberately a *different* mechanism from
+// the "always renders in full, regardless of count" describe block above —
+// that block's own small (3-entry) fixtures never approach any realistic
+// size budget, so it stays a true, un-truncated regression guard on its own.
+// ---------------------------------------------------------------------------
+describe("renderSoundnessMarkdown — false_grant respects a real size budget so this comment can never cross GitHub's limit, and always discloses the true total", () => {
+  function grantFor(n: number): DivergenceRecord {
+    return {
+      query: {
+        subject: { ns: 'user', id: `mallory${n}` },
+        object: { ns: 'document', id: `secret${n}` },
+        relationOrPermission: 'view',
+      },
+      expected: false,
+      actual: true,
+      kind: 'false_grant',
+      critical: false,
+      productionPath: {
+        kind: 'directGrant',
+        object: { ns: 'document', id: `secret${n}` },
+        relation: 'viewer',
+        subject: { ns: 'user', id: `mallory${n}` },
+      },
+    };
+  }
+
+  it('a-small-override-budget-still-renders-at-least-one-false-grant-in-full-and-discloses-the-true-total-for-the-rest', () => {
+    const divergences = Array.from({ length: 20 }, (_, i) => grantFor(i + 1));
+    const result = baseResult({ verdict: 'unsound', falseGrantCount: 20, divergences });
+
+    const output = renderSoundnessMarkdown(result, { maxCommentChars: 2000 });
+
+    // At least the first entry rendered in full, with its real resolution path.
+    expect(output).toContain('user:mallory1');
+    expect(output).toContain('document:secret1#view');
+
+    // Not every one of the 20 fits under a 2,000-character budget.
+    const summaryCount = output.match(/<summary>/g)?.length ?? 0;
+    expect(summaryCount).toBeGreaterThan(0);
+    expect(summaryCount).toBeLessThan(20);
+
+    // The truncation notice is unmissable (bold) and states the real total —
+    // never a bare "N divergences" with no evidence of severity.
+    expect(output).toMatch(
+      /\*\*TRUNCATED.+FALSE_GRANT.+not shown in this comment.+\(20 total\)\.\*\*/,
+    );
+    expect(output).toContain('every omitted entry is a full **FALSE_GRANT** finding');
+    expect(output).toMatch(/Run soundness fuzz.*step log/);
+  });
+
+  it('the-default-budget-keeps-500-false-grant-divergences-under-githubs-own-65-536-character-comment-limit', () => {
+    const divergences = Array.from({ length: 500 }, (_, i) => grantFor(i + 1));
+    const result = baseResult({ verdict: 'unsound', falseGrantCount: 500, divergences });
+
+    // Default options — no override — the real, shipped budget.
+    const output = renderSoundnessMarkdown(result);
+
+    // GitHub's own documented PR-comment-body ceiling.
+    expect(output.length).toBeLessThan(65_536);
+
+    const summaryCount = output.match(/<summary>/g)?.length ?? 0;
+    expect(summaryCount).toBeGreaterThan(0);
+    expect(summaryCount).toBeLessThan(500);
+    expect(output).toContain('(500 total)');
+    expect(output).toContain('**TRUNCATED');
+
+    // Confirms the ceiling is real, not incidental: rendering every one of
+    // the 500 in full (the pre-fix behavior) does cross GitHub's limit.
+    const unbounded = renderSoundnessMarkdown(result, { maxCommentChars: Infinity });
+    expect(unbounded.length).toBeGreaterThan(65_536);
+  });
+
+  it('the-truncation-notice-is-never-the-muted-false-deny-register-and-the-run-that-triggered-it-is-never-mistaken-for-sound', () => {
+    const divergences = Array.from({ length: 20 }, (_, i) => grantFor(i + 1));
+    const result = baseResult({ verdict: 'unsound', falseGrantCount: 20, divergences });
+
+    const output = renderSoundnessMarkdown(result, { maxCommentChars: 2000 });
+
+    expect(output).not.toMatch(/^SOUND\b/m);
+    expect(output).not.toContain('`false_deny`');
+  });
+
+  it('a-run-with-few-false-grants-never-triggers-truncation-even-with-the-default-budget-no-false-positive', () => {
+    const divergences = Array.from({ length: 3 }, (_, i) => grantFor(i + 1));
+    const result = baseResult({ verdict: 'unsound', falseGrantCount: 3, divergences });
+
+    const output = renderSoundnessMarkdown(result);
+
+    expect(output).not.toContain('TRUNCATED');
+    expect(output.match(/<summary>/g)?.length).toBe(3);
   });
 });
 

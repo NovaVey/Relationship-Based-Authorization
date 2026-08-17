@@ -42,8 +42,10 @@
  *   0  verdict `sound`
  *   1  verdict `unsound` — at least one `false_grant` (§6.5: always
  *      blocking, regardless of aggregate rate or critical-namespace status)
- *   2  verdict `insufficient_coverage`, a malformed `--queries`/`--seed`/
- *      `--format` argument, or `runSoundnessFuzz` threw a
+ *   2  verdict `insufficient_coverage`, a malformed `--queries`/`--format`
+ *      argument (`--seed` accepts any string, including empty — it is
+ *      never itself "malformed"; full-repo audit finding #15, LOW,
+ *      2026-08-16), or `runSoundnessFuzz` threw a
  *      `SoundnessFixtureError` — the generated fixture itself failed to
  *      compile/publish/write (a generator bug, not a resolver finding —
  *      see `runner.ts`). **Implemented by an `instanceof

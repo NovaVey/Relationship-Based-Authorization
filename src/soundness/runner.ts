@@ -363,7 +363,20 @@ async function cleanupDryRunArtifacts(
 
   for (const tuple of artifacts.tuples) {
     try {
-      await deleteTuple(pool, tuple);
+      const result = await deleteTuple(pool, tuple);
+      // `deleteTuple` reports a validation failure as `{ ok: false, errors
+      // }`, not a thrown error — checked explicitly here, not just
+      // `await`ed, so this loop's own doc comment above ("every deletion
+      // attempted... a single AggregateError summarizing whatever failed")
+      // holds for both failure shapes the same way the write loop above
+      // already checks `.ok` for writes (full-repo audit finding #10, LOW,
+      // 2026-08-16 — not reachable today, since every fixture-generated
+      // tuple already deterministically passes `deleteTuple`'s own
+      // syntactic identifier check, but a latent gap in this contract
+      // nonetheless).
+      if (!result.ok) {
+        errors.push(new Error(`deleteTuple validation failed: ${JSON.stringify(result.errors)}`));
+      }
     } catch (err) {
       errors.push(err);
     }

@@ -47,11 +47,13 @@ user:dana
 
 Two levels of nested group membership, then a folder-level grant, then
 inheritance down to the document — five real hops, none of them a
-shortcut. `authz check user:dana edit document:eng_handbook` returns this
-exact path (`docs/RELATIONS.md` walks through why each hop is there);
-`authz expand document:eng_handbook edit` shows the same structure as a
-full tree, every branch that was and wasn't involved. Deny decisions are
-symmetric: `authz check user:mallory view org:acme` returns `DENIED`
+shortcut. `authz check user:dana edit document:eng_handbook --path` prints
+this exact path (`docs/RELATIONS.md` walks through why each hop is there;
+plain `check`, without `--path`, prints only `ALLOWED`/`DENIED` — the path
+is always computed and logged to the audit trail either way, `--path` just
+also prints it); `authz expand document:eng_handbook edit` shows the same
+structure as a full tree, every branch that was and wasn't involved. Deny
+decisions are symmetric: `authz check user:mallory view org:acme` returns `DENIED`
 because she's excluded by name (`org.view = member - banned` — see
 `docs/RELATIONS.md`), not because nothing else was checked.
 
@@ -89,7 +91,7 @@ npm install
 cp .env.example .env        # set DATABASE_URL to any reachable Postgres 16+
 npx tsx src/cli/index.ts doctor          # confirms Postgres is reachable, applies migrations
 npm run seed:example                     # publishes schema/example.authz + the real demo graph above
-npx tsx src/cli/index.ts check user:dana edit document:eng_handbook
+npx tsx src/cli/index.ts check user:dana edit document:eng_handbook --path   # --path prints the diagram above, exactly
 npx tsx src/cli/index.ts expand document:eng_handbook edit
 npx tsx src/cli/index.ts soundness run --dry-run   # the SOUND result above, reproduced live against your own database
 ```
@@ -169,7 +171,7 @@ authz schema compile <file>                         parse + compile a namespace 
 authz schema publish <file>                         compile and publish a new namespace_configs version
 authz tuple write <object> <relation> <subject>     write a tuple, prints the returned consistency token
 authz tuple delete <object> <relation> <subject>
-authz check <subject> <relation> <object> [--at-token <n>]
+authz check <subject> <relation> <object> [--at-token <n>] [--path]   --path: print the real resolution path (see "What an allow actually looks like here" above)
 authz expand <object> <relation>                    print the resolved subject tree
 authz soundness run [--queries N] [--seed S] [--format text|markdown|json] [--dry-run]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted)
 authz serve                                         start the Fastify API server

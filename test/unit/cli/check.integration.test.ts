@@ -11,7 +11,7 @@
  * Real, ephemeral Postgres via `PostgreSqlContainer` — see
  * `docs/DECISIONS.md` D-019/D-030.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
@@ -147,5 +147,68 @@ describe('authz check really persists a checks row, end to end through the CLI',
     // path.
     expect(rows[0]?.resolution_path).toBeNull();
     expect(Number.isInteger(rows[0]?.depth)).toBe(true);
+  });
+
+  /**
+   * `--path` — full-repo audit finding #8: the README's own headline
+   * example states `authz check user:dana edit document:eng_handbook`
+   * "returns this exact path," but before this flag existed, plain `check`
+   * only ever printed `ALLOWED`/`DENIED`. Builds the identical shape as the
+   * README's own worked example (nested group membership → a
+   * tuple-to-userset `parent` hop → the document) against a real,
+   * uniquely-named namespace, and asserts the printed `--path` output
+   * matches, hop-for-hop, so this stays proven against a live check, not
+   * just the DB-free hand-built trees in `test/unit/cli/check-path.test.ts`.
+   */
+  it('a-real-cli-check-invocation-with---path-prints-the-real-resolution-path', async () => {
+    const ns = uniqueName('doc');
+    await publishOk(
+      [
+        `namespace ${ns} {`,
+        '  relation editor: user',
+        '  relation parent: folder',
+        '  permission edit = editor | parent->editor',
+        '}',
+        `namespace folder {`,
+        '  relation editor: user',
+        '  relation member: user',
+        '}',
+      ].join('\n'),
+    );
+    const folderId = uniqueName('folder');
+    const docId = uniqueName('doc');
+    await writeOk(tuple('folder', folderId, 'editor', 'user', 'dana'));
+    await writeOk({
+      objectNs: ns,
+      objectId: docId,
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: folderId,
+    });
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    let lines: string[];
+    try {
+      await check('user:dana', 'edit', `${ns}:${docId}`, { path: true });
+      // Read `.mock.calls` before `mockRestore()` — `mockRestore()` does
+      // everything `mockReset()` does (which clears recorded calls) and
+      // then restores the original implementation; reading after restoring
+      // silently sees an empty array, not an error, which is exactly what
+      // caught this during LOCALVERIFY (every assertion below failed with
+      // "expected undefined" — zero calls recorded — even though a
+      // standalone reproduction of the identical call outside vitest
+      // printed the correct three lines every time).
+      lines = logSpy.mock.calls.map((call) => call[0] as string);
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(process.exitCode).toBeUndefined();
+    expect(lines[0]).toBe(`user:dana edit ${ns}:${docId}: ALLOWED`);
+    expect(lines.slice(1)).toEqual([
+      'user:dana',
+      `  → folder:${folderId}#editor`,
+      `  → ${ns}:${docId}#edit`,
+    ]);
   });
 });

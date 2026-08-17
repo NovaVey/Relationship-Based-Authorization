@@ -133,3 +133,66 @@ describe('authz soundness run — --format dispatch', () => {
     expect(allOutput).not.toBe(renderSoundnessJsonString(result));
   });
 });
+
+describe('authz soundness run — --dry-run leaves markdown/json stdout untouched', () => {
+  // `src/cli/commands/soundness.ts`'s own top-of-file doc comment states
+  // this as a load-bearing contract: "Only affects `--format text`'s extra
+  // note below; `markdown`/`json` output is untouched either way, since
+  // both modes' own contract is 'stdout is the report and nothing else.'"
+  // — true by inspection (the dry-run note is only ever appended inside
+  // `printText`, never reached by the markdown/json branches), but nothing
+  // committed exercised `soundnessRun` itself with `dryRun: true` through
+  // those two branches before this file; the existing dedicated dry-run
+  // tests call `runSoundnessFuzz` directly, bypassing `--format` dispatch
+  // entirely. These two prove the contract by calling `soundnessRun` twice
+  // — once with `dryRun: false`, once with `dryRun: true`, same mocked
+  // result both times — and asserting the two stdout writes are literally
+  // identical, not merely "both look like markdown/JSON."
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await closePool();
+    process.exitCode = undefined;
+  });
+
+  it('dry-run-combined-with-format-markdown-produces-byte-identical-stdout-to-the-non-dry-run-call-carrying-no-dry-run-note', async () => {
+    const result = cannedResult();
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockResolvedValue(result);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    process.exitCode = undefined;
+    await soundnessRun({ format: 'markdown', dryRun: false });
+    process.exitCode = undefined;
+    await soundnessRun({ format: 'markdown', dryRun: true });
+
+    expect(logSpy).toHaveBeenCalledTimes(2);
+    const [nonDryOutput] = logSpy.mock.calls[0] ?? [];
+    const [dryOutput] = logSpy.mock.calls[1] ?? [];
+    expect(dryOutput).toBe(nonDryOutput);
+    // Independently anchored, not merely self-consistent with each other:
+    // both calls equal the renderer's own output verbatim, so a bug that
+    // corrupted *both* calls identically (e.g. a dry-run note baked into
+    // `renderSoundnessMarkdown` itself) would still be caught.
+    expect(nonDryOutput).toBe(renderSoundnessMarkdown(result));
+    expect(dryOutput).toBe(renderSoundnessMarkdown(result));
+  });
+
+  it('dry-run-combined-with-format-json-produces-byte-identical-stdout-to-the-non-dry-run-call-carrying-no-dry-run-note', async () => {
+    const result = cannedResult();
+    env.DATABASE_URL = 'postgres://mock:mock@127.0.0.1:1/mock';
+    vi.spyOn(runnerModule, 'runSoundnessFuzz').mockResolvedValue(result);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    process.exitCode = undefined;
+    await soundnessRun({ format: 'json', dryRun: false });
+    process.exitCode = undefined;
+    await soundnessRun({ format: 'json', dryRun: true });
+
+    expect(logSpy).toHaveBeenCalledTimes(2);
+    const [nonDryOutput] = logSpy.mock.calls[0] ?? [];
+    const [dryOutput] = logSpy.mock.calls[1] ?? [];
+    expect(dryOutput).toBe(nonDryOutput);
+    expect(nonDryOutput).toBe(renderSoundnessJsonString(result));
+    expect(dryOutput).toBe(renderSoundnessJsonString(result));
+  });
+});

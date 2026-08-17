@@ -93,8 +93,14 @@ program
     '--at-token <n>',
     'pin the check to a consistency token returned by an earlier write/delete',
   )
+  .option('--path', 'print the real resolution path an ALLOWED result was reached through')
   .action(
-    async (subject: string, relation: string, object: string, options: { atToken?: string }) => {
+    async (
+      subject: string,
+      relation: string,
+      object: string,
+      options: { atToken?: string; path?: boolean },
+    ) => {
       await check(subject, relation, object, options);
     },
   );

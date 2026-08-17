@@ -60,6 +60,19 @@ exists as a real, testable assertion rather than an assumption — the check
 fails loudly (an infrastructure error) rather than silently reading stale
 data and returning a wrong answer.
 
+"Everything before it" holds for _any_ observed token, not only one the
+same caller minted themselves — including a token that names a write some
+other, concurrent transaction produced. That's a stronger claim than it
+looks: `write_log.token` is a Postgres identity column, whose sequence
+value is allocated at INSERT time, non-transactionally — allocation order
+alone gives no guarantee about commit order. `writeTuple`/`deleteTuple`
+(`src/store/tuples.ts`) close that gap explicitly with a global,
+transaction-scoped `pg_advisory_xact_lock`, serializing every tuple
+write/delete in the system so that token-allocation order and commit order
+always agree — see `acquireWriteLogLock`'s own doc comment and
+`docs/DECISIONS.md` D-083 for the race this closes and how it was verified
+live.
+
 **A check with no token is a plain read of whatever is currently
 committed.** Not "the latest write, always" in some real-time-guaranteed
 sense — an ordinary, unpinned read, bounded by nothing more than Postgres's

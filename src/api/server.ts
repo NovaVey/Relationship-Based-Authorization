@@ -52,6 +52,7 @@ import Fastify, {
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
+  type FastifyServerOptions,
 } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import type { Pool } from 'pg';
@@ -175,6 +176,25 @@ async function runOrInfrastructureError<T>(
   }
 }
 
+export interface BuildServerOptions {
+  /**
+   * Overrides the Fastify/pino request logger this function would otherwise
+   * build from `env.LOG_LEVEL` (full-repo audit finding #14, LOW,
+   * 2026-08-16). Omitted (the default, `undefined`) preserves production
+   * behavior exactly — `serve.ts` (the one production caller) never passes
+   * this option, so a real `authz serve` still gets `{ level: env.LOG_LEVEL
+   * }` precisely as before. Every test file that calls `buildServer(pool)`
+   * now passes `{ logger: false }` explicitly instead, so hundreds of
+   * per-request JSON log lines (rate-limit and 404-flooding tests alone
+   * fire well over a hundred requests each) no longer interleave with the
+   * Vitest summary and bury real assertion diffs in CI output. `false` is
+   * Fastify's own documented way to disable its logger entirely — distinct
+   * from `{ level: 'silent' }`, which still constructs a full pino instance
+   * and pays its per-call overhead, just without ever writing anything.
+   */
+  logger?: FastifyServerOptions['logger'];
+}
+
 /**
  * Async — the one await in this function's own body is load-bearing, not
  * cosmetic. `app.register(rateLimit, ...)` must be awaited *before* any
@@ -189,20 +209,32 @@ async function runOrInfrastructureError<T>(
  * count). See `docs/DECISIONS.md` D-056 and this file's own doc comment on
  * the plugin registration below.
  */
-export async function buildServer(pool: Pool): Promise<FastifyInstance> {
-  // `trustProxy: true` (D-065) — `serve.ts` binds `0.0.0.0` specifically so
-  // this process can be reached "from outside the process (a container, a
-  // platform like Railway)" (see that file's own doc comment) — a
-  // platform-hosted deployment reached this way typically sits behind that
-  // platform's own reverse proxy/load balancer rather than answering client
-  // sockets directly. Without this, every request's rate-limit key
-  // (`request.ip`, the default `keyGenerator`) resolves to the proxy's own
-  // address for every caller alike, collapsing every distinct real client
-  // onto one shared budget — a single caller could exhaust it for everyone
-  // behind the same proxy. `true` trusts `X-Forwarded-For` unconditionally;
-  // see `docs/DECISIONS.md` D-065 for the tradeoff this accepts and when to
-  // revisit it (e.g. a deployment that genuinely answers raw sockets
-  // directly, where this would let a client spoof its own rate-limit key).
+export async function buildServer(
+  pool: Pool,
+  options: BuildServerOptions = {},
+): Promise<FastifyInstance> {
+  // `trustProxy: 1` (D-065, corrected by full-repo audit finding — MEDIUM,
+  // 2026-08-16, see docs/DECISIONS.md D-065's own "Update:" note) —
+  // `serve.ts` binds `0.0.0.0` specifically so this process can be reached
+  // "from outside the process (a container, a platform like Railway)" (see
+  // that file's own doc comment) — a platform-hosted deployment reached
+  // this way typically sits behind exactly ONE reverse proxy/load balancer
+  // hop, not an arbitrary chain, and never answers client sockets directly.
+  // Without any trust, every request's rate-limit key (`request.ip`, the
+  // default `keyGenerator`) resolves to the proxy's own address for every
+  // caller alike, collapsing every distinct real client onto one shared
+  // budget. `true` was the original fix for that, but `true` means "trust
+  // every hop `X-Forwarded-For` claims," including hops the *client itself*
+  // prepends ahead of the one real proxy-appended hop — a caller can send
+  // `X-Forwarded-For: <anything>, <real-proxy-ip>` and have `request.ip`
+  // resolve to their own fabricated value, defeating every rate limit in
+  // this file (confirmed live: `trustProxy: true` resolves such a request
+  // to the client's own spoofed address; `trustProxy: 1` — trust exactly
+  // one hop from the right, i.e. the address the actual reverse proxy
+  // appended — resolves it correctly regardless of what the client
+  // prepends). `1` is the fix: it trusts precisely the one real hop this
+  // deployment shape has, never an attacker-controlled prefix. See
+  // `docs/DECISIONS.md` D-065 for the full history and revisit condition.
   // `bodyLimit` (D-067's own disclosed-but-not-yet-implemented "defense in
   // depth" recommendation, docs/DECISIONS.md): a hard ceiling on every
   // request body, enforced at the HTTP content-type-parsing layer, before
@@ -224,8 +256,8 @@ export async function buildServer(pool: Pool): Promise<FastifyInstance> {
   // text described. See `schemaSourceBodySchema` below for a second,
   // tighter, field-specific ceiling layered on top of this one.
   const app = Fastify({
-    logger: { level: env.LOG_LEVEL },
-    trustProxy: true,
+    logger: options.logger ?? { level: env.LOG_LEVEL },
+    trustProxy: 1,
     bodyLimit: 262_144,
   });
 

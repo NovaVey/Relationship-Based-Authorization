@@ -36,7 +36,7 @@
  * safe to run concurrently and in any order.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Pool } from 'pg';
+import { Client, Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import {
@@ -44,6 +44,8 @@ import {
   deleteTuple,
   listTuplesByObject,
   listTuplesBySubject,
+  WRITE_LOG_LOCK_CLASSID,
+  WRITE_LOG_LOCK_OBJID,
   type TupleKey,
 } from '../../../src/store/tuples.js';
 import { currentToken, assertTokenObserved } from '../../../src/store/tokens.js';
@@ -643,5 +645,246 @@ describe('fail-closed: an unreachable database fails a store operation rather th
     await expect(
       listTuplesByObject(unreachablePool, { objectNs: 'document', objectId: 'readme' }),
     ).rejects.toThrow();
+  });
+});
+
+/**
+ * The regression test for the full-repo audit's HIGH-severity finding on
+ * `assertTokenObserved`/`writeTuple`/`deleteTuple` — `write_log.token` is a
+ * `bigint generated always as identity` column, allocated non-
+ * transactionally at INSERT-statement-execution time, so its allocation
+ * order carries no guaranteed relationship to commit order on its own.
+ * Without a serializing lock, a slow-to-commit transaction A (lower token)
+ * and a fast, unrelated transaction B (higher token) could commit in the
+ * order B-then-A: a caller who pinned a check to B's token would pass
+ * `assertTokenObserved` (`max(token)` already covers B) while A's
+ * lower-or-equal-numbered write was still genuinely uncommitted — exactly
+ * the violation `docs/CONSISTENCY.md` states as non-negotiable ("a check
+ * pinned to token T never returns a result that ignores a write with token
+ * ≤ T"). See `src/store/tuples.ts`'s own `acquireWriteLogLock` doc comment
+ * for the fix (a global `pg_advisory_xact_lock($1, $2)`, first statement
+ * after `BEGIN`, in both `writeTuple` and `deleteTuple`) and
+ * `docs/DECISIONS.md` for the decision entry.
+ *
+ * Cannot be meaningfully unit-tested with a single connection — the whole
+ * bug is about the relationship between two *independently committed*
+ * transactions, so every test below drives two real, separate connections
+ * against real Postgres (one raw `pg.Client`, held open and uncommitted on
+ * purpose, plus the real `writeTuple`/`deleteTuple` functions called
+ * concurrently through the shared `pool`) rather than mocking anything.
+ *
+ * Each test acquires the *exact* production lock
+ * (`WRITE_LOG_LOCK_CLASSID`/`WRITE_LOG_LOCK_OBJID`, exported from
+ * `src/store/tuples.ts` for exactly this purpose — see that export's own
+ * doc comment) from the raw client, mirroring the literal sequence
+ * `writeTuple`/`deleteTuple` themselves run (`BEGIN`; acquire the lock;
+ * insert into `relation_tuples`/delete from it; insert into `write_log`
+ * `RETURNING token`) — this proves the *real* production lock genuinely
+ * blocks the *real* production functions, not a same-shaped-but-different
+ * lock that only coincidentally matches today.
+ */
+describe('a token pinned to a just-observed write never ignores an earlier, still-committing write — the inverted-commit-order race this store must never allow (full-repo audit finding, HIGH)', () => {
+  let raceContainer: StartedPostgreSqlContainer;
+  let racePool: Pool;
+  let raceNs: string;
+
+  beforeAll(async () => {
+    raceContainer = await new PostgreSqlContainer('postgres:16-alpine').start();
+    racePool = new Pool({ connectionString: raceContainer.getConnectionUri() });
+    await runMigrations(racePool, MIGRATIONS_DIR);
+    raceNs = uniqueName('race_doc');
+    const published = await publishSchema(racePool, documentSchemaSource(raceNs));
+    if (!published.ok) {
+      throw new Error(`race fixture schema failed to publish: ${published.errors.join('; ')}`);
+    }
+  }, 120_000);
+
+  afterAll(async () => {
+    await racePool.end();
+    await raceContainer.stop();
+  });
+
+  /** Waits `ms`, purely to give a wrongly-unblocked promise every chance to have already settled. */
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  it('a-writeTuple-call-genuinely-blocks-behind-an-earlier-uncommitted-transaction-holding-the-same-global-lock-and-observes-it-once-unblocked', async () => {
+    const objectA = uniqueName('obj_a');
+    const objectB = uniqueName('obj_b');
+
+    const clientA = new Client({ connectionString: raceContainer.getConnectionUri() });
+    await clientA.connect();
+
+    try {
+      // Client A: mirror writeTuple's own transaction, by hand, acquiring
+      // the *real* production lock — BEGIN; acquire; insert into
+      // relation_tuples; insert into write_log RETURNING token — then hold
+      // the transaction open, uncommitted, exactly the "slow to commit"
+      // half of the race.
+      await clientA.query('BEGIN');
+      await clientA.query('select pg_advisory_xact_lock($1, $2)', [
+        WRITE_LOG_LOCK_CLASSID,
+        WRITE_LOG_LOCK_OBJID,
+      ]);
+      await clientA.query(
+        `insert into relation_tuples
+           (object_ns, object_id, relation, subject_ns, subject_id, subject_relation)
+         values ($1, $2, 'viewer', 'user', 'alice', null)`,
+        [raceNs, objectA],
+      );
+      const aWriteLog = await clientA.query<{ token: string }>(
+        `insert into write_log (operation, tuple) values ('write', $1) returning token`,
+        [
+          JSON.stringify({
+            objectNs: raceNs,
+            objectId: objectA,
+            relation: 'viewer',
+            subjectNs: 'user',
+            subjectId: 'alice',
+          }),
+        ],
+      );
+      const tokenA = Number(aWriteLog.rows[0]?.token);
+      expect(Number.isInteger(tokenA)).toBe(true);
+
+      // Concurrently, the REAL writeTuple, for an entirely unrelated
+      // object — this is the "unrelated concurrent write" the finding
+      // itself describes, not a write racing for the same row.
+      let bSettled = false;
+      const bPromise = writeTuple(racePool, {
+        objectNs: raceNs,
+        objectId: objectB,
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId: 'bob',
+      }).then(
+        (r) => {
+          bSettled = true;
+          return r;
+        },
+        (e: unknown) => {
+          bSettled = true;
+          throw e;
+        },
+      );
+
+      // Give B every chance to have wrongly raced ahead of A.
+      await sleep(500);
+      expect(bSettled).toBe(false);
+
+      // Only now does A commit — the fix's whole point is that B could not
+      // have gotten this far without A finishing first.
+      await clientA.query('COMMIT');
+
+      const bResult = await bPromise;
+      expect(bResult.ok).toBe(true);
+      if (!bResult.ok) return;
+      const tokenB = bResult.token;
+
+      // B's token must be strictly higher — it could not even allocate its
+      // own token until A released the lock by committing.
+      expect(tokenB).toBeGreaterThan(tokenA);
+
+      // The actual invariant under test: a check pinned to B's token must
+      // never ignore A's write (tokenA <= tokenB).
+      await expect(assertTokenObserved(racePool, tokenB)).resolves.not.toThrow();
+      const aRows = await listTuplesByObject(racePool, { objectNs: raceNs, objectId: objectA });
+      expect(aRows).toHaveLength(1);
+      expect(aRows[0]?.subjectId).toBe('alice');
+    } finally {
+      await clientA.end();
+    }
+  });
+
+  it('a-deleteTuple-call-also-blocks-behind-an-earlier-uncommitted-transaction-holding-the-same-global-lock-proving-the-lock-is-shared-across-writes-and-deletes-not-per-operation-or-per-table', async () => {
+    const objectC = uniqueName('obj_c');
+    const objectD = uniqueName('obj_d');
+
+    // Seed a tuple to delete, and one for the "held" side to delete by
+    // hand — both writes complete and commit before the timed race begins,
+    // so only the delete-side transactions are actually being raced here.
+    const seedD = await writeTuple(racePool, {
+      objectNs: raceNs,
+      objectId: objectD,
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'dave',
+    });
+    expect(seedD.ok).toBe(true);
+
+    const clientA = new Client({ connectionString: raceContainer.getConnectionUri() });
+    await clientA.connect();
+
+    try {
+      // Client A: mirror deleteTuple's own transaction by hand, holding the
+      // *same* global lock a concurrent writeTuple must also acquire.
+      await clientA.query('BEGIN');
+      await clientA.query('select pg_advisory_xact_lock($1, $2)', [
+        WRITE_LOG_LOCK_CLASSID,
+        WRITE_LOG_LOCK_OBJID,
+      ]);
+      await clientA.query(
+        `delete from relation_tuples
+         where object_ns = $1 and object_id = $2 and relation = 'viewer'
+           and subject_ns = 'user' and subject_id = 'dave'`,
+        [raceNs, objectD],
+      );
+      const aWriteLog = await clientA.query<{ token: string }>(
+        `insert into write_log (operation, tuple) values ('delete', $1) returning token`,
+        [
+          JSON.stringify({
+            objectNs: raceNs,
+            objectId: objectD,
+            relation: 'viewer',
+            subjectNs: 'user',
+            subjectId: 'dave',
+          }),
+        ],
+      );
+      const tokenA = Number(aWriteLog.rows[0]?.token);
+      expect(Number.isInteger(tokenA)).toBe(true);
+
+      // Concurrently, a real writeTuple — a different operation entirely —
+      // for an unrelated object.
+      let bSettled = false;
+      const bPromise = writeTuple(racePool, {
+        objectNs: raceNs,
+        objectId: objectC,
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId: 'carol',
+      }).then(
+        (r) => {
+          bSettled = true;
+          return r;
+        },
+        (e: unknown) => {
+          bSettled = true;
+          throw e;
+        },
+      );
+
+      await sleep(500);
+      expect(bSettled).toBe(false);
+
+      await clientA.query('COMMIT');
+
+      const bResult = await bPromise;
+      expect(bResult.ok).toBe(true);
+      if (!bResult.ok) return;
+      const tokenB = bResult.token;
+
+      expect(tokenB).toBeGreaterThan(tokenA);
+      await expect(assertTokenObserved(racePool, tokenB)).resolves.not.toThrow();
+
+      // A's delete (dave's viewer tuple on objectD) must already be
+      // committed and observable — the revoke that was "in flight" while
+      // B's unrelated write raced it.
+      const daveRows = await listTuplesByObject(racePool, { objectNs: raceNs, objectId: objectD });
+      expect(daveRows).toHaveLength(0);
+    } finally {
+      await clientA.end();
+    }
   });
 });
