@@ -31,6 +31,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
+    "start": "node dist/cli/index.js doctor && node dist/cli/index.js serve",
     "cli": "tsx src/cli/index.ts",
     "seed:example": "tsx scripts/seed-example.ts",
     "test": "vitest run",
