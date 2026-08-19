@@ -50,7 +50,8 @@ import {
   type TupleKey,
 } from '../../../src/store/tuples.js';
 import { currentToken, assertTokenObserved } from '../../../src/store/tokens.js';
-import { publishSchema } from '../../../src/schema/publish.js';
+import { publishSchema, getLatestNamespaceConfig } from '../../../src/schema/publish.js';
+import { productionCheck } from '../../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
@@ -428,6 +429,109 @@ describe('a tuple write is validated against the latest published schema for its
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errors.some((e) => e.code === 'subject_type_not_allowed')).toBe(true);
+  });
+});
+
+describe('republishing a namespace with a new relation makes the write path (getLatestNamespaceConfig) pick it up immediately — full-repo audit finding #18', () => {
+  // The sibling describe block above only ever publishes a namespace once
+  // per test — none of it proves `getLatestNamespaceConfig` (the function
+  // that actually gates every real write via `validateAgainstSchema`, and
+  // `productionCheck`'s own schema lookup) picks up a *second* published
+  // version for a namespace it already knew about, rather than continuing
+  // to validate against a stale, cached-looking v1. This publishes the
+  // same namespace twice — v1, then v2 adding a brand-new relation — and
+  // proves the write path can't see that relation until the exact moment
+  // v2 is published, then immediately can.
+  it('a-relation-that-only-exists-in-v2-is-rejected-before-republish-and-accepted-immediately-after-republishing-the-same-namespace', async () => {
+    const ns = uniqueName('doc_v2');
+
+    // v1: `owner` only — no `collaborator` relation exists yet.
+    const v1Source = [
+      `namespace ${ns} {`,
+      '  relation owner: user',
+      '',
+      '  permission view = owner',
+      '}',
+    ].join('\n');
+    const published1 = await publishSchema(pool, v1Source);
+    expect(published1.ok).toBe(true);
+    if (!published1.ok) return;
+    expect(published1.published).toEqual([{ namespace: ns, version: 1 }]);
+
+    // A tuple valid only under v1 writes cleanly against it.
+    const v1Write = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: uniqueName('obj'),
+      relation: 'owner',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(v1Write.ok).toBe(true);
+
+    // The control half of the proof: a tuple against `collaborator` — a
+    // relation v1 never declared — is rejected right now, before any
+    // republish. Without this, a later successful write against
+    // `collaborator` couldn't be distinguished from a write-path bug that
+    // never actually validated the relation name at all.
+    const beforeRepublish = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: uniqueName('obj'),
+      relation: 'collaborator',
+      subjectNs: 'user',
+      subjectId: 'bob',
+    });
+    expect(beforeRepublish.ok).toBe(false);
+    if (beforeRepublish.ok) return;
+    expect(beforeRepublish.errors.some((e) => e.code === 'undeclared_relation')).toBe(true);
+
+    // Republish the SAME namespace as v2, adding `collaborator` and
+    // widening `view` to include it.
+    const v2Source = [
+      `namespace ${ns} {`,
+      '  relation owner: user',
+      '  relation collaborator: user',
+      '',
+      '  permission view = owner | collaborator',
+      '}',
+    ].join('\n');
+    const published2 = await publishSchema(pool, v2Source);
+    expect(published2.ok).toBe(true);
+    if (!published2.ok) return;
+    expect(published2.published).toEqual([{ namespace: ns, version: 2 }]);
+
+    // The actual claim under test: writeTuple now accepts a tuple valid
+    // only under v2 — the exact relation that was rejected moments ago,
+    // proving getLatestNamespaceConfig re-read the namespace and picked up
+    // the new version rather than continuing to validate against v1.
+    const objectId = uniqueName('obj');
+    const v2Write = await writeTuple(pool, {
+      objectNs: ns,
+      objectId,
+      relation: 'collaborator',
+      subjectNs: 'user',
+      subjectId: 'bob',
+    });
+    expect(v2Write.ok).toBe(true);
+    if (!v2Write.ok) return;
+    expect(v2Write.created).toBe(true);
+
+    // Confirm getLatestNamespaceConfig itself — the function this finding
+    // names directly — really does return v2's shape now, not just that
+    // the write happened to succeed for some unrelated reason.
+    const latestConfig = await getLatestNamespaceConfig(pool, ns);
+    expect(latestConfig?.relations['collaborator']).toBeDefined();
+
+    // Optional per this finding's own suggestion: a check() against the
+    // new v2-only relation resolves correctly too, proving the production
+    // resolver's own getLatestNamespaceConfig call picked up v2 as well,
+    // not just the write path.
+    const checkResult = await productionCheck(
+      pool,
+      { ns: 'user', id: 'bob' },
+      { ns, id: objectId },
+      'view',
+    );
+    expect(checkResult.allowed).toBe(true);
   });
 });
 

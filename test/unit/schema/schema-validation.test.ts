@@ -10,10 +10,17 @@
  * `src/schema/dsl/compiler.ts` were deliberately NOT read while writing
  * these tests.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { compileSchema } from '../../../src/schema/dsl/compiler.js';
 import { formatSchemaError } from '../../../src/schema/dsl/errors.js';
+
+const MALFORMED_EXAMPLE_PATH = fileURLToPath(
+  new URL('../../../schema/malformed-example.authz', import.meta.url),
+);
 
 /** Compiles `source` and fails the test if it unexpectedly compiles; returns the errors otherwise. */
 function compileErr(source: string) {
@@ -289,6 +296,50 @@ describe('a tuple-to-userset target namespace absent from the compilation unit i
       namespace: 'external_group',
       relation: 'member',
     });
+  });
+});
+
+describe('schema/malformed-example.authz — the fixture docs/RELATIONS.md and this file itself cite as "a worked example of a rejection" — is actually rejected, with a specific error', () => {
+  // This fixture's own header comment (read from disk, never retyped here)
+  // and `docs/RELATIONS.md:46` both describe it as a worked example of the
+  // compiler rejecting a malformed schema — but nothing in the repo ever
+  // actually compiled it and checked. Reads the real file straight off
+  // disk (never a copy of its source retyped into this test, so a future
+  // edit to the fixture can't silently drift out of sync with what this
+  // test actually asserts) and pins both of its undeclared-relation errors
+  // by line, exactly as `errors.ts`'s own documented example ("line 4:
+  // `permission` `edit` references undeclared relation `admin`") expects.
+  it('schema/malformed-example.authz is rejected with two located undeclared-relation errors, not a generic parse failure', () => {
+    const source = readFileSync(MALFORMED_EXAMPLE_PATH, 'utf8');
+    const result = compileSchema(source);
+    expect(result.ok).toBe(false);
+    if (result.ok) return; // narrows for TS; unreachable given the assertion above
+
+    // `permission view = viewer | editor | owner` (line 10 of the fixture)
+    // references `viewer`, which `document` never declares as a relation.
+    const viewError = result.errors.find(
+      (e) => e.code === 'undeclared_reference' && e.member === 'view',
+    );
+    expect(viewError).toBeDefined();
+    expect(viewError?.message).toContain('viewer');
+    expect(viewError?.line).toBe(10);
+
+    // `permission edit = editor | admin` (line 11) references `admin`,
+    // likewise never declared.
+    const editError = result.errors.find(
+      (e) => e.code === 'undeclared_reference' && e.member === 'edit',
+    );
+    expect(editError).toBeDefined();
+    expect(editError?.message).toContain('admin');
+    expect(editError?.line).toBe(11);
+
+    // Every rejection this file produces must be specific and located —
+    // never a generic "invalid schema" string standing in for a real
+    // error (this task's own non-negotiable, restated in the fixture's
+    // own header comment).
+    for (const error of result.errors) {
+      expect(formatSchemaError(error)).toMatch(/^line \d+: /);
+    }
   });
 });
 

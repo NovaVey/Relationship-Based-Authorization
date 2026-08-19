@@ -328,6 +328,88 @@ describe('a-permission-expression-mixing-and-with-or-parses-with-and-binding-tig
   });
 });
 
+describe('a-same-operator-chain-flattens-identically-regardless-of-which-side-the-parens-land-on', () => {
+  // `|` and `&` are associative — `(a|b)|c` and `a|(b|c)` (and the fully
+  // unparenthesized `a|b|c`) describe the exact same set of subjects and
+  // must compile to the identical flat n-ary node, never a shallower node
+  // on one side and a deeper nested node on the other purely because of
+  // where the source happened to put a `(`. See docs/DECISIONS.md for the
+  // audit finding this pins down.
+  function unionRewriteOf(expr: string): RewriteRule | undefined {
+    const source = [
+      'namespace document {',
+      '  relation a: user',
+      '  relation b: user',
+      '  relation c: user',
+      '  relation d: user',
+      '',
+      `  permission p = ${expr}`,
+      '}',
+    ].join('\n');
+    return compileOk(source).namespaces['document']?.permissions['p']?.rewrite;
+  }
+
+  const flatUnionOfAbc: RewriteRule = {
+    kind: 'union',
+    children: [
+      { kind: 'computedUserset', name: 'a' },
+      { kind: 'computedUserset', name: 'b' },
+      { kind: 'computedUserset', name: 'c' },
+    ],
+  };
+  const flatIntersectionOfAbc: RewriteRule = {
+    kind: 'intersection',
+    children: [
+      { kind: 'computedUserset', name: 'a' },
+      { kind: 'computedUserset', name: 'b' },
+      { kind: 'computedUserset', name: 'c' },
+    ],
+  };
+
+  it('left-grouped-union-parens-(a|b)|c-flattens-to-one-3-child-union', () => {
+    expect(unionRewriteOf('(a | b) | c')).toEqual(flatUnionOfAbc);
+  });
+
+  it('right-grouped-union-parens-a|(b|c)-flattens-to-the-identical-3-child-union', () => {
+    expect(unionRewriteOf('a | (b | c)')).toEqual(flatUnionOfAbc);
+  });
+
+  it('the-fully-unparenthesized-chain-a|b|c-produces-the-same-shape-as-both-parenthesized-forms', () => {
+    expect(unionRewriteOf('a | b | c')).toEqual(flatUnionOfAbc);
+  });
+
+  it('left-grouped-intersection-parens-(a&b)&c-flattens-to-one-3-child-intersection', () => {
+    expect(unionRewriteOf('(a & b) & c')).toEqual(flatIntersectionOfAbc);
+  });
+
+  it('right-grouped-intersection-parens-a&(b&c)-flattens-to-the-identical-3-child-intersection', () => {
+    expect(unionRewriteOf('a & (b & c)')).toEqual(flatIntersectionOfAbc);
+  });
+
+  it('a-paren-group-around-a-different-operator-is-never-flattened-into-the-outer-chain', () => {
+    // `a & (b | c) & d` — the parenthesized `b | c` is a genuinely different
+    // rewrite-rule kind from the `&` chain it sits inside, so it must stay
+    // a distinct nested `union` child, never merged into the intersection's
+    // own children the way a same-kind group would be.
+    const rewrite = unionRewriteOf('a & (b | c) & d');
+    const expected: RewriteRule = {
+      kind: 'intersection',
+      children: [
+        { kind: 'computedUserset', name: 'a' },
+        {
+          kind: 'union',
+          children: [
+            { kind: 'computedUserset', name: 'b' },
+            { kind: 'computedUserset', name: 'c' },
+          ],
+        },
+        { kind: 'computedUserset', name: 'd' },
+      ],
+    };
+    expect(rewrite).toEqual(expected);
+  });
+});
+
 describe('compiling-the-same-source-twice-produces-identical-output', () => {
   // §5 doesn't say this explicitly, but the build spec's broader
   // reproducibility culture (§6.8: every fuzz/soundness run is seeded and
