@@ -72,6 +72,7 @@
  * `docs/DECISIONS.md` D-019/D-030 (every `*.integration.test.ts` file
  * starts its own container; never a hardcoded local connection string).
  */
+import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
@@ -86,9 +87,11 @@ import {
 } from '../../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../../src/store/migrations', import.meta.url).pathname;
-const SCHEMA_PATH = new URL('../../../schema/example.authz', import.meta.url).pathname;
-const SEED_SCRIPT_PATH = new URL('../../../scripts/seed-example.ts', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
+const SCHEMA_PATH = fileURLToPath(new URL('../../../schema/example.authz', import.meta.url));
+const SEED_SCRIPT_PATH = fileURLToPath(
+  new URL('../../../scripts/seed-example.ts', import.meta.url),
+);
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;

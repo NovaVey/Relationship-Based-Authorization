@@ -11,6 +11,7 @@
  * Real, ephemeral Postgres via `PostgreSqlContainer` — see
  * `docs/DECISIONS.md` D-019/D-030.
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -22,7 +23,7 @@ import { env } from '../../../src/config/env.js';
 import { closePool } from '../../../src/store/client.js';
 import { check } from '../../../src/cli/commands/check.js';
 
-const MIGRATIONS_DIR = new URL('../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let verifyPool: Pool;

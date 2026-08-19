@@ -35,6 +35,7 @@
  * one container's database with no truncation between them and must be
  * safe to run concurrently and in any order.
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client, Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -52,7 +53,7 @@ import { currentToken, assertTokenObserved } from '../../../src/store/tokens.js'
 import { publishSchema } from '../../../src/schema/publish.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;

@@ -50,6 +50,7 @@
  * `docs/DECISIONS.md` D-019/D-030 (every `*.integration.test.ts` file
  * starts its own container; never a hardcoded local connection string).
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -61,7 +62,7 @@ import { performCheck } from '../../../src/audit/checks.js';
 import type { EntityRef, ResolutionStep } from '../../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;

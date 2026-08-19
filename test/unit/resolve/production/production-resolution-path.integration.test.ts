@@ -29,6 +29,7 @@
  * D-024/D-027/D-029: a check that has never been observed failing proves
  * nothing).
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -45,7 +46,7 @@ import type {
 } from '../../../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;

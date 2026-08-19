@@ -13,6 +13,7 @@
  * `cross-resolver-agreement.integration.test.ts` in this directory — see
  * that file's own header and `docs/DECISIONS.md` D-019 for why.
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -23,7 +24,7 @@ import { publishSchema } from '../../../../src/schema/publish.js';
 import { productionCheck } from '../../../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;
