@@ -378,15 +378,42 @@ function parseAtom(state: ParserState): ParsedRewriteRule {
   return { kind: 'computedUserset', name: nameToken.value, line: nameToken.line };
 }
 
+/**
+ * `&`/`|` are associative, so a chain of the same operator always compiles
+ * to one flat n-ary node, regardless of how parentheses happened to group
+ * it while parsing: `(a & b) & c` and `a & (b & c)` (and the unparenthesized
+ * `a & b & c`) all produce the identical flat `{kind, children: [a, b, c]}`
+ * — never a node nested purely because of where a `(...)` boundary fell.
+ * Both `left` and the freshly parsed `right` are checked and merged when
+ * either already has the target kind, which is what makes this symmetric:
+ * checking `left.kind` alone (as an earlier version of this function did)
+ * flattens a same-operator chain building up on the left but not one
+ * arriving via a parenthesized `right`, producing two different tree shapes
+ * for logically identical source. See `docs/DECISIONS.md` for why flattening
+ * (rather than preserving parens as real tree structure) is the chosen
+ * direction, and `test/unit/schema/rewrite-rules.test.ts` for the pinned
+ * shape this produces on both sides of `|` and `&`.
+ */
+function flattenChildren(
+  kind: 'union' | 'intersection',
+  left: ParsedRewriteRule,
+  right: ParsedRewriteRule,
+): ParsedRewriteRule[] {
+  const leftChildren = left.kind === kind ? left.children : [left];
+  const rightChildren = right.kind === kind ? right.children : [right];
+  return [...leftChildren, ...rightChildren];
+}
+
 function parseTerm(state: ParserState): ParsedRewriteRule {
   let left = parseAtom(state);
   while (peek(state).type === 'amp') {
     const opToken = consume(state);
     const right = parseAtom(state);
-    left =
-      left.kind === 'intersection'
-        ? { kind: 'intersection', children: [...left.children, right], line: left.line }
-        : { kind: 'intersection', children: [left, right], line: opToken.line };
+    left = {
+      kind: 'intersection',
+      children: flattenChildren('intersection', left, right),
+      line: left.kind === 'intersection' ? left.line : opToken.line,
+    };
   }
   return left;
 }
@@ -397,10 +424,11 @@ function parseExpression(state: ParserState): ParsedRewriteRule {
     const opToken = consume(state);
     const right = parseTerm(state);
     if (opToken.type === 'pipe') {
-      left =
-        left.kind === 'union'
-          ? { kind: 'union', children: [...left.children, right], line: left.line }
-          : { kind: 'union', children: [left, right], line: opToken.line };
+      left = {
+        kind: 'union',
+        children: flattenChildren('union', left, right),
+        line: left.kind === 'union' ? left.line : opToken.line,
+      };
     } else {
       left = { kind: 'exclusion', base: left, subtract: right, line: opToken.line };
     }
