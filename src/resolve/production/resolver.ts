@@ -84,8 +84,40 @@
  * resolution-path.integration.test.ts` for the independent verifier that
  * checks exactly this, against real Postgres, without importing anything
  * from this file's own SQL.
+ *
+ * ---
+ *
+ * **One check, one snapshot (full-repo audit finding #1, `docs/DECISIONS.md`
+ * D-092).** Every read this file issues on behalf of one `productionCheck`
+ * call — every `sqlRelationMembershipWithWitness` frontier/tuple fetch,
+ * every `listTupleSubjects` call for a `tupleToUserset` hop — now runs
+ * inside one `REPEATABLE READ` transaction, pinned to one `pg.PoolClient`
+ * acquired once at the top of `productionCheck` and released once at the
+ * bottom. Before this, every one of those reads was its own independent,
+ * autocommit `pool.query()` call with no shared snapshot at all: a
+ * concurrent write landing between, say, the frontier query and the
+ * tuple-on-frontier query could make a resolution path cite two facts
+ * (an edge and a grant) that never actually coexisted at any single real
+ * point in the database's history — a phantom witness in the audit trail
+ * this project's whole `resolution_path` mechanism (§6.7) exists to rule
+ * out. `REPEATABLE READ` (not `SERIALIZABLE`, which this read-only walk has
+ * no need of, and which would add retry-worthy serialization failures this
+ * codebase has no retry logic for) gives every read in one check the exact
+ * same MVCC snapshot, matching Postgres's own documented semantics for
+ * "this transaction sees one consistent point in time" and matching what
+ * `docs/CONSISTENCY.md` already claimed before this fix existed.
+ *
+ * `atToken` pinning composes with this by re-verifying the floor check
+ * (`write_log` has advanced to at least `atToken`) as literally the first
+ * statement of the just-opened transaction, on the same client whose
+ * snapshot every later read in the check will share — see
+ * `assertTokenObservedOnSnapshot`'s own doc comment for exactly why a
+ * *pool*-level check beforehand isn't sufficient on its own, and
+ * `productionCheck`'s own doc comment for the one deliberate, disclosed gap
+ * this fix does *not* close (schema-config reads, `getConfig`, stay on the
+ * plain `pool`, outside this transaction — see that doc comment for why).
  */
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 
 import { env } from '../../config/env.js';
 import type { NamespaceConfig, RewriteRule } from '../../schema/dsl/types.js';
@@ -101,14 +133,22 @@ export interface EntityRef {
 export interface ProductionCheckOptions {
   /**
    * Pin the read to a consistency token (build spec §6.3). When present,
-   * `assertTokenObserved(pool, atToken)` is called *first*, before any
-   * schema lookup or graph walk — it throws if this database hasn't
-   * observed that token yet, per its own documented contract. Once that
-   * passes (or when no token is given at all) the walk below just reads
-   * current committed Postgres state: on a single instance with
-   * synchronous writes, ordinary transaction visibility already guarantees
-   * a query started after a commit sees it (`src/store/tokens.ts`'s own
-   * reasoning) — no extra snapshotting is built here.
+   * `assertTokenObserved(pool, atToken)` is called *first*, before this
+   * call ever opens the transaction/client the walk below runs in — it
+   * throws if this database hasn't observed that token yet, per its own
+   * documented contract, giving a cheap, well-tested rejection for an
+   * obviously too-high token before paying for a connection at all.
+   *
+   * That alone is *not* sufficient (full-repo audit finding #1,
+   * `docs/DECISIONS.md` D-092): it only proves the token had been observed
+   * by *some* connection at the moment it ran, not that the `REPEATABLE
+   * READ` snapshot this check's own reads will use is anchored at or after
+   * that point. `productionCheck` re-verifies the same floor check a
+   * second time, as literally the first statement of the transaction it
+   * then runs every other read of this check inside — see
+   * `assertTokenObservedOnSnapshot`'s own doc comment for exactly why, and
+   * `productionCheck`'s own doc comment for the transaction this option
+   * now participates in.
    */
   atToken?: number;
   /**
@@ -303,9 +343,20 @@ type ProductionOutcome =
  * right after each `sqlRelationMembershipWithWitness` call returns) — so
  * `productionCheck`'s returned `depth` reflects the deepest point *either*
  * mechanism actually reached, not just whichever one happened to run last.
+ *
+ * `pool` and `client` are deliberately two separate fields, used for two
+ * deliberately different things (full-repo audit finding #1,
+ * `docs/DECISIONS.md` D-092): `client` is the one `pg.PoolClient` whose
+ * `REPEATABLE READ` transaction every `relation_tuples`/`write_log` read
+ * in this check runs inside — `sqlRelationMembershipWithWitness` and
+ * `listTupleSubjects` both take it, never `pool`. `pool` is kept only for
+ * `getConfig`'s own `namespace_configs` lookups, which deliberately stay
+ * *outside* that transaction — see `productionCheck`'s own doc comment for
+ * why that's a disclosed, reasoned scoping choice, not an oversight.
  */
 interface WalkContext {
   pool: Pool;
+  client: PoolClient;
   maxDepth: number;
   schemaCache: Map<string, NamespaceConfig | null>;
   depthReached: { value: number };
@@ -399,7 +450,7 @@ async function resolve(
     if (relation) {
       const remainingDepth = Math.max(0, ctx.maxDepth - depth);
       const sqlOutcome = await sqlRelationMembershipWithWitness(
-        ctx.pool,
+        ctx.client,
         object,
         name,
         subject,
@@ -508,7 +559,7 @@ async function evalRewrite(
       };
     }
     case 'tupleToUserset': {
-      const subjects = await listTupleSubjects(ctx.pool, object, rule.relation);
+      const subjects = await listTupleSubjects(ctx.client, object, rule.relation);
       const followed: Array<{ through: EntityRef; disproof: DisproofStep }> = [];
       for (const newObject of subjects) {
         const outcome = await resolve(
@@ -570,13 +621,21 @@ interface TupleSubjectRow {
  * whether that pointer happens to also be a userset reference; membership
  * *within* whatever it points to is a separate question, resolved by
  * recursing `computedUserset` on the new object.
+ *
+ * Takes `client` (this check's own `REPEATABLE READ`-pinned `PoolClient`),
+ * never `pool` — full-repo audit finding #1, `docs/DECISIONS.md` D-092.
+ * This is exactly the kind of `relation_tuples` read that fix exists for:
+ * without it, a `tupleToUserset` hop's own subject list could be read from
+ * a different real moment in the database's history than the frontier
+ * queries `sqlRelationMembershipWithWitness` issues later in the very same
+ * check.
  */
 async function listTupleSubjects(
-  pool: Pool,
+  client: PoolClient,
   object: EntityRef,
   relation: string,
 ): Promise<EntityRef[]> {
-  const { rows } = await pool.query<TupleSubjectRow>(
+  const { rows } = await client.query<TupleSubjectRow>(
     `select subject_ns, subject_id
      from relation_tuples
      where object_ns = $1 and object_id = $2 and relation = $3`,
@@ -608,14 +667,80 @@ interface FrontierRow {
  * one already on that branch, and `depth < maxDepth` is an independent
  * backstop. The seed row (`depth = 0`, the starting `(object, relation)`
  * itself) is always present, even with zero recursion.
+ *
+ * Takes `client` (this check's own `REPEATABLE READ`-pinned `PoolClient`),
+ * never `pool` — full-repo audit finding #1, `docs/DECISIONS.md` D-092. See
+ * `productionCheck`'s own doc comment for the transaction this runs inside.
+ *
+ * **Per-iteration dedup (full-repo audit finding #2, `docs/DECISIONS.md`
+ * D-092).** The recursive term's `select` is `distinct on (subject_ns,
+ * subject_id, subject_relation)`, not a plain `select` — Postgres allows
+ * `DISTINCT ON` directly in a recursive term (confirmed against real
+ * Postgres 16; only `ORDER BY`/`LIMIT`/`OFFSET`/aggregates/window
+ * functions are rejected there, and this doesn't need any of those to
+ * still be correct — see the paragraph below). Without it, a node reached
+ * via K different upstream paths in one iteration has *all* of its
+ * outgoing edges independently re-expanded K times in the next iteration —
+ * ordinary `WITH RECURSIVE` semantics, and exactly what a "diamond of
+ * diamonds" reconvergent group hierarchy (expected per D-021, and the
+ * normal shape of a real nested-group tree) produces: `b^d` rows for only
+ * `b*d` distinct nodes. Confirmed directly against real Postgres before
+ * this fix landed: a 12-level, branching-3 chain of reconvergent diamonds
+ * (well within the default `CHECK_MAX_DEPTH` of 25) never returned within
+ * a 20-second timeout on the unfixed query; the identical query, with only
+ * this `distinct on` added, returns in under 100ms. See
+ * `cross-resolver-agreement.integration.test.ts`'s own
+ * "a subject_relation-based ... reconvergent diamond" test for the
+ * committed regression/performance guard.
+ *
+ * **Why this can't silently drop real reachability (the thing to be most
+ * careful about here, per the finding's own instruction).** `DISTINCT ON`
+ * only collapses *duplicate, same-iteration* rows for one identity down to
+ * one representative row — it never prevents a *genuinely new* identity
+ * from being discovered. The concern worth naming explicitly: could
+ * collapsing to one representative path for a node cause its cycle guard
+ * (`not (... = any(m.path))`) to block a child identity that a *different*
+ * (discarded) duplicate's path wouldn't have blocked? No — any identity
+ * that could ever appear in a chosen representative's own `path` array
+ * must, by construction, have already been added to the frontier as its
+ * *own* row at an earlier (or the same) iteration — appearing in someone's
+ * ancestor list is only possible by having been discovered first. So that
+ * identity's own children were already (or will still be) explored via its
+ * own frontier entry, independent of whatever a *different* node's
+ * dedup-selected representative does later. This was additionally verified
+ * empirically, not just argued: a throwaway differential fuzz script (not
+ * committed — the reasoning above and this file's own regression test are
+ * the durable artifacts) generated 3,000 random cyclic/reconvergent graphs
+ * (6–25 nodes, out-degree 0–5) and compared the *set* of reachable
+ * `(ns,id,relation)` identities returned by this query with and without the
+ * `distinct on` — zero mismatches. Note this dedups *within* one
+ * iteration only, not globally across every iteration a node could ever
+ * reappear at (a true global "visited" set isn't expressible in a
+ * standard-conforming Postgres recursive CTE without violating its "the
+ * recursive table may be referenced only once" restriction); a node
+ * rediscovered at a much later, unrelated depth can still appear more than
+ * once in this function's raw output, which `dedupeFrontier` immediately
+ * below already existed to collapse for correctness (not performance)
+ * before this fix, and still does.
+ *
+ * **`depth`/`ancestorPath` note:** because `DISTINCT ON` (with no `ORDER
+ * BY` — Postgres rejects `ORDER BY` in a recursive term outright) picks an
+ * unspecified representative among same-iteration duplicates, the specific
+ * `depth`/`path` kept for a node that had multiple same-iteration parents
+ * is real (a genuine root-to-node walk through real tuples — never
+ * fabricated) but not guaranteed to be the *shortest* available one. This
+ * is a deliberate, disclosed trade of a small amount of diagnostic
+ * precision (`checks.depth`'s high-water mark, §6.7) for eliminating the
+ * exponential blowup — it does not affect `allowed`/`denied` correctness,
+ * per the reachability argument above.
  */
 async function fetchReachableFrontier(
-  pool: Pool,
+  client: PoolClient,
   object: EntityRef,
   relation: string,
   maxDepth: number,
 ): Promise<FrontierRow[]> {
-  const { rows } = await pool.query<FrontierRow>(
+  const { rows } = await client.query<FrontierRow>(
     `with recursive membership(ns, id, relation, depth, path) as (
        select
          $1::text as ns,
@@ -624,7 +749,7 @@ async function fetchReachableFrontier(
          0 as depth,
          array[$1::text || ':' || $2::text || '#' || $3::text] as path
        union all
-       select
+       select distinct on (rt.subject_ns, rt.subject_id, rt.subject_relation)
          rt.subject_ns,
          rt.subject_id,
          rt.subject_relation,
@@ -669,9 +794,19 @@ interface FrontierTupleRow {
   subject_relation: string | null;
 }
 
-/** Every real `relation_tuples` row stored on any of `frontier`'s nodes, in one query. */
+/**
+ * Every real `relation_tuples` row stored on any of `frontier`'s nodes, in
+ * one query. Takes `client` (this check's own `REPEATABLE READ`-pinned
+ * `PoolClient`), never `pool` — the exact query pair (this one, and the
+ * `fetchReachableFrontier` call that produced `frontier`) full-repo audit
+ * finding #1's concrete counterexample was about: without a shared
+ * snapshot, a userset edge this function's caller already saw could be
+ * deleted, and its target independently (re)granted, between these two
+ * queries — see `docs/DECISIONS.md` D-092 and `productionCheck`'s own doc
+ * comment for the transaction this now runs inside.
+ */
 async function fetchTuplesOnFrontier(
-  pool: Pool,
+  client: PoolClient,
   frontier: ReadonlyMap<string, FrontierRow>,
 ): Promise<FrontierTupleRow[]> {
   if (frontier.size === 0) return [];
@@ -683,7 +818,7 @@ async function fetchTuplesOnFrontier(
     idArr.push(row.id);
     relArr.push(row.relation);
   }
-  const { rows } = await pool.query<FrontierTupleRow>(
+  const { rows } = await client.query<FrontierTupleRow>(
     `select rt.object_ns, rt.object_id, rt.relation, rt.subject_ns, rt.subject_id, rt.subject_relation
      from relation_tuples rt
      join (
@@ -809,19 +944,30 @@ type SqlRelationOutcome =
  * guard, and the `depth < maxDepth` backstop) — nothing about adding
  * witness reconstruction changes either guarantee, since both live inside
  * `fetchReachableFrontier`'s own recursive CTE, untouched.
+ *
+ * Takes `client` (this check's own `REPEATABLE READ`-pinned `PoolClient`),
+ * never `pool` — full-repo audit finding #1, `docs/DECISIONS.md` D-092.
+ * The frontier fetch and the tuple-on-frontier fetch immediately below are
+ * exactly the query *pair* that finding's own concrete counterexample
+ * describes: without a shared snapshot between them, a userset edge the
+ * first query observed could be deleted — and its target independently
+ * (re)granted — before the second query runs, stitching a resolution path
+ * together from two facts that never coexisted at any single real point in
+ * the database's history. See `productionCheck`'s own doc comment for the
+ * transaction this now runs inside.
  */
 async function sqlRelationMembershipWithWitness(
-  pool: Pool,
+  client: PoolClient,
   object: EntityRef,
   relation: string,
   subject: EntityRef,
   maxDepth: number,
 ): Promise<SqlRelationOutcome> {
-  const frontierRows = await fetchReachableFrontier(pool, object, relation, maxDepth);
+  const frontierRows = await fetchReachableFrontier(client, object, relation, maxDepth);
   const frontier = dedupeFrontier(frontierRows);
   const depthReached = frontierRows.reduce((max, row) => Math.max(max, row.depth), 0);
 
-  const tupleRows = await fetchTuplesOnFrontier(pool, frontier);
+  const tupleRows = await fetchTuplesOnFrontier(client, frontier);
   const tuplesByFrontierKey = groupTuplesByFrontierKey(tupleRows);
 
   const orderedFrontier = [...frontier.values()].sort((a, b) => a.depth - b.depth);
@@ -844,6 +990,58 @@ async function sqlRelationMembershipWithWitness(
 }
 
 /**
+ * Re-verifies, as literally the first statement of the `REPEATABLE READ`
+ * transaction `productionCheck` is about to run every other read of this
+ * check inside, that *this transaction's own snapshot* has already
+ * observed `token` — full-repo audit finding #1, `docs/DECISIONS.md`
+ * D-092.
+ *
+ * Deliberately **not** a call to `src/store/tokens.ts`'s
+ * `assertTokenObserved` (also deliberately not imported for that reason):
+ * that function takes a `Pool`, not a `PoolClient` — structurally, a
+ * `pg.PoolClient` is not assignable to `pg.Pool` (it's missing `Pool`-only
+ * members like `totalCount`), so it cannot run *inside* this specific
+ * transaction's snapshot without changing that function's own exported
+ * signature, which is outside this fix's file scope (see this project's
+ * own `docs/DECISIONS.md` D-092 entry for that disclosed tradeoff).
+ * `productionCheck` still calls the real, unchanged `assertTokenObserved
+ * (pool, atToken)` first — before ever opening this transaction — for its
+ * already-tested malformed-token validation (`NaN`, negative, non-integer)
+ * and its documented external error contract; by the time this function
+ * runs, `token` is already known to be a valid non-negative integer, so
+ * this only re-checks *observation*, against this connection's own
+ * snapshot rather than trusting the earlier, different-connection check's
+ * result to still describe whatever snapshot this transaction happens to
+ * end up with.
+ *
+ * Why re-check at all, given `write_log` only ever grows and a single
+ * Postgres instance with synchronous commits guarantees a later snapshot
+ * sees everything an earlier one did: because a *fixed* snapshot's
+ * guarantee is only as good as knowing precisely when it was taken, and
+ * `REPEATABLE READ`'s snapshot is taken at this transaction's *first
+ * query* (per Postgres's own documented semantics), not at `BEGIN` —
+ * running this query first is what makes that anchor point provably no
+ * earlier than "write_log has reached `token`," rather than relying on an
+ * argument about connection-pool timing holding forever. This mirrors this
+ * project's own established discipline for this exact class of property —
+ * "a real, testable assertion rather than an assumption" — `docs/
+ * CONSISTENCY.md`'s own words for `assertTokenObserved` itself.
+ */
+async function assertTokenObservedOnSnapshot(client: PoolClient, token: number): Promise<void> {
+  const { rows } = await client.query<{ max_token: string | null }>(
+    'select max(token) as max_token from write_log',
+  );
+  const raw = rows[0]?.max_token;
+  const observed = raw === null || raw === undefined ? null : Number(raw);
+  if (observed === null || token > observed) {
+    throw new Error(
+      `consistency token ${token} has not been observed by this check's own transaction ` +
+        `snapshot (highest token visible to this snapshot: ${observed ?? 'none — no writes yet'})`,
+    );
+  }
+}
+
+/**
  * The production check engine's entry point. Fails closed
  * (`{ allowed: false }`, never a throw) for every legitimate "no" —
  * no published schema for `object.ns`, an undeclared relation/permission
@@ -856,6 +1054,40 @@ async function sqlRelationMembershipWithWitness(
  * makes `writeTuple`/reads throw, never silently return an empty/false
  * result) — nothing in this function or the ones it calls catches or
  * swallows a `pg` connection error; it propagates as-is.
+ *
+ * **One check, one transaction (full-repo audit finding #1,
+ * `docs/DECISIONS.md` D-092).** Every `relation_tuples`/`write_log` read
+ * this whole check performs — across however many `resolve`/`evalRewrite`
+ * recursions and `sqlRelationMembershipWithWitness`/`listTupleSubjects`
+ * calls a union/intersection/exclusion/tupleToUserset tree needs — runs on
+ * one `PoolClient` acquired here, inside one `REPEATABLE READ` transaction
+ * opened here and committed (or rolled back) here. `REPEATABLE READ`, not
+ * `SERIALIZABLE`: this transaction only ever reads, so it needs Postgres's
+ * snapshot-isolation guarantee (one consistent point in time for every read
+ * in it), not `SERIALIZABLE`'s additional write-conflict detection, which
+ * would add serialization-failure retries this codebase has no retry logic
+ * for, for no benefit a read-only transaction could ever collect on.
+ *
+ * **One disclosed, deliberate gap: `getConfig`'s `namespace_configs`
+ * lookups stay on the plain `pool`, outside this transaction.** Two
+ * reasons, not one. First, structural: `getLatestNamespaceConfig`
+ * (`src/schema/publish.ts`) takes a `Pool`, and widening that signature is
+ * outside this fix's file scope (disclosed, not silently worked around —
+ * see `docs/DECISIONS.md` D-092). Second, and more load-bearing: the risk
+ * this transaction closes for `relation_tuples` — two reads observing
+ * *different* real moments in the database's history — is already
+ * narrower for schema config than it looks. `WalkContext.schemaCache`
+ * (unchanged by this fix) means a given namespace's config is fetched at
+ * most once per check, however many times the walk revisits that
+ * namespace, so the dangerous case (the *same* namespace observed at two
+ * *different* published versions within one check) was already
+ * structurally impossible before this fix and remains so. What's left
+ * unclosed is a strictly weaker property — two *different* namespaces
+ * touched by the same check could each be read as of a very slightly
+ * different moment if a schema publish (rare, admin-gated, unlike a tuple
+ * write) lands mid-check — not the phantom-witness scenario this finding's
+ * own counterexample describes, which is specifically about
+ * `relation_tuples`.
  */
 export async function productionCheck(
   pool: Pool,
@@ -866,14 +1098,32 @@ export async function productionCheck(
 ): Promise<ProductionCheckResult> {
   const atToken = options?.atToken;
   if (atToken !== undefined) {
+    // Cheap, well-tested rejection of an obviously malformed or
+    // impossibly-high token before this call ever opens a connection for
+    // the real check below — see assertTokenObservedOnSnapshot's own doc
+    // comment for why this alone is not sufficient.
     await assertTokenObserved(pool, atToken);
   }
 
   const maxDepth = options?.maxDepth ?? env.CHECK_MAX_DEPTH;
   const depthReached = { value: 0 };
-  const ctx: WalkContext = { pool, maxDepth, schemaCache: new Map(), depthReached };
-  const outcome = await resolve(ctx, subject, object, relationOrPermission, new Set(), 0);
-  return outcome.allowed
-    ? { allowed: true, path: outcome.proof, depth: depthReached.value }
-    : { allowed: false, depth: depthReached.value };
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    if (atToken !== undefined) {
+      await assertTokenObservedOnSnapshot(client, atToken);
+    }
+    const ctx: WalkContext = { pool, client, maxDepth, schemaCache: new Map(), depthReached };
+    const outcome = await resolve(ctx, subject, object, relationOrPermission, new Set(), 0);
+    await client.query('COMMIT');
+    return outcome.allowed
+      ? { allowed: true, path: outcome.proof, depth: depthReached.value }
+      : { allowed: false, depth: depthReached.value };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }

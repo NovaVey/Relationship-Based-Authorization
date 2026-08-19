@@ -54,7 +54,7 @@
  */
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
@@ -306,5 +306,207 @@ describe('runSoundnessFuzz dryRun (D-063) — real full differential-fuzz cycle,
         afterExplicitFalse.relationTuples + omittedResult.tupleCount,
       );
     }, 120_000);
+  });
+
+  describe('combination (b): tuple-cleanup partially fails while namespace-cleanup fully succeeds — full-repo audit finding #15', () => {
+    // Only one of the two asymmetric dry-run cleanup failure combinations
+    // had ever been verified against a real database before this test: (a)
+    // namespace-cleanup fails, tuple-cleanup succeeds -> a stray
+    // `namespace_configs` row, visible via `GET /health` (D-060/
+    // PROGRESS.md, verified live). Combination (b) — tuple-cleanup fails,
+    // namespace-cleanup succeeds -> orphaned `relation_tuples` rows for a
+    // namespace with no published config left, invisible to `GET /health`
+    // (which never queries `relation_tuples`) — had, until this test, only
+    // been exercised by `runner-dry-run-cleanup-failure.test.ts`, a fully
+    // mocked unit test whose own doc comment explicitly states: "What is
+    // NOT under test here: whether cleanup itself correctly deletes what
+    // it should."
+    //
+    // `deleteTuple` is idempotent — deleting an already-absent row is a
+    // successful no-op, not an error (`src/store/tuples.ts`'s own
+    // documented contract) — so deleting a fixture tuple out from under it
+    // via a second connection would not force a genuine *failure*, only a
+    // silent no-op that would prove nothing. Instead, this test installs a
+    // real Postgres `BEFORE DELETE` trigger on `relation_tuples` for its
+    // own duration, rejecting the delete of exactly one specific tuple this
+    // fixture is known (via the same deterministic `generateFixture`
+    // reproducibility this file's other describe block already relies on)
+    // to generate — a deterministic fault, injected at the database level,
+    // with zero changes to `runner.ts`, `src/store/tuples.ts`, or any other
+    // application source file.
+    const FAULT_TABLE = '_fault_injection_poisoned_tuple';
+    const FAULT_FUNCTION = '_fault_injection_reject_poisoned_delete';
+    const FAULT_TRIGGER = '_fault_injection_reject_poisoned_delete_trigger';
+
+    async function installTupleDeleteFault(poisoned: {
+      objectNs: string;
+      objectId: string;
+      relation: string;
+      subjectNs: string;
+      subjectId: string;
+      subjectRelation?: string;
+    }): Promise<void> {
+      // A real, non-temporary table (not `TEMPORARY` — a temp table is
+      // scoped to one session/connection, and `pool.query()` calls below,
+      // including every one `runSoundnessFuzz` itself issues internally,
+      // are not guaranteed to reuse the same physical connection; a
+      // trigger function reading from a temp table could silently miss
+      // its own fault data depending on which pooled connection happens to
+      // execute the DELETE). Dropped again in `uninstallTupleDeleteFault`
+      // below, always, including on a failed assertion — see this test's
+      // own `try`/`finally`.
+      await pool.query(
+        `create table ${FAULT_TABLE} (
+           object_ns text, object_id text, relation text,
+           subject_ns text, subject_id text, subject_relation text
+         )`,
+      );
+      await pool.query(
+        `insert into ${FAULT_TABLE}
+           (object_ns, object_id, relation, subject_ns, subject_id, subject_relation)
+         values ($1, $2, $3, $4, $5, $6)`,
+        [
+          poisoned.objectNs,
+          poisoned.objectId,
+          poisoned.relation,
+          poisoned.subjectNs,
+          poisoned.subjectId,
+          poisoned.subjectRelation ?? null,
+        ],
+      );
+      await pool.query(`
+        create or replace function ${FAULT_FUNCTION}() returns trigger as $$
+        declare
+          hit boolean;
+        begin
+          select exists (
+            select 1 from ${FAULT_TABLE} p
+            where p.object_ns = OLD.object_ns
+              and p.object_id = OLD.object_id
+              and p.relation = OLD.relation
+              and p.subject_ns = OLD.subject_ns
+              and p.subject_id = OLD.subject_id
+              and coalesce(p.subject_relation, '') = coalesce(OLD.subject_relation, '')
+          ) into hit;
+          if hit then
+            raise exception 'fault injection: rejecting delete of the poisoned tuple';
+          end if;
+          return OLD;
+        end;
+        $$ language plpgsql;
+      `);
+      await pool.query(`
+        create trigger ${FAULT_TRIGGER}
+          before delete on relation_tuples
+          for each row execute function ${FAULT_FUNCTION}();
+      `);
+    }
+
+    /** Always run, including on a failed assertion — never leaves the fault-injection machinery, or the one row it deliberately makes undeletable, behind for the rest of this shared test database. */
+    async function uninstallTupleDeleteFault(poisoned: {
+      objectNs: string;
+      objectId: string;
+      relation: string;
+      subjectNs: string;
+      subjectId: string;
+      subjectRelation?: string;
+    }): Promise<void> {
+      await pool.query(`drop trigger if exists ${FAULT_TRIGGER} on relation_tuples`);
+      await pool.query(`drop function if exists ${FAULT_FUNCTION}()`);
+      await pool.query(`drop table if exists ${FAULT_TABLE}`);
+      // The one row the trigger deliberately kept `deleteTuple` from
+      // removing — deleted directly now that the trigger is gone, bypassing
+      // `deleteTuple` entirely (this is test teardown, not part of the
+      // property under test).
+      await pool.query(
+        `delete from relation_tuples
+         where object_ns = $1 and object_id = $2 and relation = $3
+           and subject_ns = $4 and subject_id = $5
+           and coalesce(subject_relation, '') = coalesce($6, '')`,
+        [
+          poisoned.objectNs,
+          poisoned.objectId,
+          poisoned.relation,
+          poisoned.subjectNs,
+          poisoned.subjectId,
+          poisoned.subjectRelation ?? null,
+        ],
+      );
+    }
+
+    it('a-real-postgres-level-delete-rejection-for-one-specific-tuple-leaves-exactly-that-tuple-behind-and-nothing-else', async () => {
+      const seed = `dry-run-tuple-cleanup-fault-${randomUUID()}`;
+      const expectedFixture = generateFixture(seed, QUERY_COUNT);
+      expect(expectedFixture.tuples.length).toBeGreaterThan(1);
+      const poisoned = expectedFixture.tuples[0]!;
+      const generatedNamespaceNames = expectedFixture.namespaces.map((n) => n.namespace);
+
+      await installTupleDeleteFault(poisoned);
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const result = await runSoundnessFuzz(pool, {
+          seed,
+          queryCount: QUERY_COUNT,
+          trigger: 'cli',
+          dryRun: true,
+        });
+
+        // The real, computed result is still returned — a cleanup failure
+        // on the success path never masks it (matches
+        // runner-dry-run-cleanup-failure.test.ts's own already-established
+        // claim, now also true against a genuine Postgres-level failure
+        // rather than a mocked one).
+        expect(result.tupleCount).toBe(expectedFixture.tuples.length);
+        expect(consoleErrorSpy).toHaveBeenCalled();
+
+        // Namespace cleanup fully succeeded — the trigger only ever
+        // touches `relation_tuples`, never `namespace_configs` — matching
+        // this file's own already-established combination-(a) behavior:
+        // when the *other* category succeeds, it succeeds completely.
+        const { rows: namespaceSurvival } = await pool.query<{ count: string }>(
+          'select count(*) as count from namespace_configs where namespace = any($1)',
+          [generatedNamespaceNames],
+        );
+        expect(Number(namespaceSurvival[0]?.count ?? -1)).toBe(0);
+
+        // soundness_runs cleanup fully succeeded too — a separate, unrelated
+        // delete the trigger never touches.
+        const { rows: survivingRun } = await pool.query<{ id: string }>(
+          'select id from soundness_runs where id = $1',
+          [result.id],
+        );
+        expect(survivingRun).toHaveLength(0);
+
+        // The actual claim under test: exactly the one poisoned tuple
+        // survives in `relation_tuples`, under its exact real key — not
+        // "the count is off by one," but the *specific* row a caller
+        // relying on `GET /health` alone would never see, since `/health`
+        // never queries this table at all.
+        const { rows: survivingTuples } = await pool.query<{
+          object_ns: string;
+          object_id: string;
+          relation: string;
+          subject_ns: string;
+          subject_id: string;
+          subject_relation: string | null;
+        }>(
+          `select object_ns, object_id, relation, subject_ns, subject_id, subject_relation
+           from relation_tuples where object_ns = any($1)`,
+          [generatedNamespaceNames],
+        );
+        expect(survivingTuples).toHaveLength(1);
+        expect(survivingTuples[0]).toEqual({
+          object_ns: poisoned.objectNs,
+          object_id: poisoned.objectId,
+          relation: poisoned.relation,
+          subject_ns: poisoned.subjectNs,
+          subject_id: poisoned.subjectId,
+          subject_relation: poisoned.subjectRelation ?? null,
+        });
+      } finally {
+        vi.restoreAllMocks();
+        await uninstallTupleDeleteFault(poisoned);
+      }
+    }, 60_000);
   });
 });
