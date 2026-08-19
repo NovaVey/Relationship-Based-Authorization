@@ -85,6 +85,30 @@ describe('authz check — exit codes', () => {
     expect(process.exitCode).toBe(2);
   });
 
+  // Full-repo audit finding #11 (LOW, third audit, 2026-08-17): `Number('')`
+  // and `Number('   ')` both coerce to `0`, which passes the numeric checks
+  // below unmodified — an empty/whitespace-only `--at-token` was silently
+  // treated as the legitimately-supplied token `0` instead of rejected as
+  // malformed, unlike `soundness run --queries=""`/`--progress=""` on the
+  // same codebase.
+  it('an-invalid-at-token-that-is-empty-exits-2-before-check-ever-touches-postgres', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    await check('user:alice', 'view', 'document:readme', { atToken: '' });
+
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('an-invalid-at-token-that-is-whitespace-only-exits-2-before-check-ever-touches-postgres', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    await check('user:alice', 'view', 'document:readme', { atToken: '   ' });
+
+    expect(process.exitCode).toBe(2);
+  });
+
   it('check-against-an-unreachable-database-exits-3-not-a-silent-empty-answer', async () => {
     env.DATABASE_URL = UNREACHABLE_DATABASE_URL;
     process.exitCode = undefined;

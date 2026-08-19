@@ -150,6 +150,24 @@ export async function check(
 
   let atToken: number | undefined;
   if (options.atToken !== undefined) {
+    // Blank/whitespace-only rejected explicitly, before the numeric checks
+    // below (full-repo audit finding #11, LOW, third audit, 2026-08-17):
+    // `Number('')` and `Number('   ')` both coerce to `0`, which passes
+    // both `Number.isInteger` and `atToken < 0` — an empty or
+    // whitespace-only `--at-token` was silently treated as the
+    // legitimately-supplied token `0` instead of rejected as malformed
+    // (unlike `soundness.ts`'s `--queries`/`--progress`, which reject blank
+    // input via their own `<= 0` check — `0` isn't a valid query count
+    // either way there, but `0` IS a valid `--at-token`, so that same trick
+    // doesn't carry over here and needs its own explicit guard). Also
+    // brings this in line with `src/api/server.ts`'s `checkBodySchema`
+    // (`atToken: z.number().int().nonnegative().optional()`), which already
+    // rejects a string-typed empty value for the equivalent HTTP operation.
+    if (options.atToken.trim() === '') {
+      console.error(`invalid --at-token '${options.atToken}' — must be a non-negative integer`);
+      process.exitCode = 2;
+      return;
+    }
     atToken = Number(options.atToken);
     if (!Number.isInteger(atToken) || atToken < 0) {
       console.error(`invalid --at-token '${options.atToken}' — must be a non-negative integer`);

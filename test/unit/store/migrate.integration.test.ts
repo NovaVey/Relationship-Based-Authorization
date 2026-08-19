@@ -123,3 +123,82 @@ describe('runMigrations is idempotent on rerun — a second call against an alre
     }
   });
 });
+
+/**
+ * Full-repo audit finding #14 (LOW, third audit, 2026-08-17): `runMigrations`
+ * used to read `schema_migrations`, compute what's pending, and apply it
+ * with nothing serializing that read-then-apply sequence against a second,
+ * genuinely concurrent call — the identical "read pending state, then
+ * write, unserialized" shape D-080 already found and fixed for `publishOne`
+ * and D-083 fixed for `writeTuple`/`deleteTuple`, but never extended to
+ * `schema_migrations` itself. Closed by `MIGRATIONS_LOCK_CLASSID`/
+ * `MIGRATIONS_LOCK_OBJID` (`src/store/migrate.ts`) — see that constant
+ * pair's own doc comment for the exact mechanism and why it is
+ * session-scoped (`pg_advisory_lock`), not transaction-scoped like D-080's
+ * and D-083's own locks.
+ *
+ * A dedicated fresh container/pool for this describe block, deliberately
+ * separate from the one the idempotent-rerun tests above share — this test
+ * needs a database that genuinely has zero migrations applied yet at the
+ * moment both calls fire, which the shared container above no longer is by
+ * the time this file reaches this point.
+ *
+ * Mirrors `test/unit/store/tuple-store.integration.test.ts`'s own real-race
+ * testing idiom (two real, independently-driven operations racing against
+ * the same real Postgres, not a mock) — here, `Promise.all` on the same
+ * pool is enough to get two real, concurrent connections/transactions
+ * racing each other, since `runMigrations` itself calls `pool.connect()`
+ * for its own lock-holding connection; unlike that file's own
+ * inverted-commit-order regression test, this one doesn't need to
+ * *control* the exact interleaving (hold one side open while asserting the
+ * other blocks) — it only needs to confirm the outcome of two calls that
+ * are genuinely racing, which firing both concurrently already provides.
+ *
+ * Before this fix, this exact scenario reproduced a real, unhandled
+ * catalog-conflict error live against real Postgres — confirmed directly,
+ * not assumed, by temporarily reverting the fix and re-running: both calls'
+ * near-simultaneous `create table if not exists schema_migrations` (the
+ * DDL originally ran unlocked, before this fix moved it inside the lock
+ * too — see `runMigrations`'s own doc comment) raced a real
+ * `pg_type_typname_nsp_index` unique-constraint violation from Postgres's
+ * own `pg_catalog`, 100% reproducible across repeated runs. Restored
+ * immediately after confirming the fail-check, never left reverted.
+ */
+describe('two genuinely concurrent runMigrations calls against the same fresh database never race — finding #14', () => {
+  let raceContainer: StartedPostgreSqlContainer;
+  let racePool: Pool;
+
+  beforeAll(async () => {
+    raceContainer = await new PostgreSqlContainer('postgres:16-alpine').start();
+    racePool = new Pool({ connectionString: raceContainer.getConnectionUri() });
+  }, 120_000);
+
+  afterAll(async () => {
+    await racePool.end();
+    await raceContainer.stop();
+  });
+
+  it('one-call-applies-every-migration-the-other-applies-none-and-neither-throws-an-unhandled-catalog-conflict-error', async () => {
+    const totalMigrations = discoverMigrations(MIGRATIONS_DIR).length;
+    expect(totalMigrations).toBeGreaterThan(0); // sanity: real migration content to race over
+
+    const [a, b] = await Promise.all([
+      runMigrations(racePool, MIGRATIONS_DIR),
+      runMigrations(racePool, MIGRATIONS_DIR),
+    ]);
+
+    // The lock fully serializes the two calls, so exactly one side does the
+    // real work and the other — whichever acquires the lock second — always
+    // finds nothing left pending by the time it gets to look.
+    const appliedCounts = [a.applied.length, b.applied.length].sort((x, y) => x - y);
+    expect(appliedCounts).toEqual([0, totalMigrations]);
+
+    const { rows } = await racePool.query<{ id: string; count: string }>(
+      `select id, count(*)::text as count from schema_migrations group by id`,
+    );
+    expect(rows).toHaveLength(totalMigrations);
+    for (const row of rows) {
+      expect(row.count).toBe('1');
+    }
+  });
+});
