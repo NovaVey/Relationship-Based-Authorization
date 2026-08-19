@@ -63,6 +63,7 @@ import { performCheck } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { writeTuple, deleteTuple, type TupleKey } from '../store/tuples.js';
 import { compileSchema } from '../schema/dsl/compiler.js';
+import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
 import { publishSchema, listLatestNamespaceVersions } from '../schema/publish.js';
 import { checkAdminAuth } from './auth.js';
 import {
@@ -84,18 +85,48 @@ import {
   type ApiErrorResponse,
 } from './errors.js';
 
-const entityRefSchema = z.object({ ns: z.string().min(1), id: z.string().min(1) });
+// `identifierField()` — the same grammar `src/store/tuples.ts`'s
+// `validateIdentifiers` already enforces on every tuple write/delete
+// (`IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH`, `src/schema/dsl/types.ts`),
+// applied here too. `/check`/`/expand` never route through `writeTuple`/
+// `deleteTuple` — they call `performCheck`/`expand` directly — so before
+// this fix, `entityRefSchema`'s `ns`/`id` and both routes' `relation` field
+// accepted any non-empty string, with no identifier-grammar or length
+// enforcement at all. Not an auth bypass: `getConfig` (the production
+// resolver's namespace-config lookup) still gates on `object.ns` matching a
+// real *published* namespace first, and a published namespace name is
+// itself already grammar-clean by construction (it went through the DSL
+// compiler to get published) — so a malformed `ns` on an unpublished
+// namespace is rejected downstream regardless, just later and less clearly.
+// The real damage a malformed identifier does: `src/resolve/production/
+// resolver.ts` documents and depends on "no real identifier contains `:` or
+// `#`" (`entityNameKey`, `parseFrontierKeyString`) to reconstruct an
+// audit-trail path — an id like `'evil#hack'` can make that parsing
+// silently mis-split, corrupting the resolution path an ALLOWED result
+// shows its work with. And every malformed value that does clear the
+// namespace-gate reaches the `checks` audit table's plain `text` columns
+// permanently, with no `CHECK` constraint to catch it later. Full-repo
+// audit finding #3, MEDIUM, third audit, 2026-08-17. See docs/DECISIONS.md.
+function identifierField(): z.ZodString {
+  return z
+    .string()
+    .min(1)
+    .max(MAX_IDENTIFIER_LENGTH)
+    .regex(IDENTIFIER_PATTERN, `must match ${IDENTIFIER_PATTERN.source}`);
+}
+
+const entityRefSchema = z.object({ ns: identifierField(), id: identifierField() });
 
 const checkBodySchema = z.object({
   subject: entityRefSchema,
-  relation: z.string().min(1),
+  relation: identifierField(),
   object: entityRefSchema,
   atToken: z.number().int().nonnegative().optional(),
 });
 
 const expandBodySchema = z.object({
   object: entityRefSchema,
-  relation: z.string().min(1),
+  relation: identifierField(),
 });
 
 const tupleBodySchema = z.object({
@@ -413,6 +444,123 @@ export async function buildServer(
     }
   }
 
+  /**
+   * A second, independent, much coarser limiter on every request to a
+   * gated route, positioned FIRST in that route's own `preHandler` array —
+   * before `requireAdminAuth`, unlike `writeRateLimit`/`gatedReadRateLimit`
+   * below, which are deliberately AFTER it (D-065). Full-repo audit finding
+   * #10, MEDIUM, third audit, 2026-08-17.
+   *
+   * **The gap this closes.** D-065 correctly moved rate-limit *counting*
+   * to run after `requireAdminAuth` so a flood of wrong-key requests could
+   * never exhaust the budget a legitimate key-holder needs — but the
+   * necessary consequence, never weighed at the time, is that a failed-auth
+   * request is now counted by NO limiter at all: `@fastify/rate-limit`
+   * gives a route with its own `config.rateLimit` *only* that route's own
+   * limiter, never a global fallback underneath it (confirmed by reading
+   * `node_modules/@fastify/rate-limit/index.js`'s own `onRoute` hook — a
+   * route-level config entirely replaces the global one for that route,
+   * never layers under it), and Fastify's preHandler chain stops the
+   * instant `requireAdminAuth` sends its 401 — the array's later entries,
+   * including `writeRateLimit`/`gatedReadRateLimit`'s own counting hook,
+   * never run (confirmed by this project's own D-065 regression test:
+   * repeated wrong-key requests all return 401, never 429). So every
+   * failed-auth request against `/tuples`, `/check`, `/expand`, or
+   * `/schema/publish` was, by design of D-065's own fix, entirely
+   * unbounded.
+   *
+   * **Why not just add a second `@fastify/rate-limit` limiter via
+   * `app.rateLimit(options)` (the same decorator `setNotFoundHandler`
+   * already uses above) instead of hand-rolling one?** Read directly from
+   * that plugin's own source before ruling it out, not assumed: every
+   * limiter check born from ONE `app.register(rateLimit, ...)` call —
+   * whether the automatic per-route `config.rateLimit` wiring or a manual
+   * `app.rateLimit(options)` call — shares one `pluginComponent.rateLimitRan`
+   * flag *per request*. `rateLimitRequestHandler` sets that flag on the
+   * FIRST check it runs and every subsequent check on the same request
+   * returns immediately without ever calling `applyRateLimit` — a silent
+   * no-op, not a second count. Registering a second `app.rateLimit(...)`
+   * limiter ahead of `requireAdminAuth` would set that shared flag on
+   * *every* request (auth succeeds or fails), which would then silently
+   * disable `writeRateLimit`/`gatedReadRateLimit`'s own later, stricter,
+   * successful-request budget entirely — not add a second layer alongside
+   * it, but quietly remove the first one. A small, self-contained,
+   * in-memory counter avoids that shared-flag interaction altogether, at
+   * the cost of not inheriting the library's IPv6-subnet-aware key
+   * normalization or Redis-store option — neither of which this narrow,
+   * single-purpose guard needs.
+   *
+   * **Scope and threshold.** Local to this `buildServer` call (like
+   * `requireAdminAuth` itself) — a fresh, empty counter per server
+   * instance, never a module-level global that would leak state across
+   * separate `buildServer()` calls in the same process (every test file in
+   * this project builds a fresh app per test). 1000 requests per rolling
+   * 60-second window per `request.ip` (the same `trustProxy: 1`-resolved
+   * value every other limiter in this file already uses) — deliberately
+   * far more generous than `writeRateLimit`'s 20/min or
+   * `gatedReadRateLimit`'s 200/min: this exists only to bound a genuine
+   * flood (D-065's own scenario), never to police normal admin traffic,
+   * which comes nowhere close to 1000 requests/minute from one address in
+   * any real use this project has ever had.
+   */
+  const authFloodState = new Map<string, { count: number; windowStart: number }>();
+  const AUTH_FLOOD_MAX = 1000;
+  const AUTH_FLOOD_WINDOW_MS = 60_000;
+
+  async function authFloodGuard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const key = request.ip;
+    const now = Date.now();
+    const existing = authFloodState.get(key);
+    if (existing === undefined || now - existing.windowStart >= AUTH_FLOOD_WINDOW_MS) {
+      authFloodState.set(key, { count: 1, windowStart: now });
+      return;
+    }
+    existing.count += 1;
+    if (existing.count > AUTH_FLOOD_MAX) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((existing.windowStart + AUTH_FLOOD_WINDOW_MS - now) / 1000),
+      );
+      await sendApiError(reply, rateLimitedError(retryAfterSeconds));
+    }
+  }
+
+  /**
+   * `[authFloodGuard, requireAdminAuth]`, in that order — every gated
+   * route's own `preHandler`. See `authFloodGuard`'s own doc comment for
+   * why the flood guard must run first.
+   *
+   * A **function that returns a fresh array on every call**, not a single
+   * shared array constant handed to all five gated routes — a real bug,
+   * caught live during this fix's own verification, not shipped: five
+   * routes here each set `config.rateLimit`, and `@fastify/rate-limit`'s
+   * own `onRoute` hook appends its counting handler onto whatever
+   * `preHandler` array a route was registered with via a plain
+   * `Array.prototype.push` (`node_modules/@fastify/rate-limit/index.js`'s
+   * `addRouteRateHook`) — an in-place mutation. A single shared array
+   * reference passed to all five `app.post`/`app.delete` calls below would
+   * accumulate all five routes' own rate-limit handlers onto the *one*
+   * array object every route's `preHandler` option actually points to, so
+   * every gated route would run with the exact same final, fully-merged
+   * preHandler array regardless of which route it was — and since every
+   * limiter check born from this file's one `app.register(rateLimit, ...)`
+   * call shares one "already ran" flag per request (see `authFloodGuard`'s
+   * own doc comment on `rateLimitRan`), only the first of those five
+   * accumulated limiter checks would ever actually count anything; the
+   * other four would silently no-op on every request, regardless of route.
+   * Confirmed live: `test/unit/api/rate-limit.test.ts`'s own pre-existing
+   * `writeRateLimit` (20/minute) test failed with a shared array (every
+   * request kept returning its real 400, never the expected 429, because
+   * `/check`'s own 200/minute limiter — registered first and so appended
+   * first — silently absorbed the counting for every route). A fresh array
+   * per call site closes this: each route's own `preHandler` option is a
+   * distinct array object, so `@fastify/rate-limit`'s per-route mutation
+   * only ever touches the one array actually registered for that route.
+   */
+  function gatedPreHandlers(): [typeof authFloodGuard, typeof requireAdminAuth] {
+    return [authFloodGuard, requireAdminAuth];
+  }
+
   // A stricter budget than the global default (D-056): defense-in-depth
   // against ADMIN_API_KEY-guessing and write-flooding, even from a caller
   // who does hold a valid key. `hook: 'preHandler'` (D-065) — see
@@ -433,7 +581,7 @@ export async function buildServer(
 
   app.post(
     '/check',
-    { preHandler: requireAdminAuth, ...gatedReadRateLimit },
+    { preHandler: gatedPreHandlers(), ...gatedReadRateLimit },
     async (request, reply) => {
       const parsed = checkBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -452,7 +600,7 @@ export async function buildServer(
 
   app.post(
     '/expand',
-    { preHandler: requireAdminAuth, ...gatedReadRateLimit },
+    { preHandler: gatedPreHandlers(), ...gatedReadRateLimit },
     async (request, reply) => {
       const parsed = expandBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -469,7 +617,7 @@ export async function buildServer(
 
   app.post(
     '/tuples',
-    { preHandler: requireAdminAuth, ...writeRateLimit },
+    { preHandler: gatedPreHandlers(), ...writeRateLimit },
     async (request, reply) => {
       const parsed = tupleBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -486,7 +634,7 @@ export async function buildServer(
 
   app.delete(
     '/tuples',
-    { preHandler: requireAdminAuth, ...writeRateLimit },
+    { preHandler: gatedPreHandlers(), ...writeRateLimit },
     async (request, reply) => {
       const parsed = tupleBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -514,7 +662,7 @@ export async function buildServer(
 
   app.post(
     '/schema/publish',
-    { preHandler: requireAdminAuth, ...writeRateLimit },
+    { preHandler: gatedPreHandlers(), ...writeRateLimit },
     async (request, reply) => {
       const parsed = schemaSourceBodySchema.safeParse(request.body);
       if (!parsed.success) {

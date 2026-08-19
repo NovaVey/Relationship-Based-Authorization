@@ -200,6 +200,44 @@ describe('a structurally malformed request body is rejected with 400 invalid_req
 });
 
 // ---------------------------------------------------------------------------
+// 1b. Full-repo audit finding #3 (MEDIUM, third audit, 2026-08-17): a
+//     structurally *valid* body whose `ns`/`id`/`relation` violates the
+//     identifier grammar (`IDENTIFIER_PATTERN`) is rejected too, the same
+//     400 a malformed tuple write already gets from `validateIdentifiers` —
+//     companion coverage for finding #13 (the test gap this closes).
+// ---------------------------------------------------------------------------
+
+describe('a well-formed but grammar-invalid identifier is rejected with 400 invalid_request too (finding #3)', () => {
+  it('a-check-body-whose-subject-namespace-contains-a-colon-is-rejected-with-400-invalid-request', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(checksModule, 'performCheck');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: { ...validCheckBody, subject: { ns: 'has:colon', id: 'alice' } },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('an-expand-body-whose-object-namespace-contains-a-colon-is-rejected-with-400-invalid-request', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(expandModule, 'expand');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/expand',
+      payload: { ...validExpandBody, object: { ns: 'has:colon', id: 'readme' } },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. The core exit-criterion claim: the auth gate short-circuits BEFORE the
 //    domain call, not just before the response.
 // ---------------------------------------------------------------------------
@@ -685,6 +723,63 @@ describe("D-065: failed-auth requests never consume a gated route's rate-limit b
     expect(res.statusCode).toBe(200);
     expect(writeSpy).toHaveBeenCalledTimes(1);
     expect(await parseBody(res)).toEqual({ token: 99, created: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8b. Full-repo audit finding #10 (MEDIUM, third audit, 2026-08-17) —
+//     `authFloodGuard`'s own doc comment: D-065's fix (above) correctly
+//     stops `writeRateLimit`/`gatedReadRateLimit`'s own after-auth counting
+//     from ever seeing a failed-auth request, but that means nothing
+//     else counted one either — a sustained flood of wrong-key requests
+//     was, by design of D-065's own fix, entirely unbounded. This second,
+//     independent, much coarser limiter (positioned BEFORE
+//     `requireAdminAuth`) closes that gap without reintroducing D-065's
+//     own self-DoS problem.
+// ---------------------------------------------------------------------------
+
+describe("finding #10: a second, independent, coarser flood guard bounds a sustained flood of failed-auth requests D-065's own after-auth counting never sees", () => {
+  it('a-sustained-flood-of-wrong-key-requests-eventually-returns-429-rate-limited-once-past-the-flood-guards-own-1000-per-minute-threshold', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const writeSpy = vi.spyOn(tuplesModule, 'writeTuple');
+
+    // One more than authFloodGuard's own max: 1000. writeRateLimit's own
+    // max: 20 never runs here at all — requireAdminAuth always rejects
+    // first — so before this fix, nothing bounded this flood.
+    let sawRateLimited = false;
+    for (let i = 0; i < 1005; i += 1) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/tuples',
+        payload: validTupleBody,
+        headers: authHeaders('wrong-key'),
+      });
+      if (res.statusCode === 429) {
+        sawRateLimited = true;
+        const body = await parseBody(res);
+        expect(body.error.code).toBe('rate_limited');
+        break;
+      }
+      expect(res.statusCode).toBe(401);
+    }
+    expect(sawRateLimited).toBe(true);
+    expect(writeSpy).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('a-normal-small-number-of-wrong-key-requests-well-under-the-flood-guards-threshold-still-all-return-401-never-429-not-a-regression-of-d-065', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    // Comfortably under authFloodGuard's own max: 1000 — a legitimate
+    // operator retrying a handful of times must never see 429 from this
+    // new, coarser guard.
+    for (let i = 0; i < 100; i += 1) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/tuples',
+        payload: validTupleBody,
+        headers: authHeaders('wrong-key'),
+      });
+      expect(res.statusCode).toBe(401);
+    }
   });
 });
 
