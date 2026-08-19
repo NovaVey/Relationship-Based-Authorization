@@ -24,6 +24,21 @@ name: Soundness
 on:
   pull_request:
 
+# Full-repo audit finding (2026-08-17, MEDIUM, "soundness.yml has no
+# concurrency: group"): without this, two runs on the same PR (a normal
+# fixup push or rebase a couple minutes apart) can both reach
+# scripts/post-soundness-comment.mjs's create-vs-update decision from the
+# same stale comment-list snapshot and both POST a new comment — two
+# stacked, possibly contradictory-verdict (each run gets its own random
+# fuzz seed) comments on one PR, contradicting this workflow's own
+# top-of-file "never stacking" claim. A new push canceling any
+# still-in-flight run for the same PR closes the race at the source,
+# rather than relying only on src/report/prComment.ts's own reactive
+# staleCommentIds cleanup on some later run.
+concurrency:
+  group: soundness-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write

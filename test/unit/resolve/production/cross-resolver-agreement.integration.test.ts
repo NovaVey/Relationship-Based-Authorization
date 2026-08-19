@@ -38,6 +38,7 @@
  * every fixture uses a `uniqueName`-generated namespace/object/subject so
  * tests are safe in any order and never see another test's tuples.
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -51,7 +52,7 @@ import { referenceCheck } from '../../../../src/resolve/reference/resolver.js';
 import { productionCheck } from '../../../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;

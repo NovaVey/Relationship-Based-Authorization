@@ -26,6 +26,7 @@
  * fixture, publish it, write every tuple for real, check every query
  * against both resolvers, classify, persist one `soundness_runs` row.
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -33,7 +34,7 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { runSoundnessFuzz } from '../../src/soundness/runner.js';
 import { runMigrations } from '../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;

@@ -52,6 +52,7 @@
  * cleanup-always-fails injection, and separately a forced mid-run-write
  * failure, both performed directly against `runner.ts`).
  */
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
@@ -61,7 +62,7 @@ import { runSoundnessFuzz, type SoundnessRunResult } from '../../../src/soundnes
 import { generateFixture } from '../../../src/soundness/generators.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 
-const MIGRATIONS_DIR = new URL('../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;

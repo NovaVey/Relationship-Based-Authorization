@@ -28,6 +28,7 @@
  * `docs/DECISIONS.md` D-019/D-030 (every `*.integration.test.ts` file
  * starts its own container; never a hardcoded local connection string).
  */
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -37,7 +38,7 @@ import { buildServer } from '../../../src/api/server.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 import { env } from '../../../src/config/env.js';
 
-const MIGRATIONS_DIR = new URL('../../../src/store/migrations', import.meta.url).pathname;
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
 const ADMIN_KEY = 'phase-8-integration-test-admin-key';
 const ORIGINAL_ADMIN_API_KEY = env.ADMIN_API_KEY;
 
