@@ -648,15 +648,22 @@ export async function runSoundnessFuzz(
     // Best-effort cleanup of whatever was actually created before this
     // throw, for exactly the same reason the success path above cleans up
     // before returning — a dry run promises no trace regardless of how the
-    // call ends. A failure here must never replace `err`: whether `err` is
-    // a genuine run failure (a bad tuple, a crashing check, …) or itself
-    // came from the cleanup call on the success path above, `err` is
-    // always the one thing this function is already about to throw, and
-    // that must reach the caller unchanged — see this function's own doc
-    // comment ("Throws ... if the generated fixture itself is broken")
-    // and this task's own instruction not to reshape or swallow it. A
-    // second cleanup failure here is logged, not thrown, so it's visible
-    // without masking `err`.
+    // call ends. A failure here must never replace `err`: `err` is always
+    // a genuine failure from this function's own `try` body (a bad tuple,
+    // a crashing check, the `soundness_runs` insert itself, …) — never a
+    // rethrown cleanup failure from the success path above (full-repo
+    // audit finding #16, LOW, `docs/DECISIONS.md` D-092): that path's own
+    // `try`/`catch` (just above, around its `cleanupIfDryRun()` call)
+    // already logs and swallows its own failure rather than throwing, so
+    // under ordinary execution it can never be what lands here — the only
+    // way it theoretically could is `console.error` itself throwing
+    // synchronously (e.g. a broken stream), not the scenario this comment
+    // is about. Whatever `err` actually is, it's the one thing this
+    // function is already about to throw, and that must reach the caller
+    // unchanged — see this function's own doc comment ("Throws ... if the
+    // generated fixture itself is broken") and this task's own instruction
+    // not to reshape or swallow it. A second cleanup failure here is
+    // logged, not thrown, so it's visible without masking `err`.
     try {
       await cleanupIfDryRun();
     } catch (cleanupErr) {

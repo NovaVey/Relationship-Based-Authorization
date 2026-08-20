@@ -751,6 +751,98 @@ describe('checks.depth reflects the actual recursion depth reached, not just the
       await verifyResolutionStep(ref('user', 'alice'), ref(docNs, objectId), 'view', result.path),
     ).toBe(true);
   });
+
+  /**
+   * Full-repo audit finding #17: `docs/DECISIONS.md` D-038 justifies
+   * `checks.depth` as a high-water mark specifically because "a union with
+   * three failing children before a fourth succeeds did real work at each
+   * of their depths, not just the last one." Both tests above are
+   * single-path — the direct-grant fixture never recurses past depth 1 at
+   * all, and the nested-group fixture has exactly one branch, which
+   * happens to be the one that succeeds. Neither distinguishes "reports
+   * the failing branches' own depth" from "reports only the winning
+   * branch's depth" — a regression that made `depthReached` reset (rather
+   * than accumulate via `Math.max`) on every new union branch would still
+   * pass both.
+   *
+   * `permission p = ra | rb | rc | rd`: `ra`/`rb`/`rc` are each declared
+   * exactly like this file's own `depth-reflects-real-sql-side-recursive-
+   * cte-traversal...` fixture above — a three-level nested-group chain
+   * (`group:X0#member -> group:X1#member -> group:X2#member`) — but each
+   * one's chain ends in a grant to someone other than the checked subject,
+   * so each is a real, three-level-deep SQL-side exploration that still
+   * *fails*. `rd` is a single, shallow direct grant to the checked
+   * subject, declared *last* in the union so `evalRewrite`'s union loop
+   * (which evaluates children in declaration order and returns on the
+   * first success) genuinely evaluates — and fully explores — `ra`, `rb`,
+   * and `rc` first, before ever reaching `rd`.
+   */
+  it('depth-reflects-a-unions-deep-failing-branches-not-just-its-shallow-winning-one', async () => {
+    const groupNs = uniqueName('group');
+    const docNs = uniqueName('doc');
+    const source = [
+      `namespace ${groupNs} {`,
+      `  relation member: user | ${groupNs}#member`,
+      '}',
+      '',
+      `namespace ${docNs} {`,
+      `  relation ra: user | ${groupNs}#member`,
+      `  relation rb: user | ${groupNs}#member`,
+      `  relation rc: user | ${groupNs}#member`,
+      '  relation rd: user',
+      '',
+      '  permission p = ra | rb | rc | rd',
+      '}',
+    ].join('\n');
+    await publishOk(source);
+
+    const objectId = uniqueName('obj');
+
+    // Three independent three-level nested-group chains, one per failing
+    // branch — each one real SQL-side recursion, each one a dead end for
+    // `alice` (the grant at the bottom of each chain names `nobody`, never
+    // `alice`).
+    for (const [relation, prefix] of [
+      ['ra', 'ga'],
+      ['rb', 'gb'],
+      ['rc', 'gc'],
+    ] as const) {
+      const g0 = uniqueName(`${prefix}0`);
+      const g1 = uniqueName(`${prefix}1`);
+      const g2 = uniqueName(`${prefix}2`);
+      await writeOk(tuple(docNs, objectId, relation, groupNs, g0, 'member'));
+      await writeOk(tuple(groupNs, g0, 'member', groupNs, g1, 'member'));
+      await writeOk(tuple(groupNs, g1, 'member', groupNs, g2, 'member'));
+      await writeOk(tuple(groupNs, g2, 'member', 'user', 'nobody'));
+    }
+
+    // The real, shallow grant — the only thing that actually makes this
+    // check resolve `allowed: true`.
+    await writeOk(tuple(docNs, objectId, 'rd', 'user', 'alice'));
+
+    const result = await productionCheck(pool, ref('user', 'alice'), ref(docNs, objectId), 'p', {
+      maxDepth: 25,
+    });
+
+    expect(result.allowed).toBe(true);
+    // The literal claim: this check's own winning branch (`rd`) is exactly
+    // as shallow as the direct-grant fixture at the top of this describe
+    // block (which asserts `depth` between 1 and 25, typically bottoming
+    // out well below 25) — if `depth` reflected only the winning branch,
+    // it would land in that same shallow range here too. Instead, the
+    // three failing branches evaluated first each independently drove the
+    // SQL-side recursive CTE three levels deep (the same shape and the
+    // same empirically-confirmed depth as this file's own nested-group
+    // fixture above), and that work is what `depth` must still show.
+    expect(result.depth).toBe(3);
+    expect(result.depth).toBeGreaterThan(1);
+
+    expect(result.path).toBeDefined();
+    if (!result.path) return;
+    expect(
+      await verifyResolutionStep(ref('user', 'alice'), ref(docNs, objectId), 'p', result.path),
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

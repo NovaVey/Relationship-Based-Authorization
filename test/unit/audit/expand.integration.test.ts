@@ -9,8 +9,8 @@
  * every other `*.integration.test.ts` file in this repo (see
  * `docs/DECISIONS.md` D-019/D-030).
  *
- * **The cycle-termination test below is not trusted from its own passing
- * result.** Per this project's own repeatedly-learned lesson
+ * **The cycle-termination tests below are not trusted from their own
+ * passing result.** Per this project's own repeatedly-learned lesson
  * (D-024/D-027/D-029): a termination test proves nothing about the
  * specific mechanism it claims to test unless it can demonstrably fail
  * when that mechanism, and only that mechanism, is broken. This was
@@ -30,6 +30,29 @@
  * "mutating a shipped source file at test-run time is unsafe" problem
  * `test/isolation/differential-soundness.fuzz.test.ts`'s own doc comment
  * already states for the synthetic-double tests elsewhere in this repo.
+ *
+ * **A second, independent cyclic-termination test below closes full-repo
+ * audit finding #8 (MEDIUM, `docs/DECISIONS.md` D-092).** The cyclic test
+ * just described drives the cycle exclusively through
+ * `expandRelation`'s own userset-expansion call (a stored userset-subject
+ * tuple, `group:a#member` nesting `group:b#member` nesting back to
+ * `group:a#member`) — a textually and structurally distinct call site in
+ * `expandRewrite`'s `tupleToUserset` branch (`src/audit/expand.ts`, the
+ * recursive `expandName` call inside its `case 'tupleToUserset':`) shares
+ * only the same `visiting` guard but was never independently exercised by
+ * any committed test before this fix, the same class of gap D-087 (finding
+ * #4) already found and fixed once for a different file
+ * (`test/unit/resolve/reference-resolver.graph-shape.test.ts`). The new
+ * test below drives a cycle through `permission view = viewer |
+ * parent->view` with `parent` tuples forming `folder:a -> folder:b ->
+ * folder:a` — a plain-relation cycle with no userset-subject nesting
+ * anywhere in it, so a pass here can only be explained by the
+ * `tupleToUserset` branch's own use of `visiting` actually working, not by
+ * incidentally reusing coverage `expandRelation`'s test already provides.
+ * Verified the identical way: `visiting.has(key)` temporarily removed,
+ * confirmed this new test then hangs (a real timeout, not a stack
+ * overflow, same reasoning as above), guard restored and confirmed
+ * byte-identical before this file was considered done.
  */
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -296,6 +319,86 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
     expect(tree.usersets).toHaveLength(1);
     expect(tree.usersets[0]?.userset).toEqual({ ns, id: 'b' });
     expect(findNodeKind(tree, 'cycleGuard')).toBe(true);
+
+    // "Did not hang" — the same discipline every cyclic-termination test in
+    // this repo already holds itself to (D-024/D-027/D-029's own bound).
+    expect(elapsedMs).toBeLessThan(4000);
+  });
+
+  it('a cyclic tupleToUserset chain terminates via the SAME visiting guard, exercised through a structurally different call site than the group-nesting cycle above — full-repo audit finding #8', async () => {
+    // No userset-subject nesting anywhere in this fixture — `parent` is a
+    // plain, single-object relation (not `folder#parent`), so the cycle
+    // this test relies on can only be caught by expandRewrite's own
+    // `case 'tupleToUserset':` branch calling `expandName` recursively, the
+    // one call site the pre-existing group-nesting test above never
+    // exercises (that one loops entirely inside `expandRelation`).
+    const ns = uniqueName('folder');
+    await publishOk(
+      [
+        `namespace ${ns} {`,
+        `  relation parent: ${ns}`,
+        '  relation viewer: user',
+        '',
+        '  permission view = viewer | parent->view',
+        '}',
+      ].join('\n'),
+    );
+
+    // The cycle: folder:a's view recurses (via tupleToUserset) into
+    // folder:b's view, which recurses right back into folder:a's view.
+    await writeOk(tuple(ns, 'a', 'parent', ns, 'b'));
+    await writeOk(tuple(ns, 'b', 'parent', ns, 'a'));
+    // A real, direct grant on folder:a itself — reachable through the same
+    // object the cycle lives on, via the union's OTHER branch — proving
+    // the guard cuts off only the cyclic branch, not the whole tree.
+    await writeOk(tuple(ns, 'a', 'viewer', 'user', 'dana'));
+
+    // Forced to an explicit, very large value — same D-024 precedent as
+    // the group-nesting test above: at the default depth budget, this
+    // could pass even with the guard fully disabled, because the
+    // independent depth ceiling would silently absorb the infinite
+    // recursion first.
+    const start = performance.now();
+    const tree = await expand(pool, ref(ns, 'a'), 'view', { maxDepth: 1_000_000 });
+    const elapsedMs = performance.now() - start;
+
+    expect(tree.kind).toBe('union');
+    if (tree.kind !== 'union') return;
+    expect(tree.children).toHaveLength(2);
+
+    // The real, direct grant survives, unpoisoned by the cyclic branch.
+    const subjects = collectDirectSubjects(tree)
+      .map((s) => s.id)
+      .sort();
+    expect(subjects).toEqual(['dana']);
+
+    // The cyclic branch is present but visibly terminated by the guard,
+    // not silently dropped and not an infinite structure.
+    expect(findNodeKind(tree, 'cycleGuard')).toBe(true);
+    const ttuBranch = tree.children.find((c) => c.kind === 'tupleToUserset');
+    expect(ttuBranch).toBeDefined();
+    if (ttuBranch?.kind !== 'tupleToUserset') return;
+    expect(ttuBranch.relation).toBe('parent');
+    expect(ttuBranch.computedUserset).toBe('view');
+    expect(ttuBranch.children).toHaveLength(1);
+    expect(ttuBranch.children[0]?.through).toEqual({ ns, id: 'b' });
+    // folder:b's own `view` union: its `viewer` branch is empty (no tuple),
+    // and its `parent->view` branch loops back to folder:a's `view`, which
+    // is still mid-resolution on this branch — that's exactly where the
+    // guard must fire.
+    const throughB = ttuBranch.children[0]?.expansion;
+    expect(throughB?.kind).toBe('union');
+    if (throughB?.kind !== 'union') return;
+    const nestedTtuBranch = throughB.children.find((c) => c.kind === 'tupleToUserset');
+    expect(nestedTtuBranch).toBeDefined();
+    if (nestedTtuBranch?.kind !== 'tupleToUserset') return;
+    expect(nestedTtuBranch.children).toHaveLength(1);
+    expect(nestedTtuBranch.children[0]?.through).toEqual({ ns, id: 'a' });
+    expect(nestedTtuBranch.children[0]?.expansion).toEqual({
+      kind: 'cycleGuard',
+      object: ref(ns, 'a'),
+      name: 'view',
+    });
 
     // "Did not hang" — the same discipline every cyclic-termination test in
     // this repo already holds itself to (D-024/D-027/D-029's own bound).

@@ -184,3 +184,117 @@ describe('a genuinely omitted maxDepth falls back to DEFAULT_REFERENCE_MAX_DEPTH
     expect(result.allowed).toBe(false);
   });
 });
+
+describe('a malformed maxDepth is rejected synchronously, before any recursion starts — full-repo audit finding #6, docs/DECISIONS.md D-092', () => {
+  // `x > NaN` — and every other `>`/`<`/`>=`/`<=` comparison involving
+  // `NaN` — is always `false` in JavaScript, never `true`. An unvalidated
+  // `{ maxDepth: NaN }` would silently disable `resolveMembership`'s own
+  // `depth > ctx.maxDepth` ceiling entirely, leaving branch-local cycle
+  // detection (which, by design per D-021, does not fire on a genuinely
+  // acyclic-but-deep chain — only a real repeated `(ns,id,relation)` on one
+  // root-to-node path does) as the *only* termination guard. Concretely: a
+  // long enough acyclic chain with `{ maxDepth: NaN }` would recurse until
+  // it blew the real JS call stack — a `RangeError: Maximum call stack size
+  // exceeded`, thrown from deep inside `resolveMembership`'s own recursion,
+  // not from here — directly contradicting this file's own documented
+  // contract on `referenceCheck` ("Never throws ... never an exception,
+  // never a hang"). Verified live during this fix (not just argued): with
+  // this file's own new guard temporarily commented out, a 20,000-node
+  // acyclic chain (well beyond `DEFAULT_REFERENCE_MAX_DEPTH`) called with
+  // `{ maxDepth: NaN }` threw exactly that native `RangeError`, confirming
+  // the bug was real before landing this guard; restored before this test
+  // file's own suite ran again. Matches the exact bug class `docs/
+  // DECISIONS.md` D-074 already found and fixed once for
+  // `src/store/tokens.ts`'s `assertTokenObserved`.
+  const SIMPLE_SOURCE = ['namespace document {', '  relation viewer: user', '}'].join('\n');
+
+  it('maxDepth-NaN-throws-a-plain-clear-error-not-the-confusing-native-RangeError-a-stack-overflow-would-produce', () => {
+    const schema = compileOk(SIMPLE_SOURCE);
+    expect(() =>
+      referenceCheck(schema, [], ref('user', 'alice'), ref('document', 'readme'), 'viewer', {
+        maxDepth: NaN,
+      }),
+    ).toThrow(/maxDepth/);
+  });
+
+  it('maxDepth-negative-throws-the-same-clear-error', () => {
+    const schema = compileOk(SIMPLE_SOURCE);
+    expect(() =>
+      referenceCheck(schema, [], ref('user', 'alice'), ref('document', 'readme'), 'viewer', {
+        maxDepth: -1,
+      }),
+    ).toThrow(/maxDepth/);
+  });
+
+  it('maxDepth-positive-Infinity-throws-the-same-clear-error', () => {
+    // Infinity is not "not a number," but `depth > Infinity` is *always*
+    // false too — exactly the same neutralized-ceiling hazard as NaN.
+    const schema = compileOk(SIMPLE_SOURCE);
+    expect(() =>
+      referenceCheck(schema, [], ref('user', 'alice'), ref('document', 'readme'), 'viewer', {
+        maxDepth: Infinity,
+      }),
+    ).toThrow(/maxDepth/);
+  });
+
+  it('maxDepth-negative-Infinity-throws-the-same-clear-error', () => {
+    const schema = compileOk(SIMPLE_SOURCE);
+    expect(() =>
+      referenceCheck(schema, [], ref('user', 'alice'), ref('document', 'readme'), 'viewer', {
+        maxDepth: -Infinity,
+      }),
+    ).toThrow(/maxDepth/);
+  });
+
+  it('the-thrown-error-is-a-plain-Error-thrown-synchronously-not-a-RangeError-surfacing-from-deep-recursion', () => {
+    // Distinguishes "rejected up front, cleanly" from "the bug still
+    // happened, we just got lucky and it surfaced as *some* exception" —
+    // asserting the exact constructor, not merely `.toThrow()`.
+    const schema = compileOk(SIMPLE_SOURCE);
+    let caught: unknown;
+    try {
+      referenceCheck(schema, [], ref('user', 'alice'), ref('document', 'readme'), 'viewer', {
+        maxDepth: NaN,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(RangeError);
+  });
+
+  it('a-large-but-finite-non-negative-maxDepth-is-not-rejected-the-guard-is-narrow', () => {
+    // Control: the new guard must reject only the genuinely malformed
+    // shapes above, never an ordinary large, valid ceiling — matches this
+    // file's own established discipline (see the two tests immediately
+    // preceding this describe block) of pairing a rejection test with a
+    // control proving the check isn't simply overbroad.
+    const schema = compileOk(SIMPLE_SOURCE);
+    const result = referenceCheck(
+      schema,
+      [tuple('document', 'readme', 'viewer', 'user', 'alice')],
+      ref('user', 'alice'),
+      ref('document', 'readme'),
+      'viewer',
+      { maxDepth: 1_000_000 },
+    );
+    expect(result.allowed).toBe(true);
+  });
+
+  it('maxDepth-zero-is-a-valid-non-negative-finite-value-and-is-not-rejected', () => {
+    // Control against the `??` vs `||` hazard this file's own fallback
+    // tests above already guard elsewhere: `0` is falsy but perfectly
+    // valid here too — it must reach the real depth-ceiling logic, not
+    // this guard's rejection path.
+    const schema = compileOk(SIMPLE_SOURCE);
+    const result = referenceCheck(
+      schema,
+      [tuple('document', 'readme', 'viewer', 'user', 'alice')],
+      ref('user', 'alice'),
+      ref('document', 'readme'),
+      'viewer',
+      { maxDepth: 0 },
+    );
+    expect(result.allowed).toBe(true);
+  });
+});

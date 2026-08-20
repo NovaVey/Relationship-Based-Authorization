@@ -631,6 +631,29 @@ export function referenceCheck(
   options: ReferenceCheckOptions = {},
 ): ReferenceCheckResult {
   const maxDepth = options.maxDepth ?? DEFAULT_REFERENCE_MAX_DEPTH;
+  // Full-repo audit finding #6 (MEDIUM, `docs/DECISIONS.md` D-092), the
+  // same bug class D-074 already found and fixed once for
+  // `assertTokenObserved`: `depth > maxDepth` (below, in `resolveMembership`)
+  // is `x > NaN`, which is always `false` in JavaScript — an
+  // `options.maxDepth: NaN` would silently disable the depth ceiling
+  // entirely, leaving branch-local cycle detection (which, by design per
+  // D-021, does not fire on a genuinely acyclic-but-deep chain) as the only
+  // termination guard, contradicting this file's own documented contract
+  // just above ("Never throws ... never an exception, never a hang").
+  // Rejected here, synchronously, before any recursion starts — matching
+  // `assertTokenObserved`'s own established convention for this exact
+  // class of defensive boundary check (a plain `Error`, not `TypeError`:
+  // this project has no other use of the built-in error subclasses
+  // anywhere in `src/`, so a bare `Error` — like every other thrown error
+  // in this file and its production-resolver counterpart — is the better
+  // match for "this project's own established error-throwing convention,"
+  // not the literal class name a full-repo audit finding happened to
+  // suggest).
+  if (!Number.isFinite(maxDepth) || maxDepth < 0) {
+    throw new Error(
+      `referenceCheck: maxDepth must be a non-negative finite number, got ${String(options.maxDepth)}`,
+    );
+  }
   const ctx: WalkContext = { schema, tuples, subject, maxDepth };
   const outcome = resolveMembership(ctx, object.ns, object.id, relationOrPermission, new Set(), 0);
   return outcome.allowed ? { allowed: true, path: outcome.proof } : { allowed: false };
