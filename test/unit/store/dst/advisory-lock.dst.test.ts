@@ -123,7 +123,7 @@ async function beginAndHoldWriteLogLock(
 
 // DST D5 (docs/DECISIONS.md D-102) — 8 by default, on every PR; the
 // identical logic below sweeps far more when DST_SEED_COUNT is set
-// (the nightly job's own job), no separate code path needed.
+// (the nightly job's own concern), no separate code path needed.
 const SEEDS = dstSeedList('lock_race', 8);
 
 describe('the global write-log lock genuinely serializes writeTuple/deleteTuple across connections — the D-083 regression, generalized across seeds (D-098)', () => {

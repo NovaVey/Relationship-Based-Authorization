@@ -13,13 +13,34 @@
  * "which comment to update," never two that could drift between the two
  * report kinds — only the report body itself and its own marker differ.
  *
- * Deliberately no new `src/report/` rendering module for this: unlike the
- * soundness report (a measured false-grant/false-deny rate, with its own
+ * The shared low-level plumbing genuinely is identical to
+ * `post-soundness-comment.mjs`'s own — `requireEnv`, the PR-number
+ * validation out of `GITHUB_EVENT_PATH`, `checkedFetch`, the paginated
+ * `listExistingComments`, the `decidePrCommentAction` reuse itself, and the
+ * `GITHUB_COMMENT_BODY_BYTE_LIMIT` oversized-body safety net — but this
+ * script is not a pure copy with only the body/marker swapped out (an
+ * earlier draft of this comment overclaimed exactly that; an adversarial
+ * review caught it, `docs/DECISIONS.md` D-102). Concretely, three things
+ * differ beyond content: (1) `DST_REPORT_MARKER` is a bare local literal —
+ * unlike `SOUNDNESS_REPORT_MARKER`, it has no shared module to import from,
+ * since there's no DST rendering module for it to live in (see the next
+ * paragraph for why); (2) this script contains real report-rendering logic
+ * of its own (the `if (report.success)`/`else` block below, parsing
+ * `vitest`'s raw JSON and walking `testResults`/`assertionResults`) —
+ * `post-soundness-comment.mjs` has none, since it only ever reads an
+ * already-rendered markdown file verbatim; (3) the oversized-body fallback
+ * here is built fresh from `report.success` directly, not extracted out of
+ * an existing rendered body the way `post-soundness-comment.mjs`'s own
+ * `buildOversizedFallbackBody` does, because there is no existing rendered
+ * body to extract from.
+ *
+ * That asymmetry is deliberate, not an oversight: unlike the soundness
+ * report (a measured false-grant/false-deny rate, with its own
  * markdown/json dual-format renderer and dedicated tests), a DST run's own
  * result is a plain pass/fail count plus, on failure, which assertions
  * failed — simple enough to build directly from `vitest`'s own
- * `--reporter=json` output here, without a parallel rendering module whose
- * only real content is "how many tests passed."
+ * `--reporter=json` output here, without a parallel `src/report/` rendering
+ * module whose only real content would be "how many tests passed."
  */
 import { readFileSync } from 'node:fs';
 import { Buffer } from 'node:buffer';

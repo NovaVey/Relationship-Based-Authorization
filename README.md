@@ -109,7 +109,7 @@ or byte-for-byte replayable from outside its own process the way this
 project's own code is, and claiming otherwise would be the kind of
 overclaim this project's soundness language already refuses to make (see
 **[`docs/DST-PROPOSAL.md`](docs/DST-PROPOSAL.md)**'s full design and
-`docs/DECISIONS.md` D-095 for why). Five phases have landed so far:
+`docs/DECISIONS.md` D-095 for why). Six phases have landed so far:
 
 - **D0** — a crash injected between the tuple-row insert and its
   write-log insert leaves neither behind. Building faithful crash
@@ -157,13 +157,33 @@ overclaim this project's soundness language already refuses to make (see
   intended 50% on a boolean draw) — fixed for this module's own pool,
   flagged as an open, separately-scoped finding for the two other copies
   this project's soundness fuzzer still carries (D-101).
+- **D5** — real CI wiring: a PR job comments pass/fail on every pull
+  request, a nightly job sweeps 2,000 seeds per test file instead of a
+  handful, and both run the _identical_ test logic — one shared
+  `DST_SEED_COUNT`-driven knob (`dstSeedList`), never a separate,
+  harder-to-trust nightly-only code path. Landing it surfaced and closed a
+  real, previously-unnoticed gap: `publishSchema`'s own two real SQL
+  statements were never registered against the fake and no DST test ever
+  called it end to end — fixed, plus a structural recognizer-coverage gate
+  (a manifest + a shape-count tripwire) so a future shape can't go
+  unregistered the same way silently. A regression corpus
+  (`docs/dst-regression-corpus.json`) replays every future seed-found bug
+  on every PR forever; it ships empty today, honestly, since every bug
+  found through D-101 was found by a fail-check or an adversarial review,
+  never by seed exploration turning up a surprise. An adversarial review of
+  this phase's own new work found and fixed a real gap of its own: corpus
+  seeds were never checked against this project's identifier grammar
+  before being used, so a malformed entry would have failed downstream
+  with a confusing, unrelated-looking error instead of a clear one
+  pointing at the actual bad entry (D-102).
 
 `npx vitest run test/unit/store/dst/` runs the DB-free half of it — no
 Postgres, no Docker, identical result every time. D3's own
 differential-equivalence proof against real Postgres lives alongside the
 other `*.integration.test.ts` suites (`npm run test:integration`) since,
 unlike the rest of DST, it genuinely needs a real database to check itself
-against.
+against. `.github/workflows/dst.yml` runs the DB-free suite on every PR and
+nightly at a much larger seed count — see D5/D-102 above.
 
 ## Try it yourself — under 10 minutes, from a clean clone
 

@@ -113,7 +113,7 @@ describe('dstSeedList — the shared PR/nightly seed-count knob (D5, D-102)', ()
     expect(dstSeedList('demo', 4)[24]).toBe('demo_25');
   });
 
-  it.each(['0', '-3', 'not-a-number', ''])(
+  it.each(['0', '-3', 'not-a-number', '', '3.5'])(
     'DST_SEED_COUNT=%j is not a valid positive integer, so defaultCount is used instead',
     (invalidValue) => {
       process.env[ENV_KEY] = invalidValue;
@@ -190,6 +190,26 @@ describe('regressionCorpusSeedsFor — the corpus-reading half of dstSeedList (D
     const corpusPath = path.join(tempDir, 'malformed.json');
     fs.writeFileSync(corpusPath, JSON.stringify({ entries: 'not-an-array' }));
     expect(() => regressionCorpusSeedsFor('lock_race', corpusPath)).toThrow(/malformed/);
+  });
+
+  /**
+   * The exact gap an adversarial review found (`docs/DECISIONS.md` D-102):
+   * a corpus seed containing a hyphen (or any character outside this
+   * project's own identifier grammar) previously flowed through unchecked
+   * and only failed several call frames away, inside whatever real
+   * object_id/subject_id it got embedded into — a generic, root-cause-
+   * obscuring assertion failure, not a clear error naming the actual
+   * malformed entry. This pins down the fix: the check happens here, at
+   * the source, naming the offending seed and scheduleId directly.
+   */
+  it('a-corpus-seed-that-does-not-match-the-real-identifier-grammar-throws-here-naming-the-entry-rather-than-failing-downstream', () => {
+    const corpusPath = writeCorpus([
+      { seed: 'BAD-SEED!', scheduleId: 'lock_race', failureSummary: 'x', dateFound: 'x' },
+    ]);
+
+    expect(() => regressionCorpusSeedsFor('lock_race', corpusPath)).toThrow(
+      /malformed seed for scheduleId "lock_race": "BAD-SEED!"/,
+    );
   });
 
   it('the-real-checked-in-corpus-file-itself-parses-cleanly-and-is-currently-empty', () => {

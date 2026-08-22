@@ -254,7 +254,7 @@ describe('DST D0 — the storage seam is genuinely wireable: real writeTuple/del
    */
   // DST D5 (docs/DECISIONS.md D-102) — 3 by default, on every PR; the
   // identical logic below sweeps far more when DST_SEED_COUNT is set (the
-  // nightly job's own job), no separate code path needed.
+  // nightly job's own concern), no separate code path needed.
   const CRASH_SWEEP_SEEDS = dstSeedList('crash_sweep_seed', 3);
 
   it.each(

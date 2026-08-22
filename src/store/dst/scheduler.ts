@@ -80,6 +80,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { integer, sample } from 'fast-check';
 import { SeededRng, hashSeedToInt31 } from '../../soundness/generators.js';
+import { IDENTIFIER_PATTERN } from '../../schema/dsl/types.js';
 import type { FakeConnectionSource } from './source.js';
 
 /**
@@ -143,6 +144,19 @@ interface RegressionCorpusEntry {
  * instead of the real corpus (which is honestly meant to stay empty) to
  * pin this function's own behavior down permanently, without the ESM
  * module-spying pitfalls a mocked `node:fs` import would hit here.
+ *
+ * Every returned `seed` is checked against `IDENTIFIER_PATTERN`
+ * (`src/schema/dsl/types.ts`, the same grammar `dstSeedList`'s own
+ * generated seeds already satisfy by construction) before it ever reaches
+ * a caller — an adversarial review found this was previously unchecked: a
+ * malformed corpus entry (e.g. a stray hyphen or an uppercase letter, hand-
+ * edited into `docs/dst-regression-corpus.json` without care) would flow
+ * straight through into a real `object_id`/`subject_id` several call
+ * frames away and fail there with a generic, root-cause-obscuring
+ * assertion error, not here where the actual problem is. Live-verified: a
+ * deliberately malformed seed added to the real checked-in corpus now
+ * throws immediately, pointing at the exact entry, instead of surfacing as
+ * an unrelated-looking failure downstream (`docs/DECISIONS.md` D-102).
  */
 export function regressionCorpusSeedsFor(
   scheduleId: string,
@@ -155,9 +169,21 @@ export function regressionCorpusSeedsFor(
       `DST regression corpus (${corpusPath}) is malformed: 'entries' is not an array`,
     );
   }
-  return parsed.entries
+  const seeds = parsed.entries
     .filter((entry) => entry.scheduleId === scheduleId)
     .map((entry) => entry.seed);
+  for (const seed of seeds) {
+    if (!IDENTIFIER_PATTERN.test(seed)) {
+      throw new Error(
+        `DST regression corpus (${corpusPath}) has a malformed seed for scheduleId ` +
+          `"${scheduleId}": "${seed}" does not match ${IDENTIFIER_PATTERN.source} — every DST ` +
+          `seed is embedded directly into a real object_id/subject_id downstream, so a seed ` +
+          `that doesn't already satisfy this project's own identifier grammar would otherwise ` +
+          `fail there instead, far from this entry's own actual root cause.`,
+      );
+    }
+  }
+  return seeds;
 }
 
 /**

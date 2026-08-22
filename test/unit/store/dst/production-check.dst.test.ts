@@ -220,7 +220,7 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
 
   // DST D5 (docs/DECISIONS.md D-102) — 6 by default, on every PR; the
   // identical logic below sweeps far more when DST_SEED_COUNT is set (the
-  // nightly job's own job), no separate code path needed.
+  // nightly job's own concern), no separate code path needed.
   const SEEDS = dstSeedList('phantom_witness', 6);
 
   it.each(SEEDS)(
