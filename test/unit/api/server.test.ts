@@ -934,3 +934,67 @@ describe('D-104: trustExactlyOneRealProxyHop reimplements trustProxy: 1 as a Tru
     expect(trustExactlyOneRealProxyHop('', 0)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 12. D-105 — full-repo-audit finding #1, HIGH: authFloodGuard's own
+//     `authFloodState` was a plain `Map<request.ip, ...>` with no size cap
+//     or eviction. `trustExactlyOneRealProxyHop` stops header-based
+//     spoofing, but an unauthenticated caller who controls a routable IPv6
+//     /64 can trivially present an effectively unlimited number of
+//     distinct *real* source addresses -- growing that Map forever, one
+//     permanent entry per address ever seen, for the life of the process.
+//     `authFloodState` is now a `toad-cache` `LruMap` with a real entry
+//     cap; `BuildServerOptions.authFloodStateMaxEntries` (test-only,
+//     mirrors the existing `logger` override) lets this test drive real
+//     LRU eviction with a handful of requests instead of the real
+//     50,000-entry production cap.
+// ---------------------------------------------------------------------------
+
+describe('D-105: authFloodState is a bounded LruMap, not an unbounded plain Map', () => {
+  it('an-ip-evicted-from-the-flood-guards-own-cache-by-newer-distinct-ips-gets-a-fresh-window-its-old-count-does-not-survive', async () => {
+    const boundedPoolQuery = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+    const boundedApp = await buildServer({ query: boundedPoolQuery } as unknown as Pool, {
+      logger: false,
+      authFloodStateMaxEntries: 2,
+    });
+    try {
+      env.ADMIN_API_KEY = CORRECT_KEY;
+      const sendFrom = (remoteAddress: string) =>
+        boundedApp.inject({
+          method: 'POST',
+          url: '/tuples',
+          payload: validTupleBody,
+          headers: authHeaders('wrong-key'),
+          remoteAddress,
+        });
+
+      // 'A' builds up 999 requests in its own window -- one more than 1000
+      // total would trip authFloodGuard's own 429, so this alone proves
+      // nothing yet; it exists to give 'A' a real, non-trivial count to
+      // lose if eviction works. Every one of these calls also touches (and
+      // so LRU-bumps) 'A''s own cache entry.
+      for (let i = 0; i < 999; i += 1) {
+        const res = await sendFrom('198.51.100.1');
+        expect(res.statusCode).toBe(401);
+      }
+
+      // Two more distinct IPs, 'B' then 'C'. With a real cap of 2 entries,
+      // adding 'C' as a third distinct key must evict the least-recently-
+      // used entry -- 'A' (repeatedly bumped by its own 999 requests, but
+      // never touched again after 'B' was inserted) -- not silently grow
+      // to a third entry the way the old unbounded Map did.
+      expect((await sendFrom('198.51.100.2')).statusCode).toBe(401);
+      expect((await sendFrom('198.51.100.3')).statusCode).toBe(401);
+
+      // If 'A' were still evicted-never (the old, unbounded behavior), two
+      // more requests from 'A' would land at count 1001/1002 -- past
+      // authFloodGuard's own max: 1000 -- and the second would 429. If 'A'
+      // was correctly evicted above, this is a brand-new entry starting a
+      // fresh window at count 1/2, and neither request is rate-limited.
+      expect((await sendFrom('198.51.100.1')).statusCode).toBe(401);
+      expect((await sendFrom('198.51.100.1')).statusCode).toBe(401);
+    } finally {
+      await boundedApp.close();
+    }
+  }, 30_000);
+});
