@@ -1,0 +1,15 @@
+-- `soundness_runs.dry_run` — marks a row as having come from
+-- `authz soundness run --dry-run` (D-063) rather than a real, permanent
+-- run. D-063/D-066 both already disclose that dry-run cleanup
+-- (`cleanupDryRunArtifacts`, src/soundness/runner.ts) is best-effort, not
+-- transactional: every deletion category is attempted independently, and a
+-- process crash or connection loss mid-cleanup can, in principle, leave
+-- partial fixture rows behind. If the row that survives such a failure is
+-- the `soundness_runs` row itself, nothing persisted previously let a later
+-- operator tell "orphaned dry-run debris, safe to purge" apart from "a
+-- real, historically significant run that must be kept" — both look like
+-- an ordinary row with no marker distinguishing them. This column closes
+-- that gap: every insert now records which kind of run it was, so orphaned
+-- dry-run rows are identifiable (and safely prunable) after the fact,
+-- without guessing.
+alter table soundness_runs add column dry_run boolean not null default false;
