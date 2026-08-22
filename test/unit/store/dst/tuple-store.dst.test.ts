@@ -35,7 +35,7 @@ import {
   createFakeConnectionSource,
   seedNamespaceConfig,
 } from '../../../../src/store/dst/index.js';
-import { dstRngFromSeed } from '../../../../src/store/dst/scheduler.js';
+import { dstRngFromSeed, dstSeedList } from '../../../../src/store/dst/scheduler.js';
 
 const SCHEMA_SOURCE = ['namespace document {', '  relation viewer: user', '}'].join('\n');
 
@@ -252,7 +252,10 @@ describe('DST D0 — the storage seam is genuinely wireable: real writeTuple/del
    * Without this, the sweep would pass unchanged even if a regression
    * wrongly deferred counter allocation to commit time.
    */
-  const CRASH_SWEEP_SEEDS = ['alpha', 'bravo', 'charlie'];
+  // DST D5 (docs/DECISIONS.md D-102) — 3 by default, on every PR; the
+  // identical logic below sweeps far more when DST_SEED_COUNT is set (the
+  // nightly job's own job), no separate code path needed.
+  const CRASH_SWEEP_SEEDS = dstSeedList('crash_sweep_seed', 3);
 
   it.each(
     [0, 1, 2, 3, 4].flatMap((crashPoint) =>
@@ -261,7 +264,7 @@ describe('DST D0 — the storage seam is genuinely wireable: real writeTuple/del
   )(
     'crashAfterStatements=$crashPoint seed=$seed: atomicity and the exact identity-burn pattern hold at every real pre-COMMIT crash point, across seeds',
     async ({ crashPoint, seed }) => {
-      const rng = dstRngFromSeed(`crash-sweep-${seed}`);
+      const rng = dstRngFromSeed(seed);
       const objectId = `doc_${crashPoint}_${seed}_${rng.nextIntBetween(0, 1_000_000)}`;
       const subjectId = `user_${crashPoint}_${seed}_${rng.nextIntBetween(0, 1_000_000)}`;
 

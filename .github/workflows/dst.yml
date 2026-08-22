@@ -1,0 +1,138 @@
+name: DST
+
+# DST Phase D5 (docs/DST-PROPOSAL.md's own "CI" design section,
+# docs/DECISIONS.md D-102): "the PR job, nightly job, and regression
+# corpus, as real workflow YAML."
+#
+# `dst-pr` runs on every PR, styled directly on soundness.yml — the same
+# concurrency-group-cancels-superseded-runs shape, the same
+# comment-upsert pattern via a dedicated script reusing the real,
+# tested `decidePrCommentAction` (scripts/post-dst-comment.mjs) — but
+# with NO Postgres service container at all, since the whole point of the
+# DST fake is that this runs on pure JS state (docs/DST-PROPOSAL.md's own
+# words). A small, fixed seed batch (DST_SEED_COUNT unset, each seeded
+# sweep's own PR-time default), plus the regression corpus (docs/
+# dst-regression-corpus.json), replayed unconditionally by the same test
+# run — src/store/dst/scheduler.ts's dstSeedList always unions corpus
+# entries in regardless of DST_SEED_COUNT, so no separate "replay the
+# corpus" step exists or is needed here.
+#
+# Note what this workflow does NOT newly cover: the "required, always-on
+# recognizer-coverage gate" docs/DST-PROPOSAL.md's own "Two grafts"
+# section calls for is test/unit/store/dst/recognizer-coverage.dst.test.ts
+# — an ORDINARY test file (deliberately, per that section's own words:
+# "not a DST-scoped check, an ordinary one"), so it already runs inside
+# ci.yml's own required `test` job on every PR, with zero new workflow
+# wiring needed. This workflow exists for the *dedicated* DST-named check
+# and PR comment (parity with Soundness's own visibility) and for the
+# nightly sweep below, not to duplicate what's already required.
+#
+# `dst-nightly` is genuinely new machinery for this repo (no scheduled
+# DST workflow existed before D5) — daily, DST_SEED_COUNT scaled up so
+# the *same* test logic that runs a small batch on every PR sweeps far
+# more seeds overnight, matching the design's own "the same test logic
+# driving both" principle (src/store/dst/scheduler.ts's dstSeedList doc
+# comment). Two things docs/DST-PROPOSAL.md's own "Nightly" design
+# paragraph names that this phase deliberately does NOT build, disclosed
+# rather than silently dropped — see docs/DECISIONS.md D-102's own
+# "Alternative rejected"/"Revisit if" for the reasoning: (1) "the full
+# fault-injection matrix at higher injection probability than a PR budget
+# affords" — this repo's DST suites are hand-authored, seeded sweeps
+# today, not a generalized fault-composition fuzzer with its own
+# injection-probability knob; DST_SEED_COUNT scales the seed dimension
+# these sweeps already have, which is real, but is not that broader
+# matrix. (2) "filing or updating one tracking issue per distinct failure
+# signature" — a failed nightly run surfaces as a red workflow run in the
+# Actions tab (this repo's only other scheduled workflow, codeql.yml,
+# does the same — no auto-issue-filing precedent exists here to extend).
+
+on:
+  pull_request:
+  schedule:
+    # Daily, independent of any push — the seeded sweeps below draw from
+    # the same regression corpus and generator logic every PR already
+    # exercises at small scale; nightly's own job is running that same
+    # logic against far more of the seed space than a PR budget affords.
+    - cron: '0 5 * * *'
+
+concurrency:
+  group: dst-${{ github.event.pull_request.number || 'nightly' }}
+  cancel-in-progress: true
+
+jobs:
+  dst-pr:
+    name: dst-pr
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # Only this job needs pull-requests: write (to post/update its own PR
+    # comment) — dst-nightly has no PR to comment on, so it keeps the
+    # narrower, read-only default instead of inheriting write access it
+    # never uses.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Run DST suite
+        id: dst
+        run: |
+          set +e
+          npx vitest run test/unit/store/dst/ --reporter=json --reporter=default --outputFile=dst-report.json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Post or update the DST PR comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/post-dst-comment.mjs
+
+      # Runs *after* the comment above, deliberately — same reasoning as
+      # soundness.yml's own identical final step: the PR comment must post
+      # regardless of verdict, and only once it has does this step make
+      # the job's own pass/fail state match the suite's real result.
+      - name: Fail the job if the DST suite itself did not pass
+        if: steps.dst.outputs.exit_code != '0'
+        run: |
+          echo "DST suite exited ${{ steps.dst.outputs.exit_code }} — see the PR comment above, or the \"Run DST suite\" step above, for the full failure output."
+          exit ${{ steps.dst.outputs.exit_code }}
+
+  dst-nightly:
+    name: dst-nightly
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # "Thousands of seeds," per docs/DST-PROPOSAL.md's own "Nightly"
+      # design paragraph — cheap against an in-memory driver with no
+      # Postgres in the loop, unlike the soundness fuzzer's own
+      # real-database-bound query budget.
+      DST_SEED_COUNT: '2000'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+
+      # No `set +e` here, unlike dst-pr's own identical step — there is no
+      # PR to comment on for a scheduled run, so nothing downstream needs
+      # this step to still exit 0 on a real failure. A failing seed here
+      # fails this job outright, surfacing as a red run in the Actions
+      # tab, this repo's own only other scheduled-workflow precedent
+      # (codeql.yml) doing the same.
+      - name: Run DST suite (nightly, DST_SEED_COUNT=2000)
+        run: npx vitest run test/unit/store/dst/

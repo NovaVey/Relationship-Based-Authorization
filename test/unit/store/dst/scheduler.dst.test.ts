@@ -1,13 +1,17 @@
 /**
  * DST D4's own machinery, tested directly before any earlier-phase test is
- * ported onto it (`docs/DST-PROPOSAL.md`, `docs/DECISIONS.md` D-101) — the
- * same "build local confidence in new DST machinery before relying on it
- * elsewhere" discipline D3's own DB-free `frontier.dst.test.ts` already
- * established for `fetchReachableFrontierVia`. No Postgres, no
- * Testcontainers: pure JS, `dstRngFromSeed`/`flushMicrotasks` need none,
- * and `raceUnderPause` only needs the in-memory fake connection source.
+ * ported onto it (`docs/DST-PROPOSAL.md`, `docs/DECISIONS.md` D-101), plus
+ * D5's own `dstSeedList` (`docs/DECISIONS.md` D-102) — the same "build
+ * local confidence in new DST machinery before relying on it elsewhere"
+ * discipline D3's own DB-free `frontier.dst.test.ts` already established
+ * for `fetchReachableFrontierVia`. No Postgres, no Testcontainers: pure JS,
+ * `dstRngFromSeed`/`dstSeedList`/`flushMicrotasks` need none, and
+ * `raceUnderPause` only needs the in-memory fake connection source.
  */
-import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { compileSchema } from '../../../../src/schema/dsl/compiler.js';
 import { writeTuple, type TupleKey } from '../../../../src/store/tuples.js';
@@ -18,6 +22,8 @@ import {
 } from '../../../../src/store/dst/index.js';
 import {
   dstRngFromSeed,
+  dstSeedList,
+  regressionCorpusSeedsFor,
   flushMicrotasks,
   raceUnderPause,
 } from '../../../../src/store/dst/scheduler.js';
@@ -81,6 +87,116 @@ describe('dstRngFromSeed — the one canonical seed → deterministic-RNG constr
     // hitting this for real should widen its own `poolSize` argument
     // instead.
     expect(() => rng.nextInt(10)).toThrow(/exhausted its deterministic draw pool/);
+  });
+});
+
+describe('dstSeedList — the shared PR/nightly seed-count knob (D5, D-102)', () => {
+  const ENV_KEY = 'DST_SEED_COUNT';
+  const originalValue = process.env[ENV_KEY];
+
+  afterEach(() => {
+    if (originalValue === undefined) {
+      delete process.env[ENV_KEY];
+    } else {
+      process.env[ENV_KEY] = originalValue;
+    }
+  });
+
+  it('with-no-override-set-returns-exactly-defaultCount-prefixed-seeds-in-order', () => {
+    delete process.env[ENV_KEY];
+    expect(dstSeedList('demo', 4)).toEqual(['demo_1', 'demo_2', 'demo_3', 'demo_4']);
+  });
+
+  it('DST_SEED_COUNT-set-to-a-real-positive-integer-overrides-defaultCount-entirely', () => {
+    process.env[ENV_KEY] = '25';
+    expect(dstSeedList('demo', 4)).toHaveLength(25);
+    expect(dstSeedList('demo', 4)[24]).toBe('demo_25');
+  });
+
+  it.each(['0', '-3', 'not-a-number', ''])(
+    'DST_SEED_COUNT=%j is not a valid positive integer, so defaultCount is used instead',
+    (invalidValue) => {
+      process.env[ENV_KEY] = invalidValue;
+      expect(dstSeedList('demo', 4)).toHaveLength(4);
+    },
+  );
+
+  it('every-produced-seed-is-a-valid-object_id-shaped-identifier-fragment-no-hyphens', () => {
+    // The exact fail-check this file's own doc comment references — see
+    // src/store/tuples.ts's own validateIdentifiers (`^[a-z][a-z0-9_]*$`):
+    // every real DST test embeds its own seed directly into a real
+    // object_id/subject_id, so a `-` here would break every one of them.
+    for (const seed of dstSeedList('crash_sweep_seed', 5)) {
+      expect(seed).toMatch(/^[a-z][a-z0-9_]*$/);
+    }
+  });
+});
+
+/**
+ * `regressionCorpusSeedsFor` — the corpus-reading half of `dstSeedList`
+ * (`docs/dst-regression-corpus.json`, `docs/DECISIONS.md` D-102), tested
+ * directly via `corpusPath`'s own overridable default (real, throwaway
+ * temp files, never the real checked-in corpus — that file is honestly
+ * meant to stay empty, not mutated by every test run). `dstSeedList`'s own
+ * union of this function's output with its generated seeds was
+ * live-verified once already by temporarily editing the real checked-in
+ * corpus file and confirming `advisory-lock.dst.test.ts`'s own real sweep
+ * genuinely grew by one case (`docs/DECISIONS.md` D-102's own writeup).
+ */
+describe('regressionCorpusSeedsFor — the corpus-reading half of dstSeedList (D5, D-102)', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dst-corpus-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function writeCorpus(entries: unknown): string {
+    const corpusPath = path.join(tempDir, 'corpus.json');
+    fs.writeFileSync(corpusPath, JSON.stringify({ entries }));
+    return corpusPath;
+  }
+
+  it('returns-only-the-seeds-whose-own-scheduleId-matches-never-a-different-schedules-entries', () => {
+    const corpusPath = writeCorpus([
+      {
+        seed: 'lock_race_from_corpus',
+        scheduleId: 'lock_race',
+        failureSummary: 'x',
+        dateFound: 'x',
+      },
+      {
+        seed: 'unrelated_seed',
+        scheduleId: 'some_other_sweep',
+        failureSummary: 'x',
+        dateFound: 'x',
+      },
+    ]);
+
+    expect(regressionCorpusSeedsFor('lock_race', corpusPath)).toEqual(['lock_race_from_corpus']);
+    expect(regressionCorpusSeedsFor('some_other_sweep', corpusPath)).toEqual(['unrelated_seed']);
+    expect(regressionCorpusSeedsFor('a_schedule_with_no_entries', corpusPath)).toEqual([]);
+  });
+
+  it('an-empty-entries-array-the-real-checked-in-corpus-own-current-state-returns-an-empty-list', () => {
+    const corpusPath = writeCorpus([]);
+    expect(regressionCorpusSeedsFor('lock_race', corpusPath)).toEqual([]);
+  });
+
+  it('a-corpus-file-with-a-non-array-entries-field-throws-loudly-rather-than-silently-degrading', () => {
+    const corpusPath = path.join(tempDir, 'malformed.json');
+    fs.writeFileSync(corpusPath, JSON.stringify({ entries: 'not-an-array' }));
+    expect(() => regressionCorpusSeedsFor('lock_race', corpusPath)).toThrow(/malformed/);
+  });
+
+  it('the-real-checked-in-corpus-file-itself-parses-cleanly-and-is-currently-empty', () => {
+    // The one test in this file that touches the real file — read-only,
+    // proving today's honest "nothing found yet" state is real, not
+    // asserting anything a future entry would need this test rewritten for.
+    expect(regressionCorpusSeedsFor('lock_race')).toEqual([]);
   });
 });
 

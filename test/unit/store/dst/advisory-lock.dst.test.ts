@@ -32,7 +32,11 @@ import {
   seedNamespaceConfig,
   type FakeConnectionSource,
 } from '../../../../src/store/dst/index.js';
-import { dstRngFromSeed, flushMicrotasks } from '../../../../src/store/dst/scheduler.js';
+import {
+  dstRngFromSeed,
+  dstSeedList,
+  flushMicrotasks,
+} from '../../../../src/store/dst/scheduler.js';
 
 const SCHEMA_SOURCE = ['namespace document {', '  relation viewer: user', '}'].join('\n');
 
@@ -117,13 +121,16 @@ async function beginAndHoldWriteLogLock(
   return token;
 }
 
-const SEEDS = [1, 2, 3, 4, 5, 6, 7, 8];
+// DST D5 (docs/DECISIONS.md D-102) — 8 by default, on every PR; the
+// identical logic below sweeps far more when DST_SEED_COUNT is set
+// (the nightly job's own job), no separate code path needed.
+const SEEDS = dstSeedList('lock_race', 8);
 
 describe('the global write-log lock genuinely serializes writeTuple/deleteTuple across connections — the D-083 regression, generalized across seeds (D-098)', () => {
   it.each(SEEDS)(
-    "seed=%i: every bystander writeTuple/deleteTuple call genuinely blocks behind the held lock, and every bystander token exceeds the holder's",
+    "seed=%s: every bystander writeTuple/deleteTuple call genuinely blocks behind the held lock, and every bystander token exceeds the holder's",
     async (seed) => {
-      const rng = dstRngFromSeed(`lock-race-${seed}`);
+      const rng = dstRngFromSeed(seed);
       const { state, source } = freshSource();
       const bystanderCount = rng.nextIntBetween(2, 4);
 
