@@ -16,7 +16,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Pool } from 'pg';
+import type { ConnectionSource } from './query-executor.js';
 
 export interface MigrationFile {
   /** Filename without the .sql extension — also the schema_migrations primary key. */
@@ -98,6 +98,14 @@ const MIGRATIONS_TABLE_DDL = `
  * `runMigrations` call against this database, regardless of which
  * migrations happen to be pending) — no second dimension to key by.
  *
+ * Exported (not module-private), for the same reason `tuples.ts` exports
+ * `WRITE_LOG_LOCK_CLASSID`/`WRITE_LOG_LOCK_OBJID` (see that export's own
+ * doc comment): DST D1's own session-lock-crash test (`docs/DECISIONS.md`
+ * D-098) acquires this *exact* production lock directly against a fake
+ * connection to prove the real lock key genuinely blocks and genuinely
+ * releases on connection death — not a same-shaped-but-different value
+ * that only coincidentally matches this file today.
+ *
  * **Session-scoped (`pg_advisory_lock`/`pg_advisory_unlock`), NOT
  * transaction-scoped (`pg_advisory_xact_lock`) like D-080's and D-083's own
  * locks — a deliberate, load-bearing difference, not an inconsistency.**
@@ -121,8 +129,8 @@ const MIGRATIONS_TABLE_DDL = `
  * by this function itself, only once the entire sequence — DDL, read,
  * every migration's own apply — has finished.
  */
-const MIGRATIONS_LOCK_CLASSID = 0x6d696772; // ASCII 'migr' — see doc comment above.
-const MIGRATIONS_LOCK_OBJID = 0;
+export const MIGRATIONS_LOCK_CLASSID = 0x6d696772; // ASCII 'migr' — see doc comment above.
+export const MIGRATIONS_LOCK_OBJID = 0;
 
 /**
  * Applies every migration in `dir` not already recorded in
@@ -159,8 +167,16 @@ const MIGRATIONS_LOCK_OBJID = 0;
  * automatically when the session/connection actually ends regardless, so a
  * failed unlock on a connection that's being torn down anyway costs
  * nothing beyond the swallowed error.
+ *
+ * `pool: ConnectionSource`, not the concrete `pg.Pool` — DST D1
+ * (`docs/DECISIONS.md` D-098), the same non-breaking narrowing D0 already
+ * applied to `tuples.ts`/`tokens.ts`/`publish.ts`: a real `Pool` still
+ * satisfies this structurally, so every existing caller (`authz doctor`,
+ * every integration test) keeps working with zero changes. See
+ * `query-executor.ts`'s own doc comment for why the narrower type exists
+ * at all.
  */
-export async function runMigrations(pool: Pool, dir: string): Promise<MigrationResult> {
+export async function runMigrations(pool: ConnectionSource, dir: string): Promise<MigrationResult> {
   const lockClient = await pool.connect();
   let lockHeld = false;
   try {
@@ -190,7 +206,18 @@ export async function runMigrations(pool: Pool, dir: string): Promise<MigrationR
         await client.query('COMMIT');
         applied.push(migration.id);
       } catch (err) {
-        await client.query('ROLLBACK');
+        // The ROLLBACK call's own failure must never replace the real
+        // error below — deferred from D0 to D1 (`docs/DECISIONS.md`
+        // D-097's own "Revisit if"): this is the exact same
+        // rollback-masking gap D0's crash-injection work found and fixed
+        // in `tuples.ts`/`publish.ts`, closed here with the identical
+        // pattern. See `writeTuple`'s own catch block (`src/store/
+        // tuples.ts`) for the full reasoning.
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Swallowed deliberately — see comment above.
+        }
         throw new Error(`migration ${migration.id} failed: ${(err as Error).message}`, {
           cause: err,
         });

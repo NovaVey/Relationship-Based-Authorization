@@ -11,7 +11,7 @@ import type { Pool } from 'pg';
 import { compileSchema } from './dsl/compiler.js';
 import { formatSchemaError } from './dsl/errors.js';
 import type { NamespaceConfig } from './dsl/types.js';
-import type { QueryExecutor } from '../store/query-executor.js';
+import type { ConnectionSource, QueryExecutor } from '../store/query-executor.js';
 
 export interface PublishedNamespace {
   namespace: string;
@@ -34,8 +34,19 @@ export type PublishResult =
  * A compile failure publishes nothing — every namespace in the source is
  * published together or not at all, in one transaction, so a caller never
  * ends up with only some of a multi-namespace file's namespaces live.
+ *
+ * `pool: ConnectionSource`, not the concrete `pg.Pool` — DST D1
+ * (`docs/DECISIONS.md` D-098), extending D0's narrowing
+ * (`getLatestNamespaceConfig`/`publishOne` below) to this function too, the
+ * same non-breaking move: a real `Pool` still satisfies this structurally,
+ * so every existing caller keeps working unchanged. `deletePublishedNamespaceVersion`/
+ * `listLatestNamespaceVersions` below stay `Pool`-typed — outside D1's own
+ * scope, same as D0 left them outside its own.
  */
-export async function publishSchema(pool: Pool, sourceDsl: string): Promise<PublishResult> {
+export async function publishSchema(
+  pool: ConnectionSource,
+  sourceDsl: string,
+): Promise<PublishResult> {
   const compiled = compileSchema(sourceDsl);
   if (!compiled.ok) {
     return { ok: false, errors: compiled.errors.map(formatSchemaError) };

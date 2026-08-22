@@ -17,6 +17,7 @@
  */
 import type { NamespaceConfig } from '../../schema/dsl/types.js';
 import type { TupleKey } from '../tuples.js';
+import { createLocksState, type LocksState } from './locks.js';
 
 export interface RelationTupleRow {
   /** `pg`'s own bigint-as-string convention — see `shapes.ts`'s own row-shape-fidelity note for why this is deliberately `string`, not `number`. */
@@ -69,6 +70,8 @@ export interface FakeStoreState {
   nextToken: number;
   /** The next commit-sequence number `connection.ts`'s `COMMIT` handling will assign — see this file's own top-of-file doc comment. */
   nextCommitSeq: number;
+  /** DST D1 (`docs/DECISIONS.md` D-098) — the shared advisory-lock table every connection on this state contends against. See `locks.ts`'s own top-of-file doc comment. */
+  locks: LocksState;
 }
 
 export function createFakeStoreState(): FakeStoreState {
@@ -79,6 +82,7 @@ export function createFakeStoreState(): FakeStoreState {
     nextRelationTupleId: 1,
     nextToken: 1,
     nextCommitSeq: 1,
+    locks: createLocksState(),
   };
 }
 
