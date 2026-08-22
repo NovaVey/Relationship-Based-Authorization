@@ -313,3 +313,64 @@ describe('renderSoundnessFixtureFailureJsonString', () => {
     expect(JSON.parse(compact)).toEqual({ status: 'fixture_failure', message });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Second full-repo audit finding #20 (LOW, 2026-08-22) — this file's own
+// top-of-file doc comment claims field order deliberately mirrors
+// markdown.ts's own visual asymmetry (build spec §8: "visual and rhetorical
+// weight must match actual risk") — falseGrant* fields constructed before
+// falseDeny* fields, never alphabetically. The object literal does build
+// them in that order today, but nothing anywhere asserted on it — every
+// other test in this file only checks values, never field position — so a
+// future edit (destructuring from a different source, an editor
+// auto-sorting object keys) could silently violate this documented
+// invariant with the full test suite green.
+// ---------------------------------------------------------------------------
+
+describe('renderSoundnessJson — field order carries the documented false-grant-before-false-deny asymmetry', () => {
+  it('falseGrantCount-criticalNamespaceFalseGrants-and-falseGrants-all-appear-strictly-before-falseDenyCount-and-falseDenies-in-key-order', () => {
+    const result = baseResult();
+    const json = renderSoundnessJson(result);
+
+    const keys = Object.keys(json);
+    const falseGrantCountIdx = keys.indexOf('falseGrantCount');
+    const criticalIdx = keys.indexOf('criticalNamespaceFalseGrants');
+    const falseGrantsIdx = keys.indexOf('falseGrants');
+    const falseDenyCountIdx = keys.indexOf('falseDenyCount');
+    const falseDeniesIdx = keys.indexOf('falseDenies');
+
+    // Every key must genuinely be present — a -1 from indexOf would make
+    // every comparison below vacuously pass.
+    for (const idx of [
+      falseGrantCountIdx,
+      criticalIdx,
+      falseGrantsIdx,
+      falseDenyCountIdx,
+      falseDeniesIdx,
+    ]) {
+      expect(idx).toBeGreaterThanOrEqual(0);
+    }
+
+    expect(falseGrantCountIdx).toBeLessThan(falseDenyCountIdx);
+    expect(criticalIdx).toBeLessThan(falseDenyCountIdx);
+    expect(falseGrantsIdx).toBeLessThan(falseDenyCountIdx);
+    expect(falseGrantCountIdx).toBeLessThan(falseDeniesIdx);
+    expect(criticalIdx).toBeLessThan(falseDeniesIdx);
+    expect(falseGrantsIdx).toBeLessThan(falseDeniesIdx);
+  });
+
+  it('the-same-ordering-survives-json-stringify-real-serialized-text-not-just-the-in-memory-object', () => {
+    // Object.keys() order on the in-memory object is necessary but not
+    // sufficient proof of the doc comment's own claim — JSON.stringify's
+    // key order for string keys matches insertion order (the property this
+    // whole invariant actually depends on), confirmed here against the
+    // real serialized string, not just assumed to follow from the object
+    // test above.
+    const result = baseResult();
+    const serialized = renderSoundnessJsonString(result, false);
+    expect(serialized.indexOf('"falseGrantCount"')).toBeLessThan(
+      serialized.indexOf('"falseDenyCount"'),
+    );
+    expect(serialized.indexOf('"falseGrants"')).toBeLessThan(serialized.indexOf('"falseDenies"'));
+  });
+});
