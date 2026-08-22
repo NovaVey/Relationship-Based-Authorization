@@ -109,7 +109,7 @@ or byte-for-byte replayable from outside its own process the way this
 project's own code is, and claiming otherwise would be the kind of
 overclaim this project's soundness language already refuses to make (see
 **[`docs/DST-PROPOSAL.md`](docs/DST-PROPOSAL.md)**'s full design and
-`docs/DECISIONS.md` D-095 for why). Three phases have landed so far:
+`docs/DECISIONS.md` D-095 for why). Four phases have landed so far:
 
 - **D0** — a crash injected between the tuple-row insert and its
   write-log insert leaves neither behind. Building faithful crash
@@ -131,9 +131,25 @@ overclaim this project's soundness language already refuses to make (see
   the fake's own `armNextConnectionPause` gets the identical controlled
   race for free — and proves it stays closed across seeded interleavings
   (D-099).
+- **D3** — a real, multi-level recursive-frontier BFS
+  (`fetchReachableFrontierVia`), replacing D2's own seed-row-only stopgap,
+  replicates real Postgres's `WITH RECURSIVE`/`DISTINCT ON` semantics
+  exactly: iterative working-table rounds, per-iteration (never global)
+  dedup, and a per-row (never global) cycle guard. Proven equivalent to the
+  real recursive CTE by a seeded differential sweep — 300 random cyclic,
+  reconvergent userset graphs run against both a real Postgres
+  testcontainer and the in-memory BFS, comparing the reached-identity set
+  and each identity's own minimum depth (never the raw, per-implementation
+  max depth — a real, adversarial-review-caught distinction; see D-100) —
+  plus a direct replay of D-092's own hardest known case (a 12-level,
+  branching-3 reconvergent-diamond chain) (D-100).
 
-`npx vitest run test/unit/store/dst/` runs all of it — no Postgres, no
-Docker, identical result every time.
+`npx vitest run test/unit/store/dst/` runs the DB-free half of it — no
+Postgres, no Docker, identical result every time. D3's own
+differential-equivalence proof against real Postgres lives alongside the
+other `*.integration.test.ts` suites (`npm run test:integration`) since,
+unlike the rest of DST, it genuinely needs a real database to check itself
+against.
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
