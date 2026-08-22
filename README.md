@@ -272,7 +272,7 @@ src/
   cli/       the authz CLI
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
-docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, github-governance.md, screens/
+docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, DST-PROPOSAL.md, github-governance.md, screens/
 test/
   isolation/ the inherited, repurposed proof suite — see test/isolation/README.md
   unit/      per-module unit + integration tests, one file per real claim
