@@ -265,6 +265,27 @@ async function runOrInfrastructureError<T>(
  * undefined-socket-address path above rests on reading Fastify's own
  * source and the `@fastify/proxy-addr` contract, not an executed
  * reproduction — disclosed here rather than left silently unverified.
+ *
+ * **What this function does not do, stated plainly (D-104 "Update, same
+ * day"):** `fastify@5.12.1`'s real advisory (GHSA-3m5p-2c4r-xxw2 /
+ * CVE-2026-3635, named in `#52`'s own PR body) is that numeric `trustProxy`
+ * never actually inspects the connecting address before trusting it as a
+ * proxy — an attacker with direct network access to the origin, bypassing
+ * the real reverse proxy entirely, can spoof `X-Forwarded-*` and have it
+ * trusted. `Boolean(address)` above only rejects a *literally empty*
+ * address; every real TCP connection has a non-empty `remoteAddress`, so
+ * hop 0 is trusted unconditionally in every realistic scenario — the same
+ * structural blind spot as the numeric `1` fastify disabled, just
+ * expressed as a function. This function's own, real contribution is
+ * narrower than that: the IISNode/undefined-socket-address edge case
+ * described above, nothing more. The actual defense against the
+ * advisory's spoofing scenario, for this deployment, is Railway's network
+ * topology — verified live against the real `authz-api` service (no
+ * public TCP proxy configured, one ordinary HTTP-edge-proxied
+ * `serviceDomain`, no direct-to-container path from the public internet) —
+ * not this function. See D-104's "Update, same day" for the full
+ * reasoning, including the residual (accepted, disclosed) risk from other
+ * services sharing this Railway project's private network.
  */
 export const trustExactlyOneRealProxyHop = (address: string, hop: number): boolean =>
   hop === 0 && Boolean(address);
