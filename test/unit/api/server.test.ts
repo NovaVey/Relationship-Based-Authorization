@@ -548,6 +548,73 @@ describe('schema/compile requires no admin key', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4.5. Second full-repo audit finding #7 (MEDIUM, 2026-08-22) — neither the
+//      server-wide `bodyLimit` (256 KiB, `buildServer`) nor the tighter,
+//      field-specific `schemaSourceBodySchema.source` cap (64 KiB) — nor the
+//      `setErrorHandler` branch that preserves a real 413 instead of
+//      flattening it to 400 — had any test coverage anywhere in this repo,
+//      despite `PROGRESS.md` itself recording that the 413->400 flattening
+//      was "a companion bug ... found and fixed" once already (a documented
+//      history of an easy-to-reintroduce regression at this exact spot).
+// ---------------------------------------------------------------------------
+
+describe('the two request-body-size ceilings (bodyLimit 256 KiB, schemaSourceBodySchema.source 64 KiB) are both real and distinguishable', () => {
+  it('a-body-over-the-256-kib-bodylimit-returns-413-not-400-before-any-route-handler-or-zod-validation-runs', async () => {
+    // 262,145 bytes of `source` alone (before JSON-wrapping overhead) is
+    // already one byte past bodyLimit — comfortably past the field-specific
+    // 64 KiB cap too, so this proves bodyLimit itself is what's firing:
+    // Fastify's own content-type-parsing layer, before schemaSourceBodySchema
+    // ever runs, per this file's own doc comment on the ordering.
+    const oversizedSource = 'a'.repeat(262_145);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/schema/compile',
+      payload: { source: oversizedSource },
+    });
+
+    expect(res.statusCode).toBe(413);
+    const body = await parseBody(res);
+    expect(body.error.code).toBe('invalid_request');
+  });
+
+  it('a-source-field-over-64-kib-but-under-the-whole-body-256-kib-limit-returns-400-with-the-field-specific-message', async () => {
+    // 70,000 bytes: past schemaSourceBodySchema's own 64 KiB (65,536) cap,
+    // comfortably under the whole-body 256 KiB bodyLimit — isolates the
+    // field-specific Zod rejection from the blunter whole-body one.
+    const oversizedSource = 'a'.repeat(70_000);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/schema/compile',
+      payload: { source: oversizedSource },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = await parseBody(res);
+    expect(body.error.code).toBe('invalid_request');
+    expect(body.error.message).toContain('64 KiB');
+  });
+
+  it('a-source-field-at-exactly-64-kib-is-accepted-not-off-by-one-rejected', async () => {
+    // The boundary itself: exactly MAX (65,536 chars) must pass Zod's own
+    // .max(65_536) check — only content past it, in the test above, may be
+    // rejected for size.
+    const exactlyAtLimitSource = 'a'.repeat(65_536);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/schema/compile',
+      payload: { source: exactlyAtLimitSource },
+    });
+
+    // Not the size ceiling under test here — this source is nonsense DSL,
+    // so compileSchema itself rejects it (still 400, but for a schema
+    // reason). What matters is it must NOT be schemaSourceBodySchema's own
+    // '64 KiB' size-limit message.
+    const body = await parseBody(res);
+    expect(body.error.message).not.toContain('64 KiB');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. GET /health — server.ts's own wiring of healthResponse, not
 //    healthResponse's own logic (see this file's own top-of-file scope
 //    note).

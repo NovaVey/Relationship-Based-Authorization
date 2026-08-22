@@ -32,19 +32,29 @@
  * confirmed with its own fresh SQL query against the real database, never
  * by calling back into `resolver.ts`'s own query functions.
  *
- * It deliberately covers only the rewrite-rule kinds this file's own
- * fixtures exercise — `directGrant`, `usersetMembership`, `union`,
- * `intersection`, `tupleToUserset` — not `exclusion`/`DisproofStep`.
- * Exclusion's proof-plus-disproof shape is already the subject of
- * extensive, dedicated coverage in the sibling file (including a nested
- * userset disproof and a disproof through a real cycle); re-deriving a
- * second independent verifier for it here would test the same claim twice
- * without adding new evidence about the one property this file actually
- * exists to check — jsonb round-trip fidelity. The two fixtures below
- * (union+directGrant, intersection+tupleToUserset) already exercise a real
- * number (`branchIndex`), a real array (`branches`, length 2), and three
- * levels of nested discriminated-union objects, which is the full shape
- * inventory `ResolutionStep` has outside of `exclusion`/`DisproofStep`.
+ * It covers the rewrite-rule kinds this file's own fixtures exercise —
+ * `directGrant`, `usersetMembership`, `union`, `intersection`,
+ * `tupleToUserset`, and (second full-repo audit, finding #5, MEDIUM,
+ * 2026-08-22) `exclusion`/a single-node `relationDisproof`. Until that
+ * finding, this file reasoned that exclusion's proof-plus-disproof shape
+ * was "already the subject of extensive, dedicated coverage in the sibling
+ * file" and skipped it — true for path-*construction* correctness, but that
+ * conflated two different claims: the sibling file never calls
+ * `performCheck` or touches the `checks` table, so it never exercised the
+ * one hop this file exists to check — jsonb round-trip fidelity — for
+ * exclusion's own shape, the most deeply nested one `ResolutionStep` has.
+ * `verifyRule`'s own `'exclusion'` case below is deliberately narrower than
+ * the sibling file's `verifyDisproofStep`/`verifyRelationDisproof` pair: it
+ * only handles a `subtractDisproof` of kind `relationDisproof` (the shape
+ * this file's own fixture produces — its `subtract` branch is a bare
+ * `computedUserset` naming a plain relation, never a combinator), not every
+ * `DisproofStep` variant — re-deriving that file's full disproof-
+ * correctness coverage a second time would test the same claim twice
+ * without adding new evidence. The three fixtures below (union+directGrant,
+ * intersection+tupleToUserset, exclusion+relationDisproof) together
+ * exercise a real number (`branchIndex`), a real array (`branches`, length
+ * 2), and the full shape inventory `ResolutionStep` has, including its
+ * deepest nesting.
  *
  * Real, ephemeral Postgres via `PostgreSqlContainer` — see
  * `docs/DECISIONS.md` D-019/D-030 (every `*.integration.test.ts` file
@@ -59,7 +69,11 @@ import { writeTuple, type TupleKey } from '../../../src/store/tuples.js';
 import { publishSchema, getLatestNamespaceConfig } from '../../../src/schema/publish.js';
 import type { RewriteRule } from '../../../src/schema/dsl/types.js';
 import { performCheck } from '../../../src/audit/checks.js';
-import type { EntityRef, ResolutionStep } from '../../../src/resolve/production/resolver.js';
+import type {
+  EntityRef,
+  ResolutionStep,
+  DisproofStep,
+} from '../../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
@@ -210,6 +224,22 @@ async function tupleExists(
   return rows.length > 0;
 }
 
+interface RealTupleRow {
+  subject_ns: string;
+  subject_id: string;
+  subject_relation: string | null;
+}
+
+/** Every real tuple currently stored on `(object, relation)` — used only by `verifyRelationDisproof`'s own completeness check below (finding #5's own fixture never needs more than one node, so this is deliberately not reused by `verifyStep`/`verifyRule` above). */
+async function realTuplesOn(object: EntityRef, relation: string): Promise<RealTupleRow[]> {
+  const { rows } = await pool.query<RealTupleRow>(
+    `select subject_ns, subject_id, subject_relation from relation_tuples
+     where object_ns = $1 and object_id = $2 and relation = $3`,
+    [object.ns, object.id, relation],
+  );
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
 // The independent round-trip verifier — see this file's own top-of-file
 // doc comment for exactly what it does and does not cover.
@@ -293,11 +323,93 @@ async function verifyRule(
       if (!exists) return false;
       return verifyStep(subject, step.through, rule.computedUserset, step.member);
     }
-    // exclusion intentionally not handled — see this file's own top-of-file
-    // doc comment for why that's a deliberate scope boundary, not a gap.
+    case 'exclusion': {
+      // Full-repo audit finding #5 (MEDIUM, second audit, 2026-08-22): the
+      // "exclusion intentionally not handled" scoping this branch used to
+      // carry conflated two different claims — exclusion's resolution-path
+      // *construction* correctness genuinely is covered exhaustively
+      // elsewhere (test/unit/resolve/production/production-resolution-path
+      // .integration.test.ts), but that file never calls performCheck or
+      // touches the checks table, so it never exercises the specific hop
+      // this file exists to check: does an exclusion's own JSON.stringify
+      // -> jsonb -> fresh-select round trip preserve it correctly? It had
+      // never actually been confirmed.
+      if (step.kind !== 'exclusion' || !entityEq(step.object, object)) return false;
+      if (!(await verifyRule(subject, object, rule.base, step.base))) return false;
+      // subtractDisproof is only verified for the relationDisproof shape —
+      // the one this file's own new fixture below actually produces (its
+      // subtract branch is a bare computedUserset naming a plain relation,
+      // never a union/intersection/tupleToUserset combinator, so no other
+      // DisproofStep variant is exercised here). Deliberately narrower than
+      // the sibling file's own verifyRelationDisproof/verifyDisproofStep
+      // pair, which handles every DisproofStep kind — this file's own job
+      // is round-trip fidelity for the shapes its fixtures actually
+      // produce, not re-deriving that file's full disproof-correctness
+      // coverage a second time (see this file's own top-of-file doc
+      // comment).
+      if (rule.subtract.kind !== 'computedUserset') return false;
+      if (step.subtractDisproof.kind !== 'relationDisproof') return false;
+      return verifyRelationDisproof(subject, object, rule.subtract.name, step.subtractDisproof);
+    }
     default:
       return false;
   }
+}
+
+/**
+ * Verifies a `RelationDisproof` reachability certificate — written
+ * independently from `production-resolution-path.integration.test.ts`'s own
+ * `verifyRelationDisproof` (same semantic property, fresh code, per this
+ * file's own top-of-file "written fresh... not a copy-paste" discipline).
+ * Confirmed entirely against fresh Postgres queries, never resolver.ts's
+ * own: every node's `tuples` list is an exact match (both directions) for
+ * the real rows Postgres has on that node right now, and no node's tuples
+ * include a plain match for `subject` — the one property that actually
+ * matters for the exclusion this disproof backs to still be a real ALLOW.
+ * Doesn't re-verify the frontier-continuation/depth/cycle edge rules the
+ * sibling file's own verifier does — this file's fixture is a single-node
+ * certificate (subject has no tuple on the excluded relation at all, no
+ * further edges to walk), so there is nothing beyond node 0 to check here.
+ */
+async function verifyRelationDisproof(
+  subject: EntityRef,
+  object: EntityRef,
+  relation: string,
+  disproof: Extract<DisproofStep, { kind: 'relationDisproof' }>,
+): Promise<boolean> {
+  if (disproof.object.ns !== object.ns || disproof.object.id !== object.id) return false;
+  if (disproof.relation !== relation) return false;
+  if (disproof.nodes.length === 0) return false;
+
+  for (const node of disproof.nodes) {
+    const real = await realTuplesOn({ ns: node.key.ns, id: node.key.id }, node.key.relation);
+    if (real.length !== node.tuples.length) return false; // no omission, no fabrication
+
+    for (const t of real) {
+      if (t.subject_relation === null) {
+        const covered = node.tuples.some(
+          (claim) =>
+            claim.kind === 'plain' &&
+            claim.subject.ns === t.subject_ns &&
+            claim.subject.id === t.subject_id,
+        );
+        if (!covered) return false;
+        // The whole reason the disproof holds: no real tuple here plainly
+        // matches the subject the exclusion is supposedly disproven for.
+        if (t.subject_ns === subject.ns && t.subject_id === subject.id) return false;
+        continue;
+      }
+      const covered = node.tuples.some(
+        (claim) =>
+          claim.kind === 'userset' &&
+          claim.userset.ns === t.subject_ns &&
+          claim.userset.id === t.subject_id &&
+          claim.usersetRelation === t.subject_relation,
+      );
+      if (!covered) return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +579,49 @@ describe("an allowed check's persisted, round-tripped resolution path independen
       expect(kinds).toEqual(['directGrant', 'tupleToUserset']);
     }
     expect(await verifyStep(subject, object, 'trusted_edit', path)).toBe(true);
+  });
+
+  // Full-repo audit finding #5 (MEDIUM, second audit, 2026-08-22) — see
+  // verifyRule's own 'exclusion' case and verifyRelationDisproof above for
+  // why this fixture, specifically, was missing: no performCheck() call
+  // anywhere in this repo had an exclusion as its winning branch, so the
+  // most deeply-nested shape in ResolutionStep (a RelationDisproof
+  // certificate, nested inside an ExclusionStep) had never actually been
+  // confirmed to survive the JSON.stringify -> jsonb -> fresh-select round
+  // trip this whole file exists to check.
+  it('the-persisted-path-for-an-exclusion-check-round-trips-through-jsonb-and-reverifies', async () => {
+    const ns = uniqueName('doc');
+    await publishOk(
+      [
+        `namespace ${ns} {`,
+        '  relation viewer: user',
+        '  relation banned: user',
+        '',
+        '  permission view = viewer - banned',
+        '}',
+      ].join('\n'),
+    );
+    const objectId = uniqueName('obj');
+    // grace is a viewer and, load-bearingly, NOT in banned — the exclusion
+    // must resolve allowed:true, with a real (not vacuous) disproof.
+    await writeOk(tuple(ns, objectId, 'viewer', 'user', 'grace'));
+
+    const subject = ref('user', 'grace');
+    const object = ref(ns, objectId);
+    const result = await performCheck(pool, subject, object, 'view');
+    expect(result.allowed).toBe(true);
+
+    const row = await fetchLatestCheckRow(subject, 'view', object);
+    expect(row.resolution_path).not.toBeNull();
+    // Never the in-process value — this is what the driver parsed back
+    // from the jsonb column on a fresh select.
+    const path = row.resolution_path as ResolutionStep;
+    expect(path.kind).toBe('exclusion');
+    if (path.kind === 'exclusion') {
+      expect(path.base.kind).toBe('directGrant');
+      expect(path.subtractDisproof.kind).toBe('relationDisproof');
+    }
+    expect(await verifyStep(subject, object, 'view', path)).toBe(true);
   });
 });
 
