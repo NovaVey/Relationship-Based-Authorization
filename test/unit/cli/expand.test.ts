@@ -68,4 +68,36 @@ describe('authz expand — exit codes', () => {
     expect(process.exitCode).not.toBe(0);
     expect(process.exitCode).toBeDefined();
   }, 30_000);
+
+  // Second full-repo audit, finding #4 (MEDIUM, 2026-08-22) — before this
+  // fix, `relation` reached `expand()` with no validation at all, and the
+  // object reference was only checked for colon *position* — see
+  // `src/cli/entity-ref.ts`'s own doc comment for the shared identifier
+  // grammar this now enforces, matching `authz check`'s identical fix.
+  it('a-relation-argument-containing-a-hash-exits-2-before-expand-ever-touches-postgres', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    await expandCli('document:readme', 'hack#view');
+
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('an-object-reference-whose-id-half-contains-a-hash-is-rejected-as-malformed-not-silently-accepted', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    await expandCli('document:evil#hack', 'view');
+
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-relation-argument-that-is-empty-exits-2-not-treated-as-a-well-formed-empty-identifier', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    await expandCli('document:readme', '');
+
+    expect(process.exitCode).toBe(2);
+  });
 });
