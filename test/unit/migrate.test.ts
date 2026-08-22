@@ -1,9 +1,10 @@
 /**
  * Unit tests for the pure, DB-free half of the migration runner —
  * `runMigrations` itself needs a real Postgres connection and is covered
- * separately (Phase 0's CHECKPOINT verifies it manually against a real
- * database; a real-Postgres integration test for it can be added once
- * Phase 2 gives it actual migration content to run).
+ * separately: Phase 0's CHECKPOINT verified it manually against a real
+ * database, and `test/unit/store/migrate.integration.test.ts` now covers it
+ * with real-Postgres integration tests (idempotent rerun, concurrent-call
+ * race).
  */
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';

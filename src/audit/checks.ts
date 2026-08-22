@@ -10,8 +10,9 @@
  * This is the *only* place in the codebase a real, application-facing
  * check should go through — the CLI's `authz check` command calls this,
  * never `productionCheck` directly, so nothing that looks like a real
- * caller's check can silently skip the audit log. A future API surface
- * (Phase 8) should route through this same function for the same reason.
+ * caller's check can silently skip the audit log. The API's `POST /check`
+ * route (`src/api/server.ts`, Phase 8) already routes through this same
+ * function for the same reason.
  *
  * **`runSoundnessFuzz` (Phase 5) deliberately does NOT call this.** Its
  * per-query checks (up to `SOUNDNESS_FUZZ_QUERIES` — 5,000 by default) are
