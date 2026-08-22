@@ -124,6 +124,28 @@ export interface SoundnessRunOptions {
    * Omit (or pass `false`) for today's exact behavior: every row this run
    * creates is left in place, permanently, exactly as it always has been —
    * this option changes nothing about the default path.
+   *
+   * **Unsupported: two concurrent calls sharing the exact same `seed` with
+   * `dryRun: true`.** `generateFixture(seed, queryCount)` is a pure
+   * function of its inputs (`generators.ts`) — same seed, same
+   * `queryCount`, same fixture, every time — so two concurrent dry runs
+   * given the same seed don't get two independent sets of fixture rows,
+   * they converge on the exact same `relation_tuples`/`namespace_configs`
+   * rows. `cleanupDryRunArtifacts` (below) deletes those rows *by value*
+   * (`deleteTuple`, `deletePublishedNamespaceVersion`), not scoped to which
+   * specific `runSoundnessFuzz` invocation created them, so whichever call
+   * finishes (and cleans up) first can delete the shared fixture out from
+   * under a sibling call still mid-`checkAllQueries` — the still-running
+   * call then sees its own tuples vanish partway through and can report
+   * spurious `false_deny` divergences that reflect this cleanup race, not a
+   * real resolver defect. A caller that needs multiple concurrent dry-run
+   * fuzz sweeps must give each one a distinct seed (the common case — see
+   * `generateRandomSeed`, the default when `options.seed` is omitted) or
+   * otherwise serialize calls that deliberately share one seed (full-repo
+   * audit finding #9, LOW, 2026-08-22 — documentation only: the
+   * lowest-risk fix for a LOW finding is disclosing the constraint, not
+   * threading per-invocation row provenance through the whole call chain
+   * to make concurrent same-seed dry runs safe).
    */
   dryRun?: boolean;
   /**
@@ -577,8 +599,9 @@ export async function runSoundnessFuzz(
     const { rows } = await pool.query<{ id: string }>(
       `insert into soundness_runs
          (trigger, pr_number, graph_seed, namespace_count, tuple_count, query_count,
-          false_grant_count, false_deny_count, critical_namespace_false_grants, verdict, divergences)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          false_grant_count, false_deny_count, critical_namespace_false_grants, verdict, divergences,
+          dry_run)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        returning id`,
       [
         trigger,
@@ -592,6 +615,12 @@ export async function runSoundnessFuzz(
         criticalNamespaceFalseGrants,
         verdict,
         JSON.stringify(divergences),
+        // D-063/D-066 already disclose that dry-run cleanup is best-effort,
+        // not transactional — a crash or connection loss mid-cleanup can
+        // leave this very row behind. Recording which kind of run created
+        // it (migration 0005) is what lets a later operator ever tell that
+        // apart from a real, permanent run without guessing.
+        dryRun,
       ],
     );
     const id = rows[0]?.id;
