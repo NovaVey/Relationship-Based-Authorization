@@ -43,8 +43,8 @@ could go stale the moment a tuple changes — see `docs/CONSISTENCY.md` for
 exactly what "fresh" guarantees.
 
 This split is enforced, not a convention: the compiler rejects a tuple
-write targeting a `permission` name (`schema/malformed-example.authz` is a
-worked example of a related rejection), and a relation's own allowed
+write targeting a `permission` name (see the `relation_is_a_permission`
+rejection in `src/store/tuples.ts`), and a relation's own allowed
 subject types can never name another namespace's `permission` — only its
 `relation`s. A permission has nothing for a tuple to point _at_.
 
