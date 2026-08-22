@@ -10,12 +10,14 @@
  * namespace_configs IN ACCESS EXCLUSIVE MODE` to manufacture against real
  * Postgres.
  *
- * `mulberry32` below is a small, local, deliberately independent PRNG —
- * same rationale as `advisory-lock.dst.test.ts`'s own identical copy (not
- * `src/soundness/generators.ts`'s `SeededRng`, coupled to a different
- * purpose): kept local here too rather than extracted to a shared helper,
- * since this is still only the second use, not yet a pattern worth the
- * cross-file dependency (rule of three).
+ * Seeded pause-point selection and the pause/resume/observe choreography
+ * itself now go through `src/store/dst/scheduler.ts` (DST D4,
+ * `docs/DECISIONS.md` D-101) — this file used to carry its own local
+ * `mulberry32` PRNG (a byte-identical copy also lived in
+ * `advisory-lock.dst.test.ts`, explicitly documented at the time as "not
+ * yet a pattern worth the cross-file dependency") and its own hand-rolled
+ * `flushMicrotasks` + settled-flag choreography; D4 is the generalization
+ * both were always going to need.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -28,6 +30,7 @@ import {
   seedNamespaceConfig,
   type FakeConnectionSource,
 } from '../../../../src/store/dst/index.js';
+import { dstRngFromSeed, raceUnderPause } from '../../../../src/store/dst/scheduler.js';
 
 const PLAIN_SCHEMA_SOURCE = [
   'namespace document {',
@@ -80,24 +83,6 @@ function freshPlainSource(): {
   const state = createFakeStoreState();
   seedNamespaceConfig(state, compileNamespace(PLAIN_SCHEMA_SOURCE, 'document'));
   return { state, source: createFakeConnectionSource(state) };
-}
-
-/** Deterministic, seed-only PRNG — see this file's own top-of-file doc comment. */
-function mulberry32(seed: number): () => number {
-  let a = seed | 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** See advisory-lock.dst.test.ts's own identical helper — drains the microtask queue so a wrongly-unblocked promise has every chance to have already settled, with no real wall-clock wait needed. */
-async function flushMicrotasks(): Promise<void> {
-  for (let i = 0; i < 20; i += 1) {
-    await Promise.resolve();
-  }
 }
 
 describe('DST D2 — productionCheck against the in-memory fake, no Postgres (baseline wiring)', () => {
@@ -177,43 +162,37 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
       if (!decoyWrite.ok) return;
       const pinnedToken = decoyWrite.token;
 
-      const { resume } = source.armNextConnectionPause(pausePoint);
-      let checkSettled = false;
-      const checkPromise = productionCheck(
+      // raceUnderPause (DST D4, docs/DECISIONS.md D-101) owns the "arm the
+      // pause, start the check, confirm it's genuinely suspended (not
+      // merely fast), run the concurrent grant, resume" choreography this
+      // test used to hand-write — its own structural throw already proves
+      // the check was genuinely paused when the grant committed, stronger
+      // than the soft `expect(checkSettled).toBe(false)` this replaces.
+      const result = await raceUnderPause({
         source,
-        { ns: 'user', id: 'alice' },
-        { ns: 'document', id: 'racy' },
-        'view',
-        { atToken: pinnedToken },
-      ).then(
-        (r) => {
-          checkSettled = true;
-          return r;
+        pauseAfterStatements: pausePoint,
+        heldOp: () =>
+          productionCheck(
+            source,
+            { ns: 'user', id: 'alice' },
+            { ns: 'document', id: 'racy' },
+            'view',
+            { atToken: pinnedToken },
+          ),
+        concurrentOp: async () => {
+          // The grant, committed for real, while the check above is still
+          // suspended mid-transaction — on a completely different
+          // connection.
+          const grantWrite = await writeTuple(source, {
+            objectNs: 'document',
+            objectId: 'racy',
+            relation: 'viewer',
+            subjectNs: 'user',
+            subjectId: 'alice',
+          });
+          expect(grantWrite.ok).toBe(true);
         },
-        (e: unknown) => {
-          checkSettled = true;
-          throw e;
-        },
-      );
-
-      // Confirmed, not assumed: the check is genuinely paused, not merely
-      // fast — see advisory-lock.dst.test.ts's own identical control idiom.
-      await flushMicrotasks();
-      expect(checkSettled).toBe(false);
-
-      // The grant, committed for real, while the check above is still
-      // suspended mid-transaction — on a completely different connection.
-      const grantWrite = await writeTuple(source, {
-        objectNs: 'document',
-        objectId: 'racy',
-        relation: 'viewer',
-        subjectNs: 'user',
-        subjectId: 'alice',
       });
-      expect(grantWrite.ok).toBe(true);
-
-      resume();
-      const result = await checkPromise;
 
       // The actual invariant under test: this check's own frozen snapshot,
       // anchored before the grant committed, never observes it — even
@@ -240,8 +219,8 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
   it.each(SEEDS)(
     'seed=%i: the same non-observation property holds across varied object/subject identifiers and pause points',
     async (seed) => {
-      const rng = mulberry32(seed);
-      const pausePoint = rng() < 0.5 ? 2 : 3;
+      const rng = dstRngFromSeed(`phantom-witness-${seed}`);
+      const pausePoint = rng.pick([2, 3]);
       const objectId = `racy_${seed}`;
       const subjectId = `user_${seed}`;
 
@@ -256,27 +235,29 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
       expect(decoyWrite.ok).toBe(true);
       if (!decoyWrite.ok) return;
 
-      const { resume } = source.armNextConnectionPause(pausePoint);
-      const checkPromise = productionCheck(
+      const result = await raceUnderPause({
         source,
-        { ns: 'user', id: subjectId },
-        { ns: 'document', id: objectId },
-        'view',
-        { atToken: decoyWrite.token },
-      );
-
-      await flushMicrotasks();
-      const grantWrite = await writeTuple(source, {
-        objectNs: 'document',
-        objectId,
-        relation: 'viewer',
-        subjectNs: 'user',
-        subjectId,
+        pauseAfterStatements: pausePoint,
+        heldOp: () =>
+          productionCheck(
+            source,
+            { ns: 'user', id: subjectId },
+            { ns: 'document', id: objectId },
+            'view',
+            { atToken: decoyWrite.token },
+          ),
+        concurrentOp: async () => {
+          const grantWrite = await writeTuple(source, {
+            objectNs: 'document',
+            objectId,
+            relation: 'viewer',
+            subjectNs: 'user',
+            subjectId,
+          });
+          expect(grantWrite.ok).toBe(true);
+        },
       });
-      expect(grantWrite.ok).toBe(true);
-      resume();
 
-      const result = await checkPromise;
       expect(result.allowed).toBe(false);
     },
   );

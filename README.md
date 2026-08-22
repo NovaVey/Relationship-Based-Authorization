@@ -109,7 +109,7 @@ or byte-for-byte replayable from outside its own process the way this
 project's own code is, and claiming otherwise would be the kind of
 overclaim this project's soundness language already refuses to make (see
 **[`docs/DST-PROPOSAL.md`](docs/DST-PROPOSAL.md)**'s full design and
-`docs/DECISIONS.md` D-095 for why). Four phases have landed so far:
+`docs/DECISIONS.md` D-095 for why). Five phases have landed so far:
 
 - **D0** — a crash injected between the tuple-row insert and its
   write-log insert leaves neither behind. Building faithful crash
@@ -143,6 +143,20 @@ overclaim this project's soundness language already refuses to make (see
   max depth — a real, adversarial-review-caught distinction; see D-100) —
   plus a direct replay of D-092's own hardest known case (a 12-level,
   branching-3 reconvergent-diamond chain) (D-100).
+- **D4** — one seeded, reusable scheduler (`dstRngFromSeed`/`raceUnderPause`)
+  replaces D0-D3's own ad hoc per-test PRNGs and hand-rolled pause
+  choreography. An adversarial review found the replacement's own
+  "confirm it's genuinely suspended" check was silently vacuous for
+  `productionCheck` — a fixed microtask-flush budget that settled _before_
+  a real pause could ever be confirmed, so a completely dead pause
+  mechanism still passed all 8 D-092 race tests. Fixed with a real fired
+  signal from the connection layer instead of a guess, live-verified by
+  replaying the exact break: the same no-op pause now fails all 8 tests as
+  it should. Same review also caught a real, measurable RNG bias
+  (`fast-check`'s `sample` without `unbiased: true`, ~58.5% vs. the
+  intended 50% on a boolean draw) — fixed for this module's own pool,
+  flagged as an open, separately-scoped finding for the two other copies
+  this project's soundness fuzzer still carries (D-101).
 
 `npx vitest run test/unit/store/dst/` runs the DB-free half of it — no
 Postgres, no Docker, identical result every time. D3's own

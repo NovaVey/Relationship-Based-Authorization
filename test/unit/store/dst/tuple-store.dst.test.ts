@@ -14,6 +14,11 @@
  * frontier — those are D1/D2/D3's own jobs. This file only has to prove
  * `writeTuple`/`deleteTuple` genuinely work end to end through the fake,
  * and that the one fault class D0 targets is real and catchable.
+ *
+ * D0's own flagship crash test below hand-picks exactly one crash point;
+ * DST D4 (`docs/DECISIONS.md` D-101) adds the seeded sweep across every
+ * real crash point `docs/DST-PROPOSAL.md`'s own "Partial writes" design
+ * section always called for — see that describe block's own doc comment.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -30,6 +35,7 @@ import {
   createFakeConnectionSource,
   seedNamespaceConfig,
 } from '../../../../src/store/dst/index.js';
+import { dstRngFromSeed } from '../../../../src/store/dst/scheduler.js';
 
 const SCHEMA_SOURCE = ['namespace document {', '  relation viewer: user', '}'].join('\n');
 
@@ -215,6 +221,86 @@ describe('DST D0 — the storage seam is genuinely wireable: real writeTuple/del
     });
     expect(result.ok).toBe(true);
   });
+
+  /**
+   * DST D4's own generalization of this file's flagship crash test above
+   * (`docs/DST-PROPOSAL.md`, `docs/DECISIONS.md` D-101) — that test and its
+   * two controls together exercise crash points 3, 0, and 1, each hand-
+   * picked, with no seed variation at all. This sweeps every real
+   * pre-COMMIT crash point `writeTuple`'s own statement sequence has —
+   * `BEGIN`(1) → acquire the write-log lock(2) → insert
+   * `relation_tuples`(3) → insert `write_log`(4) → `COMMIT`(5), so
+   * `crashAfterStatements` 0 through 4 are the exhaustive, meaningful
+   * range — crossed with `CRASH_SWEEP_SEEDS`, directly matching
+   * `docs/DST-PROPOSAL.md`'s own "Partial writes" design section: "Swept
+   * across every possible crash point, across many seeds." (An earlier
+   * draft of this sweep varied only the object/subject identifiers per
+   * crash point from a seed *derived from the crash point itself* — no
+   * real seed dimension at all, since the identifiers can't change which
+   * code path runs; an adversarial review caught this. `CRASH_SWEEP_SEEDS`
+   * below is independent of `crashPoint`, so each of the 5 points is now
+   * genuinely exercised against 3 different identifier fixtures.)
+   *
+   * Also asserts the specific token/id *burn* pattern at each point, not
+   * just "atomicity holds" — `state.ts`'s own documented identity-column-
+   * gap behavior (counters advance at statement-execution time, never
+   * deferred to commit) means a crash at point 3 or later has already
+   * allocated a `relation_tuples` id before dying, and a crash at point 4
+   * has additionally already allocated a `write_log` token — both burned,
+   * gapped, and never reused, exactly like a real crashed Postgres
+   * transaction. Points 0-2 crash before either counter is ever touched.
+   * Without this, the sweep would pass unchanged even if a regression
+   * wrongly deferred counter allocation to commit time.
+   */
+  const CRASH_SWEEP_SEEDS = ['alpha', 'bravo', 'charlie'];
+
+  it.each(
+    [0, 1, 2, 3, 4].flatMap((crashPoint) =>
+      CRASH_SWEEP_SEEDS.map((seed) => ({ crashPoint, seed })),
+    ),
+  )(
+    'crashAfterStatements=$crashPoint seed=$seed: atomicity and the exact identity-burn pattern hold at every real pre-COMMIT crash point, across seeds',
+    async ({ crashPoint, seed }) => {
+      const rng = dstRngFromSeed(`crash-sweep-${seed}`);
+      const objectId = `doc_${crashPoint}_${seed}_${rng.nextIntBetween(0, 1_000_000)}`;
+      const subjectId = `user_${crashPoint}_${seed}_${rng.nextIntBetween(0, 1_000_000)}`;
+
+      const state = createFakeStoreState();
+      seedNamespaceConfig(state, compiledDocumentNamespace());
+      const source = createFakeConnectionSource(state);
+      const tuple = {
+        objectNs: 'document',
+        objectId,
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId,
+      };
+
+      source.armNextConnectionCrash(crashPoint);
+      await expect(writeTuple(source, tuple)).rejects.toThrow();
+
+      // The actual invariant under test, at every crash point: nothing
+      // from the crashed transaction's own uncommitted buffer is visible,
+      // regardless of how many of its statements genuinely ran on the now-
+      // dead connection before the crash discarded them.
+      expect(state.relationTuples).toHaveLength(0);
+      expect(state.writeLog).toHaveLength(0);
+
+      // A real, uncrashed retry on a fresh connection still succeeds
+      // normally at every crash point — the crash never left the fake
+      // itself in a state that blocks further real writes.
+      const retry = await writeTuple(source, tuple);
+      expect(retry.ok).toBe(true);
+      if (!retry.ok) return;
+      expect(state.relationTuples).toHaveLength(1);
+      expect(state.writeLog).toHaveLength(1);
+
+      // The exact burn pattern — see this describe block's own doc
+      // comment above for why each threshold is where it is.
+      expect(retry.token).toBe(crashPoint >= 4 ? 2 : 1);
+      expect(state.relationTuples[0]?.id).toBe(crashPoint >= 3 ? '2' : '1');
+    },
+  );
 
   it('listTuplesByObject-and-listTuplesBySubject-both-see-a-real-write-through-the-fake', async () => {
     const state = createFakeStoreState();

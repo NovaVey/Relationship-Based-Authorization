@@ -113,6 +113,8 @@ export interface FakeConnectionOptions {
   pauseAfterStatements?: number;
   /** D2, test-only: the `Promise` a paused statement `await`s before proceeding — resolved externally by the `resume` callback `armNextConnectionPause` returns. Only meaningful together with `pauseAfterStatements`. */
   pauseGate?: Promise<void>;
+  /** D4 (`docs/DECISIONS.md` D-101), test-only: called synchronously the instant this connection's own pause condition genuinely fires — before `pauseGate` is ever awaited. `src/store/dst/scheduler.ts`'s `raceUnderPause` awaits this instead of guessing "probably paused by now" from a microtask-count heuristic, which a full-repo adversarial review found was silently vacuous for `productionCheck`'s own real statement sequence (it settles in more microtask hops than the old heuristic's fixed budget drained). Only meaningful together with `pauseAfterStatements`. */
+  notifyPauseFired?: () => void;
 }
 
 const enum TxState {
@@ -209,6 +211,7 @@ export class FakeConnectionImpl implements FakeConnection {
       this.options.pauseGate
     ) {
       this.pauseConsumed = true;
+      this.options.notifyPauseFired?.();
       await this.options.pauseGate;
     }
     this.statementsExecuted += 1;

@@ -7,12 +7,12 @@
  * lock engine, the same "simulate at the storage seam" boundary D0 already
  * established (`docs/DECISIONS.md` D-095).
  *
- * `mulberry32` below is a small, local, deliberately independent PRNG —
- * not `src/soundness/generators.ts`'s own `SeededRng`, which is tightly
- * coupled to that module's `fast-check` draw-pool machinery for a
- * completely different purpose (schema/tuple fixture generation). This
- * file only needs "the same seed always picks the same scenario," nothing
- * `SeededRng` offers beyond that.
+ * Seeded draws below go through `src/store/dst/scheduler.ts`'s
+ * `dstRngFromSeed` (DST D4, `docs/DECISIONS.md` D-101) — previously a
+ * small, local `mulberry32` PRNG lived in this file, explicitly documented
+ * as not yet worth sharing ("rule of three"); D4 is that third use
+ * (`production-check.dst.test.ts` carried an identical copy), so both are
+ * now retired in favor of the one shared implementation.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -32,6 +32,7 @@ import {
   seedNamespaceConfig,
   type FakeConnectionSource,
 } from '../../../../src/store/dst/index.js';
+import { dstRngFromSeed, flushMicrotasks } from '../../../../src/store/dst/scheduler.js';
 
 const SCHEMA_SOURCE = ['namespace document {', '  relation viewer: user', '}'].join('\n');
 
@@ -52,24 +53,6 @@ function freshSource(): {
   const state = createFakeStoreState();
   seedNamespaceConfig(state, compiledDocumentNamespace());
   return { state, source: createFakeConnectionSource(state) };
-}
-
-/** Deterministic, seed-only PRNG — see this file's own top-of-file doc comment on why it's local rather than reused from elsewhere. */
-function mulberry32(seed: number): () => number {
-  let a = seed | 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Waits for every already-queued microtask to actually run, without advancing any real clock — gives a wrongly-unblocked promise every chance to have already settled, the in-memory-fake equivalent of the real Postgres regression test's `sleep(500)` (see `test/unit/store/tuple-store.integration.test.ts`). Deterministic: nothing here depends on wall-clock timing, only on the microtask queue actually draining, which it always does. */
-async function flushMicrotasks(): Promise<void> {
-  for (let i = 0; i < 20; i += 1) {
-    await Promise.resolve();
-  }
 }
 
 /**
@@ -140,9 +123,9 @@ describe('the global write-log lock genuinely serializes writeTuple/deleteTuple 
   it.each(SEEDS)(
     "seed=%i: every bystander writeTuple/deleteTuple call genuinely blocks behind the held lock, and every bystander token exceeds the holder's",
     async (seed) => {
-      const rng = mulberry32(seed);
+      const rng = dstRngFromSeed(`lock-race-${seed}`);
       const { state, source } = freshSource();
-      const bystanderCount = 2 + Math.floor(rng() * 3); // 2..4
+      const bystanderCount = rng.nextIntBetween(2, 4);
 
       // Pre-seed one tuple per potential delete-bystander so a delete has
       // something real to act on — committed uncontended, before the race.
@@ -157,7 +140,7 @@ describe('the global write-log lock genuinely serializes writeTuple/deleteTuple 
           subjectId: `user_${seed}_${i}`,
         };
         bystanderTuples.push(tuple);
-        const op = rng() < 0.5 ? 'write' : 'delete';
+        const op = rng.nextBoolean() ? 'write' : 'delete';
         bystanderOps.push(op);
         if (op === 'delete') {
           const seedResult = await writeTuple(source, tuple);
@@ -177,7 +160,7 @@ describe('the global write-log lock genuinely serializes writeTuple/deleteTuple 
         subjectNs: 'user',
         subjectId: `holder_user_${seed}`,
       };
-      const holderOp: 'write' | 'delete' = rng() < 0.5 ? 'write' : 'delete';
+      const holderOp: 'write' | 'delete' = rng.nextBoolean() ? 'write' : 'delete';
       if (holderOp === 'delete') {
         const seedResult = await writeTuple(source, holderTuple);
         expect(seedResult.ok).toBe(true);

@@ -198,18 +198,20 @@ const DRAW_POOL_PER_QUERY = 12;
 /**
  * Exported (this file's own doc comment above already explains why
  * `fast-check`/`pure-rand` is this whole module's chosen entropy source,
- * not a new hand-rolled PRNG) for exactly one outside consumer: DST D3's
- * own random userset-subject-edge graph generator
- * (`test/unit/resolve/production/frontier-equivalence.integration.test.ts`,
- * `docs/DECISIONS.md` D-100), which `docs/DST-PROPOSAL.md`'s own phased
- * plan requires to reuse "this project's already-seeded fast-check/
+ * not a new hand-rolled PRNG) for outside reuse, per `docs/DST-PROPOSAL.md`'s
+ * own phased plan requiring "this project's already-seeded fast-check/
  * pure-rand machinery, not a new PRNG" -- this class *is* that machinery.
- * A caller builds its own draw pool sized for its own needs (this file's
- * own `buildRng` below sizes for *this* generator's needs specifically,
- * via `DRAW_POOL_BASE_SIZE`/`DRAW_POOL_PER_QUERY` -- not a one-size-fits-all
- * a different caller should reuse as-is) via `sample(integer(...), { seed:
- * hashSeedToInt31(seed), numRuns: <caller-sized> })` -- `hashSeedToInt31`
- * exported alongside this class for exactly that.
+ * Two outside consumers so far: DST D3's own random userset-subject-edge
+ * graph generator (`test/unit/resolve/production/frontier-equivalence
+ * .integration.test.ts`, `docs/DECISIONS.md` D-100), and DST D4's own
+ * shared `dstRngFromSeed` (`src/store/dst/scheduler.ts`, `docs/DECISIONS.md`
+ * D-101). Each builds its own draw pool sized for its own needs (this
+ * file's own `buildRng` below sizes for *this* generator's needs
+ * specifically, via `DRAW_POOL_BASE_SIZE`/`DRAW_POOL_PER_QUERY` -- not a
+ * one-size-fits-all a different caller should reuse as-is) via
+ * `sample(integer(...), { seed: hashSeedToInt31(seed), numRuns:
+ * <caller-sized> })` -- `hashSeedToInt31` exported alongside this class for
+ * exactly that.
  */
 export class SeededRng {
   private readonly pool: readonly number[];
