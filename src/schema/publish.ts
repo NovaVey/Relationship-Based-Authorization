@@ -11,6 +11,7 @@ import type { Pool } from 'pg';
 import { compileSchema } from './dsl/compiler.js';
 import { formatSchemaError } from './dsl/errors.js';
 import type { NamespaceConfig } from './dsl/types.js';
+import type { QueryExecutor } from '../store/query-executor.js';
 
 export interface PublishedNamespace {
   namespace: string;
@@ -51,7 +52,25 @@ export async function publishSchema(pool: Pool, sourceDsl: string): Promise<Publ
     await client.query('COMMIT');
     return { ok: true, published };
   } catch (err) {
-    await client.query('ROLLBACK');
+    // The ROLLBACK call's own failure must never replace `err` — if the
+    // connection that raised `err` is itself already dead (found via DST
+    // D0's crash-injection work, `docs/DECISIONS.md`: a genuinely crashed
+    // connection can't run a ROLLBACK any more than it could run anything
+    // else), a naive `await client.query('ROLLBACK')` here would throw a
+    // second, different error that silently replaces the real one this
+    // catch block is already propagating — the caller would see "connection
+    // terminated" instead of whatever schema-publish failure actually
+    // happened. Same "cleanup's own outcome must never overwrite the thing
+    // that actually matters" reasoning `src/store/migrate.ts`'s own
+    // `runMigrations` already applies to its advisory-unlock cleanup.
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Swallowed deliberately — see comment above. Postgres releases the
+      // connection (and anything it held) on its own once it's actually
+      // gone; there is nothing left to clean up here that matters more than
+      // `err` reaching the caller unchanged.
+    }
     throw err;
   } finally {
     client.release();
@@ -120,7 +139,7 @@ export async function publishSchema(pool: Pool, sourceDsl: string): Promise<Publ
  * `PublishResult.published`, a behavior change out of scope for this fix.
  */
 async function publishOne(
-  client: { query: Pool['query'] },
+  client: QueryExecutor,
   config: NamespaceConfig,
   sourceDsl: string,
 ): Promise<number> {
@@ -145,7 +164,7 @@ async function publishOne(
  * `src/store/tuples.ts`'s write-time validation depends on.
  */
 export async function getLatestNamespaceConfig(
-  pool: Pool,
+  pool: QueryExecutor,
   namespace: string,
 ): Promise<NamespaceConfig | undefined> {
   const { rows } = await pool.query<{ config: NamespaceConfig }>(
