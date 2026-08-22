@@ -9,5 +9,11 @@ export { createFakeStoreState, seedNamespaceConfig } from './state.js';
 export type { FakeStoreState, RelationTupleRow, WriteLogRow, NamespaceConfigRow } from './state.js';
 export { createFakeConnectionSource } from './source.js';
 export type { FakeConnectionSource } from './source.js';
-export { dstRngFromSeed, flushMicrotasks, raceUnderPause } from './scheduler.js';
+export {
+  dstRngFromSeed,
+  dstSeedList,
+  regressionCorpusSeedsFor,
+  flushMicrotasks,
+  raceUnderPause,
+} from './scheduler.js';
 export type { RaceUnderPauseOptions } from './scheduler.js';

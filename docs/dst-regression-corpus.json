@@ -1,0 +1,10 @@
+{
+  "description": "DST's own regression corpus (docs/DST-PROPOSAL.md's 'Regression corpus' design section, docs/DECISIONS.md D-102). One entry per real bug a specific seed ever exposed in a DST-seeded sweep -- recorded here forever so a fixed bug can never silently regress. Every PR replays every entry here unconditionally (src/store/dst/scheduler.ts's dstSeedList reads this file and always includes every entry matching its own scheduleId, regardless of DST_SEED_COUNT) -- cheap against an in-memory driver, per the design's own reasoning. Empty is a legitimate, honest state, not a placeholder: every DST bug found so far (D-097 through D-101) was found either incidentally while building or exercising a new DST mechanism and then pinned down with a revert-and-restore check confirming the fix (D-097), by a hand-authored deliberate fail-check, or by an adversarial review pass -- never by random seed exploration turning up an unexpected failure -- so there is nothing to record yet. Entries get appended here the moment that changes, by the same commit that fixes whatever the seed found.",
+  "schema": {
+    "seed": "The exact seed string (as produced by dstSeedList, e.g. 'lock_race_47') that exposed the failure. Must match this project's own identifier grammar (^[a-z][a-z0-9_]*$, src/schema/dsl/types.ts's IDENTIFIER_PATTERN) -- every seed is embedded directly into a real object_id/subject_id downstream, and regressionCorpusSeedsFor (src/store/dst/scheduler.ts) enforces this at load time.",
+    "scheduleId": "Which DST seeded sweep this seed belongs to -- the same prefix string passed to dstSeedList (e.g. 'lock_race', 'phantom_witness', 'crash_sweep_seed') -- so a future replay knows which test file/scenario to run it against.",
+    "failureSummary": "One sentence: what broke, in plain language.",
+    "dateFound": "YYYY-MM-DD."
+  },
+  "entries": []
+}

@@ -30,7 +30,11 @@ import {
   seedNamespaceConfig,
   type FakeConnectionSource,
 } from '../../../../src/store/dst/index.js';
-import { dstRngFromSeed, raceUnderPause } from '../../../../src/store/dst/scheduler.js';
+import {
+  dstRngFromSeed,
+  dstSeedList,
+  raceUnderPause,
+} from '../../../../src/store/dst/scheduler.js';
 
 const PLAIN_SCHEMA_SOURCE = [
   'namespace document {',
@@ -214,12 +218,15 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
     },
   );
 
-  const SEEDS = [1, 2, 3, 4, 5, 6];
+  // DST D5 (docs/DECISIONS.md D-102) — 6 by default, on every PR; the
+  // identical logic below sweeps far more when DST_SEED_COUNT is set (the
+  // nightly job's own concern), no separate code path needed.
+  const SEEDS = dstSeedList('phantom_witness', 6);
 
   it.each(SEEDS)(
-    'seed=%i: the same non-observation property holds across varied object/subject identifiers and pause points',
+    'seed=%s: the same non-observation property holds across varied object/subject identifiers and pause points',
     async (seed) => {
-      const rng = dstRngFromSeed(`phantom-witness-${seed}`);
+      const rng = dstRngFromSeed(seed);
       const pausePoint = rng.pick([2, 3]);
       const objectId = `racy_${seed}`;
       const subjectId = `user_${seed}`;
