@@ -66,9 +66,22 @@ jobs:
           fi
           echo "low-risk=$low_risk" >> "$GITHUB_OUTPUT"
 
+      # Best-effort, deliberately (docs/DECISIONS.md D-103): GitHub's own
+      # "Actions is not permitted to approve pull requests" restriction
+      # (Settings -> Actions -> General -> Workflow permissions) rejects
+      # this call in most repos by default, including this one — and this
+      # step's own entire reason to exist is to be a no-op when
+      # required-approvals is 0 anyway (see this workflow's own top
+      # comment). Before D-103's fix, that rejection was fatal (`gh pr
+      # review` exits non-zero, and this job has no `continue-on-error`),
+      # which killed the job outright *before* the "Enable auto-merge" step
+      # below ever ran — meaning auto-merge had never actually happened for
+      # any low-risk PR, only ever failed loudly on this step instead.
+      # `|| true` makes a failed approval attempt exactly as harmless as a
+      # successful no-op one, matching what this step already claimed to be.
       - name: Approve (only needed if required-approvals is ever raised above 0)
         if: steps.risk.outputs.low-risk == 'true'
-        run: gh pr review --approve "$PR_URL"
+        run: gh pr review --approve "$PR_URL" || true
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
