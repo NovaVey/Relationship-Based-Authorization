@@ -356,3 +356,63 @@ describe('every SchemaError formats as "line N: <message>"', () => {
     expect(formatSchemaError(error)).toBe(`line ${error.line}: ${error.message}`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Second full-repo audit, finding #11 (LOW, 2026-08-22) — the reserved-word
+// rejection (`namespace`/`relation`/`permission`) had test coverage only at
+// the namespace-name position (`classifyNamespaceCandidate`'s
+// `RESERVED_NAMESPACE_WORDS` set,
+// test/isolation/identifier-and-tuple-validation.fuzz.test.ts). But
+// src/schema/dsl/parser.ts's own `validateIdentifier` is called
+// unconditionally at every identifier-declaration site — relation names,
+// permission names, subject-type namespaces/relations, and every
+// rewrite-rule reference — matching finding #12's own doc-drift correction
+// to IDENTIFIER_PATTERN's doc comment (src/schema/dsl/types.ts). A future
+// refactor that accidentally scoped the reserved-word check to only the
+// namespace-name call site would otherwise silently change accepted
+// behavior with zero test failures.
+// ---------------------------------------------------------------------------
+
+describe('reserved words (namespace/relation/permission) are rejected at every identifier-declaration position, not only namespace names', () => {
+  it('reserved-word-as-a-relation-name-is-rejected', () => {
+    const errors = compileErr(
+      ['namespace document {', '  relation permission: user', '}'].join('\n'),
+    );
+    const error = errors.find((e) => e.code === 'invalid_identifier');
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('relation name');
+    expect(error?.message).toContain('reserved word');
+  });
+
+  it('reserved-word-as-a-permission-name-is-rejected', () => {
+    const errors = compileErr(
+      ['namespace document {', '  relation owner: user', '  permission relation = owner', '}'].join(
+        '\n',
+      ),
+    );
+    const error = errors.find((e) => e.code === 'invalid_identifier');
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('permission name');
+    expect(error?.message).toContain('reserved word');
+  });
+
+  it('reserved-word-as-a-subject-type-relation-suffix-is-rejected', () => {
+    const errors = compileErr(
+      ['namespace document {', '  relation viewer: user | document#namespace', '}'].join('\n'),
+    );
+    const error = errors.find((e) => e.code === 'invalid_identifier');
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('subject type relation');
+    expect(error?.message).toContain('reserved word');
+  });
+
+  it('reserved-word-as-a-subject-type-namespace-is-rejected-control-already-covered-elsewhere-pinned-here-too-for-symmetry', () => {
+    const errors = compileErr(
+      ['namespace document {', '  relation viewer: relation', '}'].join('\n'),
+    );
+    const error = errors.find((e) => e.code === 'invalid_identifier');
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('subject type namespace');
+    expect(error?.message).toContain('reserved word');
+  });
+});

@@ -13,18 +13,8 @@ import type { ExpandNode } from '../../audit/expand.js';
 import { expand } from '../../audit/expand.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
-
-interface EntityArg {
-  ns: string;
-  id: string;
-}
-
-/** Parses `namespace:id` — the only form `expand`'s object argument takes. */
-function parseEntityArg(raw: string): EntityArg | undefined {
-  const colon = raw.indexOf(':');
-  if (colon <= 0 || colon === raw.length - 1) return undefined;
-  return { ns: raw.slice(0, colon), id: raw.slice(colon + 1) };
-}
+import { parseEntityArg, isValidIdentifier } from '../entity-ref.js';
+import { MAX_IDENTIFIER_LENGTH } from '../../schema/dsl/types.js';
 
 const REF_USAGE = "object must be 'namespace:id' (e.g. 'document:readme')";
 
@@ -83,6 +73,25 @@ export async function expandCli(objectRaw: string, relation: string): Promise<vo
   const object = parseEntityArg(objectRaw);
   if (!object) {
     console.error(`invalid object reference — ${REF_USAGE}`);
+    process.exitCode = 2;
+    return;
+  }
+  // Second full-repo audit finding #4 (MEDIUM, 2026-08-22): this argument
+  // reached expand() completely unvalidated before this fix, unlike
+  // src/api/server.ts's expandBodySchema (D-093), which already validates
+  // the identical field for the HTTP route. expand.ts's own recursion key
+  // (nameKey, NUL-byte-separated) isn't vulnerable to resolver.ts's
+  // specific `:`/`#` frontier-key confusion (see ../entity-ref.js's own
+  // doc comment for that mechanism, which is what motivates validating
+  // `check`'s relation argument above) — the real gap here is narrower:
+  // a malformed relation silently resolves to a confusing
+  // `{ kind: 'undeclared' }` leaf embedding the raw garbage string,
+  // instead of a clear, immediate error, and this CLI has no reason to
+  // accept an argument the equivalent API route already rejects.
+  if (!isValidIdentifier(relation)) {
+    console.error(
+      `invalid relation '${relation}' — must be a valid identifier (lowercase snake_case, starts with a letter, ≤${MAX_IDENTIFIER_LENGTH} characters)`,
+    );
     process.exitCode = 2;
     return;
   }

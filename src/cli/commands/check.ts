@@ -16,11 +16,8 @@ import { performCheck } from '../../audit/checks.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
 import type { ResolutionStep } from '../../resolve/production/resolver.js';
-
-interface EntityArg {
-  ns: string;
-  id: string;
-}
+import { parseEntityArg, isValidIdentifier } from '../entity-ref.js';
+import { MAX_IDENTIFIER_LENGTH } from '../../schema/dsl/types.js';
 
 function entity(e: { ns: string; id: string }): string {
   return `${e.ns}:${e.id}`;
@@ -108,13 +105,6 @@ export function renderResolutionPath(step: ResolutionStep, name: string, indent 
   }
 }
 
-/** Parses `namespace:id` — the only form a check's subject or object takes. */
-function parseEntityArg(raw: string): EntityArg | undefined {
-  const colon = raw.indexOf(':');
-  if (colon <= 0 || colon === raw.length - 1) return undefined;
-  return { ns: raw.slice(0, colon), id: raw.slice(colon + 1) };
-}
-
 const REF_USAGE = "subject and object must both be 'namespace:id' (e.g. 'user:alice')";
 
 export interface CheckCliOptions {
@@ -144,6 +134,17 @@ export async function check(
   const object = parseEntityArg(objectRaw);
   if (!subject || !object) {
     console.error(`invalid subject/object reference — ${REF_USAGE}`);
+    process.exitCode = 2;
+    return;
+  }
+  // Second full-repo audit finding #4 (MEDIUM, 2026-08-22): this argument
+  // reached performCheck completely unvalidated before this fix — see
+  // ../entity-ref.js's own top-of-file doc comment for the concrete
+  // audit-trail-corruption repro this closes.
+  if (!isValidIdentifier(relation)) {
+    console.error(
+      `invalid relation '${relation}' — must be a valid identifier (lowercase snake_case, starts with a letter, ≤${MAX_IDENTIFIER_LENGTH} characters)`,
+    );
     process.exitCode = 2;
     return;
   }

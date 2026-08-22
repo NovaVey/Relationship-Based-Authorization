@@ -30,13 +30,21 @@
  * the parser enforces it at the point each name is declared.
  *
  * This pattern and length cap are necessary but not sufficient for a
- * *namespace* name specifically: `namespace`/`relation`/`permission`
+ * schema-declaration identifier: `namespace`/`relation`/`permission`
  * themselves each satisfy both yet are rejected as reserved words
- * (`RESERVED_WORDS`, `src/schema/dsl/parser.ts`) — a real, narrow gap
- * between this exported grammar and what the parser actually enforces for
- * that one position, found and folded into the property-fuzz test's own
- * oracle rather than filtered around (see that test's own doc comment).
- * A subject/object id (`src/store/tuples.ts`'s `validateIdentifiers`) has
+ * (`RESERVED_WORDS`, `src/schema/dsl/parser.ts`) — a real gap between this
+ * exported grammar and what the parser actually enforces, found and folded
+ * into the property-fuzz test's own oracle rather than filtered around (see
+ * that test's own doc comment). Not narrow to a namespace name specifically
+ * (second full-repo audit, finding #12, LOW, corrected 2026-08-22; D-062's
+ * own framing made the same overclaim) — `validateIdentifier` is called
+ * unconditionally, with no context-based exemption, at every identifier-
+ * declaration site the parser has: a namespace name, a relation name, a
+ * permission name, a subject-type namespace and its `#relation` suffix, and
+ * every rewrite-rule/tuple-to-userset reference. Confirmed directly:
+ * `compileSchema('namespace document { relation permission: user }')` is
+ * rejected exactly like a namespace named `permission` would be. A
+ * subject/object id (`src/store/tuples.ts`'s `validateIdentifiers`) has
  * no such carve-out — this pattern and length cap are both necessary and
  * sufficient there.
  */

@@ -119,4 +119,58 @@ describe('authz check — exit codes', () => {
     expect(process.exitCode).not.toBe(0);
     expect(process.exitCode).toBeDefined();
   }, 30_000);
+
+  // Second full-repo audit, finding #4 (MEDIUM, 2026-08-22) — before this
+  // fix, `relation` reached `performCheck` with no validation at all, and
+  // `subject`/`object` were only checked for colon *position*, never
+  // against the real identifier grammar
+  // (`IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH`, `src/schema/dsl/
+  // types.ts`) — see `src/cli/entity-ref.ts`'s own doc comment for the
+  // concrete audit-trail-corruption repro this closes
+  // (`document:evil#hack` as an object/relation could make
+  // `resolver.ts`'s `parseFrontierKeyString` silently mis-split a
+  // reconstructed path). All four cases below must exit 2 before ever
+  // touching Postgres, exactly like the pre-existing malformed-reference
+  // cases above.
+  it('a-relation-argument-containing-a-hash-exits-2-before-check-ever-touches-postgres', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    // The exact repro traced live in src/cli/entity-ref.ts's own doc
+    // comment: 'hack#view' as the relation, on an otherwise well-formed
+    // object reference.
+    await check('user:alice', 'hack#view', 'document:evil', {});
+
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-relation-argument-containing-a-colon-exits-2-before-check-ever-touches-postgres', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    await check('user:alice', 'view:extra', 'document:readme', {});
+
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-subject-reference-whose-id-half-contains-a-hash-is-rejected-as-malformed-not-silently-accepted', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    // Before this fix, parseEntityArg only checked colon position — an id
+    // half containing '#' (or anything outside IDENTIFIER_PATTERN) passed
+    // straight through as a well-formed EntityArg.
+    await check('user:alice#hack', 'view', 'document:readme', {});
+
+    expect(process.exitCode).toBe(2);
+  });
+
+  it('a-relation-argument-that-is-empty-exits-2-not-treated-as-a-well-formed-empty-identifier', async () => {
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+
+    await check('user:alice', '', 'document:readme', {});
+
+    expect(process.exitCode).toBe(2);
+  });
 });
