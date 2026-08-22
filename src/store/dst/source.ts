@@ -43,14 +43,27 @@ export interface FakeConnectionSource extends ConnectionSource {
    * manufacture a controllable race window against real Postgres. Cleared
    * the moment that one `.connect()` call happens, same one-shot contract
    * as `armNextConnectionCrash`.
+   *
+   * Also returns `fired`, a `Promise` that resolves the instant the pause
+   * genuinely triggers on whichever connection consumed this arming — DST
+   * D4's `raceUnderPause` (`src/store/dst/scheduler.ts`, `docs/DECISIONS.md`
+   * D-101) awaits this directly instead of *guessing* "probably paused by
+   * now" from a fixed microtask-flush budget, which a full-repo adversarial
+   * review found was silently vacuous for slower-settling operations (see
+   * that decision's own writeup for the concrete counterexample). `fired`
+   * never resolves at all if this arming's `.connect()` call never actually
+   * reaches its own armed statement count — a caller racing it against the
+   * operation's own completion (as `raceUnderPause` does) is how that gets
+   * detected, not a timeout here.
    */
-  armNextConnectionPause(afterStatements: number): { resume: () => void };
+  armNextConnectionPause(afterStatements: number): { resume: () => void; fired: Promise<void> };
 }
 
 /** One armed pause, fully self-contained — see `armNextConnectionPause`'s own doc comment for why this is a dedicated object per arming rather than a single shared field. */
 interface ArmedPause {
   afterStatements: number;
   gate: Promise<void>;
+  notifyFired: () => void;
 }
 
 class FakeConnectionSourceImpl implements FakeConnectionSource {
@@ -85,6 +98,7 @@ class FakeConnectionSourceImpl implements FakeConnectionSource {
     if (this.armedPause !== undefined) {
       options.pauseAfterStatements = this.armedPause.afterStatements;
       options.pauseGate = this.armedPause.gate;
+      options.notifyPauseFired = this.armedPause.notifyFired;
     }
     this.armedPause = undefined;
     return Promise.resolve(new FakeConnectionImpl(this.state, this.nextConnectionId++, options));
@@ -94,22 +108,29 @@ class FakeConnectionSourceImpl implements FakeConnectionSource {
     this.armedCrash = afterStatements;
   }
 
-  armNextConnectionPause(afterStatements: number): { resume: () => void } {
-    // The gate (and its resolver) is built here, at arm time, and captured
-    // entirely by this one arming's own closure — never a shared mutable
-    // field on `this`. Two armings in a row, each followed by its own
-    // `.connect()` before the first is ever resumed, therefore can never
-    // cross-resolve each other's gate: each `resume` callback only ever
-    // knows about the one `resolveGate` it closed over.
+  armNextConnectionPause(afterStatements: number): { resume: () => void; fired: Promise<void> } {
+    // The gate/fired pair (and their resolvers) are built here, at arm
+    // time, and captured entirely by this one arming's own closure — never
+    // a shared mutable field on `this`. Two armings in a row, each followed
+    // by its own `.connect()` before the first is ever resumed, therefore
+    // can never cross-resolve each other's promises: each `resume` callback
+    // only ever knows about the one `resolveGate` it closed over, and
+    // `notifyFired` only ever resolves the one `fired` this same arming
+    // returned.
     let resolveGate!: () => void;
     const gate = new Promise<void>((resolve) => {
       resolveGate = resolve;
     });
-    this.armedPause = { afterStatements, gate };
+    let resolveFired!: () => void;
+    const fired = new Promise<void>((resolve) => {
+      resolveFired = resolve;
+    });
+    this.armedPause = { afterStatements, gate, notifyFired: resolveFired };
     return {
       resume: () => {
         resolveGate();
       },
+      fired,
     };
   }
 }
