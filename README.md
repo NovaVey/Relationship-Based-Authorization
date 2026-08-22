@@ -109,21 +109,28 @@ or byte-for-byte replayable from outside its own process the way this
 project's own code is, and claiming otherwise would be the kind of
 overclaim this project's soundness language already refuses to make (see
 **[`docs/DST-PROPOSAL.md`](docs/DST-PROPOSAL.md)**'s full design and
-`docs/DECISIONS.md` D-095 for why). Two phases have landed so far, each
-surfacing a real, previously-undiscovered bug, not just re-proving
-something already believed:
+`docs/DECISIONS.md` D-095 for why). Three phases have landed so far:
 
 - **D0** — a crash injected between the tuple-row insert and its
   write-log insert leaves neither behind. Building faithful crash
-  injection exposed a real one live: a naive rollback-on-error handler
-  with no inner try/catch silently replaced the real failure with the
-  rollback's own whenever a genuinely dead connection couldn't run
-  `ROLLBACK` either (D-097).
+  injection exposed a real, previously-undiscovered bug live: a naive
+  rollback-on-error handler with no inner try/catch silently replaced the
+  real failure with the rollback's own whenever a genuinely dead
+  connection couldn't run `ROLLBACK` either (D-097).
 - **D1** — a real, Promise-based advisory-lock engine (a FIFO wait queue,
   not a boolean flag or polling) generalizes the D-083 write-log-lock
   regression test across seeds, and proves a session-scoped lock
   (`migrate.ts`'s migrations lock) genuinely auto-releases when its
   holding connection dies (D-098).
+- **D2** — `REPEATABLE READ` snapshot isolation, anchored at a
+  transaction's first real query exactly like real Postgres, wired
+  through the real, unmodified `productionCheck` engine. Reproduces the
+  project's own previously-fixed D-092 "phantom witness" regression (a
+  check citing two facts that never coexisted at one real database
+  moment) deterministically — no real Postgres `LOCK TABLE` trick needed,
+  the fake's own `armNextConnectionPause` gets the identical controlled
+  race for free — and proves it stays closed across seeded interleavings
+  (D-099).
 
 `npx vitest run test/unit/store/dst/` runs all of it — no Postgres, no
 Docker, identical result every time.
@@ -245,8 +252,9 @@ What this project actually contributes is the proof methodology —
 differential fuzzing against an independent oracle, asymmetric verdicts
 that treat an over-grant as categorically worse than an under-grant,
 resolution-path audit trails for every decision, and deterministic
-simulation testing of the write path itself under crash/lock faults (see
-above) — applied carefully to a well-understood model (Zanzibar), not a
+simulation testing of the write path itself under crash, lock, and
+snapshot-isolation races (see above) — applied carefully to a
+well-understood model (Zanzibar), not a
 novel authorization model of its own. It demonstrates the ability to design, build, and prove correct
 relationship-based authorization infrastructure end to end. If you want
 this done against your own product's real schema rather than this

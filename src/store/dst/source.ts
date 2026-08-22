@@ -31,11 +31,32 @@ export interface FakeConnectionSource extends ConnectionSource {
    * not arm every future connection.
    */
   armNextConnectionCrash(afterStatements: number): void;
+  /**
+   * D2 (`docs/DECISIONS.md` D-099), test-only: arms a one-shot pause for
+   * the *next* connection opened via `.connect()` — after `afterStatements`
+   * successful `.query()` calls on that one connection, its `(afterStatements
+   * + 1)`th call genuinely suspends (a real pending `Promise`, exactly like
+   * a blocked lock acquisition) until the returned `resume` callback is
+   * called. See `connection.ts`'s own top-of-file doc comment on why this
+   * exists — it's the DST-native replacement for the real `LOCK TABLE`
+   * trick `docs/DECISIONS.md` D-092's own regression test needed to
+   * manufacture a controllable race window against real Postgres. Cleared
+   * the moment that one `.connect()` call happens, same one-shot contract
+   * as `armNextConnectionCrash`.
+   */
+  armNextConnectionPause(afterStatements: number): { resume: () => void };
+}
+
+/** One armed pause, fully self-contained — see `armNextConnectionPause`'s own doc comment for why this is a dedicated object per arming rather than a single shared field. */
+interface ArmedPause {
+  afterStatements: number;
+  gate: Promise<void>;
 }
 
 class FakeConnectionSourceImpl implements FakeConnectionSource {
   private readonly autocommitConnection: FakeConnectionImpl;
   private armedCrash: number | undefined;
+  private armedPause: ArmedPause | undefined;
   // Every FakeConnectionImpl needs its own stable identity for D1's lock
   // engine (`locks.ts`, `connection.ts`) — "release everything connection N
   // holds" needs an N. Scoped to this one source/state instance, not a
@@ -56,14 +77,40 @@ class FakeConnectionSourceImpl implements FakeConnectionSource {
 
   // Deliberately not `async` — see connection.ts's own identical note.
   connect(): Promise<QueryExecutor & { release(): void }> {
-    const options: FakeConnectionOptions =
-      this.armedCrash === undefined ? {} : { crashAfterStatements: this.armedCrash };
+    const options: FakeConnectionOptions = {};
+    if (this.armedCrash !== undefined) {
+      options.crashAfterStatements = this.armedCrash;
+    }
     this.armedCrash = undefined;
+    if (this.armedPause !== undefined) {
+      options.pauseAfterStatements = this.armedPause.afterStatements;
+      options.pauseGate = this.armedPause.gate;
+    }
+    this.armedPause = undefined;
     return Promise.resolve(new FakeConnectionImpl(this.state, this.nextConnectionId++, options));
   }
 
   armNextConnectionCrash(afterStatements: number): void {
     this.armedCrash = afterStatements;
+  }
+
+  armNextConnectionPause(afterStatements: number): { resume: () => void } {
+    // The gate (and its resolver) is built here, at arm time, and captured
+    // entirely by this one arming's own closure — never a shared mutable
+    // field on `this`. Two armings in a row, each followed by its own
+    // `.connect()` before the first is ever resumed, therefore can never
+    // cross-resolve each other's gate: each `resume` callback only ever
+    // knows about the one `resolveGate` it closed over.
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    this.armedPause = { afterStatements, gate };
+    return {
+      resume: () => {
+        resolveGate();
+      },
+    };
   }
 }
 
