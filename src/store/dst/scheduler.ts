@@ -76,8 +76,11 @@
  * with a `concurrentOp` that can only complete *after* `heldOp` resumes
  * deadlocks both, the same way two real Postgres sessions would.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { integer, sample } from 'fast-check';
 import { SeededRng, hashSeedToInt31 } from '../../soundness/generators.js';
+import { IDENTIFIER_PATTERN } from '../../schema/dsl/types.js';
 import type { FakeConnectionSource } from './source.js';
 
 /**
@@ -107,6 +110,116 @@ export function dstRngFromSeed(seed: string, poolSize: number = DEFAULT_DRAW_POO
     unbiased: true,
   });
   return new SeededRng(pool);
+}
+
+const REGRESSION_CORPUS_PATH = fileURLToPath(
+  new URL('../../../docs/dst-regression-corpus.json', import.meta.url),
+);
+
+interface RegressionCorpusEntry {
+  seed: string;
+  scheduleId: string;
+  failureSummary: string;
+  dateFound: string;
+}
+
+/**
+ * DST's own regression corpus (`docs/DST-PROPOSAL.md`'s "Regression
+ * corpus" design section, `docs/DECISIONS.md` D-102, the checked-in
+ * `docs/dst-regression-corpus.json`) — every entry whose own `scheduleId`
+ * matches `prefix`, unconditionally, on every call regardless of
+ * `DST_SEED_COUNT`: "every PR replays the whole corpus unconditionally,"
+ * per the design's own words. Reads the file fresh each call (no caching)
+ * — this only ever runs inside a test process, never a hot path, and a
+ * stale in-memory copy surviving a corpus edit mid-run would be a strictly
+ * worse failure mode than one extra, cheap file read. Throws loudly if the
+ * checked-in file is missing or malformed — a corpus a test run silently
+ * couldn't read is a real gap in what that run actually proved, not a
+ * condition to paper over with an empty-array fallback.
+ *
+ * Exported, with `corpusPath` overridable (defaulting to the real,
+ * checked-in file) — matching this project's own established "export for
+ * test reuse" precedent (`WRITE_LOG_LOCK_CLASSID`, `src/store/tuples.ts`):
+ * `scheduler.dst.test.ts` points this at a real, throwaway temp file
+ * instead of the real corpus (which is honestly meant to stay empty) to
+ * pin this function's own behavior down permanently, without the ESM
+ * module-spying pitfalls a mocked `node:fs` import would hit here.
+ *
+ * Every returned `seed` is checked against `IDENTIFIER_PATTERN`
+ * (`src/schema/dsl/types.ts`, the same grammar `dstSeedList`'s own
+ * generated seeds already satisfy by construction) before it ever reaches
+ * a caller — an adversarial review found this was previously unchecked: a
+ * malformed corpus entry (e.g. a stray hyphen or an uppercase letter, hand-
+ * edited into `docs/dst-regression-corpus.json` without care) would flow
+ * straight through into a real `object_id`/`subject_id` several call
+ * frames away and fail there with a generic, root-cause-obscuring
+ * assertion error, not here where the actual problem is. Live-verified: a
+ * deliberately malformed seed added to the real checked-in corpus now
+ * throws immediately, pointing at the exact entry, instead of surfacing as
+ * an unrelated-looking failure downstream (`docs/DECISIONS.md` D-102).
+ */
+export function regressionCorpusSeedsFor(
+  scheduleId: string,
+  corpusPath: string = REGRESSION_CORPUS_PATH,
+): string[] {
+  const raw = readFileSync(corpusPath, 'utf8');
+  const parsed = JSON.parse(raw) as { entries: RegressionCorpusEntry[] };
+  if (!Array.isArray(parsed.entries)) {
+    throw new Error(
+      `DST regression corpus (${corpusPath}) is malformed: 'entries' is not an array`,
+    );
+  }
+  const seeds = parsed.entries
+    .filter((entry) => entry.scheduleId === scheduleId)
+    .map((entry) => entry.seed);
+  for (const seed of seeds) {
+    if (!IDENTIFIER_PATTERN.test(seed)) {
+      throw new Error(
+        `DST regression corpus (${corpusPath}) has a malformed seed for scheduleId ` +
+          `"${scheduleId}": "${seed}" does not match ${IDENTIFIER_PATTERN.source} — every DST ` +
+          `seed is embedded directly into a real object_id/subject_id downstream, so a seed ` +
+          `that doesn't already satisfy this project's own identifier grammar would otherwise ` +
+          `fail there instead, far from this entry's own actual root cause.`,
+      );
+    }
+  }
+  return seeds;
+}
+
+/**
+ * DST D5 (`docs/DECISIONS.md` D-102) — the one shared knob every DST
+ * seeded sweep (`advisory-lock.dst.test.ts`, `production-check.dst.test.ts`,
+ * `tuple-store.dst.test.ts`) reads instead of each hard-coding its own
+ * fixed seed count: `DST_SEED_COUNT`, an environment variable, defaults to
+ * `defaultCount` when unset or not a positive integer. `docs/DST-PROPOSAL
+ * .md`'s own CI design calls for "a small, fixed seed batch" on every PR
+ * and "thousands of seeds" nightly — the *same* test logic driving both,
+ * scaled by this one variable, rather than a separate, harder-to-trust
+ * "nightly-only" code path. Seeds are opaque, prefixed strings
+ * (`${prefix}_1`, `${prefix}_2`, ...) — never bare integers — so two
+ * different sweeps in the same test run can never collide on the identical
+ * seed text even if both happen to use the same count. Joined with `_`,
+ * never `-`: every caller today embeds its own seed directly into a real
+ * `object_id`/`subject_id` (`bystander_${seed}_${i}`-shaped), and this
+ * project's own identifier grammar (`validateIdentifiers`, `src/store/
+ * tuples.ts`) is `^[a-z][a-z0-9_]*$` — no hyphens. `prefix` itself must
+ * follow the identical rule for the same reason (a caller-supplied prefix
+ * containing `-` would reproduce the exact bug this comment describes).
+ *
+ * `prefix` doubles as this sweep's own `scheduleId` — every regression-
+ * corpus entry recorded against it (`regressionCorpusSeedsFor` above) is
+ * unioned into the returned list unconditionally, deduplicated against the
+ * generated seeds, so a seed that once exposed a real bug in this sweep
+ * stays in every future run of it forever, on every PR, not just when
+ * `DST_SEED_COUNT` happens to be large enough to reach it by chance.
+ */
+export function dstSeedList(prefix: string, defaultCount: number): string[] {
+  const override = process.env.DST_SEED_COUNT;
+  const parsed = override === undefined ? NaN : Number(override);
+  const count = Number.isInteger(parsed) && parsed > 0 ? parsed : defaultCount;
+  const generated = Array.from({ length: count }, (_, i) => `${prefix}_${i + 1}`);
+  const corpusSeeds = regressionCorpusSeedsFor(prefix);
+  return [...new Set([...generated, ...corpusSeeds])];
 }
 
 /**

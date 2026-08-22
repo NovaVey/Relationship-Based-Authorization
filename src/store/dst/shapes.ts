@@ -1,12 +1,17 @@
 /**
  * The trivial, exact-match SQL-shape executor DST's fake store uses for
- * D0's SQL surface — `src/store/tuples.ts`, `src/store/tokens.ts`, and the
- * one `src/schema/publish.ts` read (`getLatestNamespaceConfig`) `writeTuple`
- * depends on. `docs/DST-PROPOSAL.md`'s own design: exact-string lookup,
- * never parsing or regex, throwing loudly on anything unrecognized rather
- * than silently returning an empty result (the proposal's own §"Two grafts"
- * — the permanent, written rule: misrecognition is strictly worse than
+ * this project's plain SQL surface — `src/store/tuples.ts`,
+ * `src/store/tokens.ts`, `src/schema/publish.ts` (D0's own three files),
+ * plus `src/resolve/production/resolver.ts`'s own plain reads (D2/D3).
+ * `docs/DST-PROPOSAL.md`'s own design: exact-string lookup, never parsing
+ * or regex, throwing loudly on anything unrecognized rather than silently
+ * returning an empty result (the proposal's own §"Two grafts" — the
+ * permanent, written rule: misrecognition is strictly worse than
  * non-recognition, so this executor is exact-match-only, forever).
+ * `registeredShapeCount()` (below) and `test/unit/store/dst/
+ * recognizer-coverage.dst.test.ts`'s own manifest (DST D5, `docs/
+ * DECISIONS.md` D-102) are the structural gate proving every shape
+ * registered here actually gets exercised by some real production caller.
  *
  * A shape handler never mutates `state.relationTuples`/`writeLog`/
  * `namespaceConfigs` directly for a write — writes are always applied via
@@ -51,6 +56,7 @@
  * within their own transaction either, so this remains genuinely
  * unexercised by every real call site today, same as D0's own note said.
  */
+import type { NamespaceConfig } from '../../schema/dsl/types.js';
 import type { TupleKey } from '../tuples.js';
 import type { FakeStoreState, RelationTupleRow } from './state.js';
 import { fetchReachableFrontierVia } from './frontier.js';
@@ -299,6 +305,46 @@ const latestNamespaceConfigHandler: ShapeHandler = ({ state, params }) => {
 };
 
 // ---------------------------------------------------------------------------
+// publish.ts's own publishOne — DST D5 (docs/DECISIONS.md D-102): a real
+// coverage gap the recognizer-coverage gate this phase builds found before
+// it ever shipped as a required check. publishSchema/publishOne are pure
+// parameterized CRUD against namespace_configs, not schema DDL (unlike
+// migrate.ts's own runMigrations, which is deliberately out of the fake's
+// scope — see that file's own doc comment) — exactly the shape this whole
+// design is built to model — but neither of publishOne's own two real
+// statements (the next-version select, the row insert) was ever registered
+// here, and no DST test called the real publishSchema end to end. Both
+// handlers run inside publishSchema's own plain BEGIN/COMMIT transaction
+// (never a Snapshot one — publishOne is a write path), so `visibleAsOf` is
+// always `undefined` when either runs, matching tupleInsertHandler/
+// tupleDeleteHandler's own identical precedent of not filtering write-path
+// reads by snapshot visibility.
+// ---------------------------------------------------------------------------
+
+const namespaceConfigNextVersionHandler: ShapeHandler = ({ state, params }) => {
+  const [namespace] = params as [string];
+  const maxVersion = state.namespaceConfigs
+    .filter((row) => row.namespace === namespace)
+    .reduce((max, row) => Math.max(max, row.version), 0);
+  return { rows: [{ next_version: maxVersion + 1 }], rowCount: 1 };
+};
+
+const namespaceConfigInsertHandler: ShapeHandler = ({ params, bufferOp }) => {
+  const [namespace, versionParam, configJson, sourceDsl] = params as [
+    string,
+    number,
+    string,
+    string,
+  ];
+  const version = Number(versionParam);
+  const config = JSON.parse(configJson) as NamespaceConfig;
+  bufferOp((s, commitSeq) => {
+    s.namespaceConfigs.push({ namespace, version, config, sourceDsl, commitSeq });
+  });
+  return { rows: [], rowCount: 1 };
+};
+
+// ---------------------------------------------------------------------------
 // resolver.ts's own SQL surface (D2, docs/DECISIONS.md D-099) —
 // listTupleSubjects (the tuple-to-userset hop), fetchReachableFrontier
 // (the recursive-membership frontier query), fetchTuplesOnFrontier (the
@@ -430,6 +476,16 @@ const SHAPES = new Map<string, ShapeHandler>([
     latestNamespaceConfigHandler,
   ],
   [
+    normalizeSql(`select coalesce(max(version), 0) + 1 as next_version
+     from namespace_configs where namespace = $1`),
+    namespaceConfigNextVersionHandler,
+  ],
+  [
+    normalizeSql(`insert into namespace_configs (namespace, version, config, source_dsl)
+     values ($1, $2, $3, $4)`),
+    namespaceConfigInsertHandler,
+  ],
+  [
     normalizeSql(`select subject_ns, subject_id
      from relation_tuples
      where object_ns = $1 and object_id = $2 and relation = $3`),
@@ -485,4 +541,20 @@ export function lookupShape(sql: string): ShapeHandler {
     throw new Error(`DST fake store: no shape registered for query: ${JSON.stringify(key)}`);
   }
   return handler;
+}
+
+/**
+ * DST D5 (`docs/DECISIONS.md` D-102) — the exact size of the SQL-shape
+ * registry above, for `test/unit/store/dst/recognizer-coverage.dst.test.ts`'s
+ * own count tripwire: that file's own manifest exercises every registered
+ * shape end to end through its real production caller and asserts this
+ * count matches exactly what it expects, so a shape added here without a
+ * matching manifest entry there (or a manifest entry whose shape silently
+ * stopped being registered) is a loud, named CI failure, not silent drift —
+ * `docs/DST-PROPOSAL.md`'s own "required, always-on recognizer-coverage
+ * gate" design, applied in the direction D-099's own review already found a
+ * real gap in once (`listTupleSubjects`, registered but unexercised).
+ */
+export function registeredShapeCount(): number {
+  return SHAPES.size;
 }
