@@ -55,6 +55,7 @@ import Fastify, {
   type FastifyServerOptions,
 } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+import { LruMap } from 'toad-cache';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 
@@ -307,6 +308,16 @@ export interface BuildServerOptions {
    * and pays its per-call overhead, just without ever writing anything.
    */
   logger?: FastifyServerOptions['logger'];
+
+  /**
+   * Overrides `authFloodGuard`'s own `LruMap` entry cap (D-105). Omitted
+   * (the default, `undefined`) preserves production behavior exactly —
+   * `serve.ts` never passes this, so a real `authz serve` gets the full
+   * `AUTH_FLOOD_STATE_MAX_ENTRIES`. Exists purely so a test can drive real
+   * eviction with a handful of requests instead of tens of thousands —
+   * mirrors this interface's own `logger` override precedent above.
+   */
+  authFloodStateMaxEntries?: number;
 }
 
 /**
@@ -590,10 +601,30 @@ export async function buildServer(
    * flood (D-065's own scenario), never to police normal admin traffic,
    * which comes nowhere close to 1000 requests/minute from one address in
    * any real use this project has ever had.
+   *
+   * **Bounded, not a plain `Map` (D-105; a real full-repo-audit finding,
+   * HIGH — the guard meant to bound memory usage was itself unbounded).**
+   * A plain `Map<request.ip, ...>` gains one permanent entry per distinct
+   * source address ever seen, with no eviction — `trustExactlyOneRealProxyHop`
+   * stops header-spoofing, but it does nothing to stop an unauthenticated
+   * caller who controls a routable IPv6 `/64` (cheap or free from most
+   * cloud/VPS providers) from trivially presenting an effectively unlimited
+   * number of distinct *real* source addresses, growing this Map without
+   * bound for the life of the process. `toad-cache`'s `LruMap` (already a
+   * transitive dependency of `@fastify/rate-limit`, now direct here) closes
+   * this the same way `@fastify/rate-limit`'s own `LocalStore` bounds
+   * itself: a `max` entry cap with LRU eviction, so memory is bounded
+   * regardless of how many distinct addresses a caller can present. `max`
+   * is set well above any real deployment's distinct-address count in one
+   * window, so eviction only ever engages under genuine attack, matching
+   * this guard's own "bound abuse, never police normal traffic" purpose.
    */
-  const authFloodState = new Map<string, { count: number; windowStart: number }>();
   const AUTH_FLOOD_MAX = 1000;
   const AUTH_FLOOD_WINDOW_MS = 60_000;
+  const AUTH_FLOOD_STATE_MAX_ENTRIES = 50_000;
+  const authFloodState = new LruMap<{ count: number; windowStart: number }>(
+    options.authFloodStateMaxEntries ?? AUTH_FLOOD_STATE_MAX_ENTRIES,
+  );
 
   async function authFloodGuard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const key = request.ip;
