@@ -168,9 +168,12 @@ export function generateRandomSeed(): string {
  * own `seed` option expects ("seeds are supposed to be 32-bit integers").
  * Pure, deterministic, platform-independent — no `Buffer`, no `crypto`
  * hash, just arithmetic, so this can never itself be a source of
- * cross-machine nondeterminism.
+ * cross-machine nondeterminism. Exported alongside `SeededRng` — see that
+ * class's own doc comment for why (DST D3's own graph generator needs the
+ * identical seed string -> `fc.sample`-compatible-int31 conversion, not a
+ * second, hand-copied version of this same tiny function).
  */
-function hashSeedToInt31(seed: string): number {
+export function hashSeedToInt31(seed: string): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < seed.length; i += 1) {
     hash ^= seed.charCodeAt(i);
@@ -192,7 +195,23 @@ function hashSeedToInt31(seed: string): number {
 const DRAW_POOL_BASE_SIZE = 4_000;
 const DRAW_POOL_PER_QUERY = 12;
 
-class SeededRng {
+/**
+ * Exported (this file's own doc comment above already explains why
+ * `fast-check`/`pure-rand` is this whole module's chosen entropy source,
+ * not a new hand-rolled PRNG) for exactly one outside consumer: DST D3's
+ * own random userset-subject-edge graph generator
+ * (`test/unit/resolve/production/frontier-equivalence.integration.test.ts`,
+ * `docs/DECISIONS.md` D-100), which `docs/DST-PROPOSAL.md`'s own phased
+ * plan requires to reuse "this project's already-seeded fast-check/
+ * pure-rand machinery, not a new PRNG" -- this class *is* that machinery.
+ * A caller builds its own draw pool sized for its own needs (this file's
+ * own `buildRng` below sizes for *this* generator's needs specifically,
+ * via `DRAW_POOL_BASE_SIZE`/`DRAW_POOL_PER_QUERY` -- not a one-size-fits-all
+ * a different caller should reuse as-is) via `sample(integer(...), { seed:
+ * hashSeedToInt31(seed), numRuns: <caller-sized> })` -- `hashSeedToInt31`
+ * exported alongside this class for exactly that.
+ */
+export class SeededRng {
   private readonly pool: readonly number[];
   private cursor = 0;
 

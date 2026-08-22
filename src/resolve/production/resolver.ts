@@ -666,7 +666,19 @@ async function listTupleSubjects(
 // comment for why the disproof shape is a flat certificate.
 // ---------------------------------------------------------------------------
 
-interface FrontierRow {
+/**
+ * Exported (not module-private, despite `sqlRelationMembershipWithWitness`
+ * being this shape's only in-file consumer) for exactly one reason,
+ * matching `src/store/tuples.ts`'s own `WRITE_LOG_LOCK_CLASSID` precedent:
+ * DST D3's own differential-equivalence suite (`docs/DECISIONS.md` D-100)
+ * needs to call the *real* `fetchReachableFrontier` directly against real
+ * Postgres and compare its output row-for-row against the in-memory
+ * `fetchReachableFrontierVia` — exporting the real function and its real
+ * row shape means that suite exercises the actual production query, not a
+ * hand-copied SQL string that could silently drift out of sync with this
+ * file on a future edit.
+ */
+export interface FrontierRow {
   ns: string;
   id: string;
   relation: string;
@@ -749,8 +761,12 @@ interface FrontierRow {
  * precision (`checks.depth`'s high-water mark, §6.7) for eliminating the
  * exponential blowup — it does not affect `allowed`/`denied` correctness,
  * per the reachability argument above.
+ *
+ * Exported — see `FrontierRow`'s own doc comment for why (DST D3's
+ * differential-equivalence suite, `docs/DECISIONS.md` D-100, calls this
+ * real function directly against a real Postgres testcontainer).
  */
-async function fetchReachableFrontier(
+export async function fetchReachableFrontier(
   client: QueryExecutor,
   object: EntityRef,
   relation: string,
@@ -790,8 +806,8 @@ function frontierKeyStr(row: Pick<FrontierRow, 'ns' | 'id' | 'relation'>): strin
   return `${row.ns}:${row.id}#${row.relation}`;
 }
 
-/** Dedupes reached frontier rows by identity, keeping the minimum-depth occurrence of each (deterministic, arbitrary tie-break otherwise). */
-function dedupeFrontier(rows: readonly FrontierRow[]): Map<string, FrontierRow> {
+/** Dedupes reached frontier rows by identity, keeping the minimum-depth occurrence of each (deterministic, arbitrary tie-break otherwise). Exported alongside `FrontierRow`/`fetchReachableFrontier` — see `FrontierRow`'s own doc comment for why (DST D3's differential-equivalence suite applies this identical dedup to both the real and in-memory frontier outputs before comparing them). */
+export function dedupeFrontier(rows: readonly FrontierRow[]): Map<string, FrontierRow> {
   const byKey = new Map<string, FrontierRow>();
   for (const row of rows) {
     const key = frontierKeyStr(row);
