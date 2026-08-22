@@ -36,9 +36,15 @@ export interface FakeConnectionSource extends ConnectionSource {
 class FakeConnectionSourceImpl implements FakeConnectionSource {
   private readonly autocommitConnection: FakeConnectionImpl;
   private armedCrash: number | undefined;
+  // Every FakeConnectionImpl needs its own stable identity for D1's lock
+  // engine (`locks.ts`, `connection.ts`) — "release everything connection N
+  // holds" needs an N. Scoped to this one source/state instance, not a
+  // module-level counter, so two independent tests' connection ids don't
+  // depend on how many other tests happened to run first.
+  private nextConnectionId = 1;
 
   constructor(private readonly state: FakeStoreState) {
-    this.autocommitConnection = new FakeConnectionImpl(state);
+    this.autocommitConnection = new FakeConnectionImpl(state, this.nextConnectionId++);
   }
 
   async query<Row = Record<string, unknown>>(
@@ -53,7 +59,7 @@ class FakeConnectionSourceImpl implements FakeConnectionSource {
     const options: FakeConnectionOptions =
       this.armedCrash === undefined ? {} : { crashAfterStatements: this.armedCrash };
     this.armedCrash = undefined;
-    return Promise.resolve(new FakeConnectionImpl(this.state, options));
+    return Promise.resolve(new FakeConnectionImpl(this.state, this.nextConnectionId++, options));
   }
 
   armNextConnectionCrash(afterStatements: number): void {

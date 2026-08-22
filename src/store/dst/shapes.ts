@@ -95,16 +95,14 @@ function tupleRowToApiShape(row: RelationTupleRow): Record<string, unknown> {
 // insert/delete, both list queries, the write-log insert.
 // ---------------------------------------------------------------------------
 
-/**
- * D0 deliberately does not model real cross-connection lock contention —
- * that is D1's own job (`docs/DST-PROPOSAL.md`'s `withAdvisoryLock`,
- * `docs/DECISIONS.md` D-092's own precedent for phasing hard invariants in
- * one at a time). This handler exists so `acquireWriteLogLock`'s own query
- * is a *recognized* shape (never silently unmatched), not so it enforces
- * anything yet — a trivially-successful no-op, matching what a lock
- * acquisition against an uncontended lock always returns in real Postgres.
- */
-const advisoryLockHandler: ShapeHandler = () => ({ rows: [{}], rowCount: 1 });
+// D0 modeled `pg_advisory_xact_lock($1, $2)` as an always-succeeding no-op
+// here (`docs/DECISIONS.md` D-097) — D1 (D-098) replaces that stopgap with
+// a real lock engine (`locks.ts`) that genuinely blocks a second
+// contending connection. Locking needs per-connection identity and a
+// queue `bufferOp`'s synchronous, connection-agnostic handler signature
+// below can't express, so all four real advisory-lock SQL texts are now
+// special-cased directly in `connection.ts`, *before* a query ever reaches
+// `lookupShape` — never registered here.
 
 const tupleInsertHandler: ShapeHandler = ({ state, params, bufferOp }) => {
   const [objectNs, objectId, relation, subjectNs, subjectId, subjectRelationParam] = params as [
@@ -267,7 +265,6 @@ const latestNamespaceConfigHandler: ShapeHandler = ({ state, params }) => {
 // ---------------------------------------------------------------------------
 
 const SHAPES = new Map<string, ShapeHandler>([
-  [normalizeSql('select pg_advisory_xact_lock($1, $2)'), advisoryLockHandler],
   [
     normalizeSql(`insert into relation_tuples
          (object_ns, object_id, relation, subject_ns, subject_id, subject_relation)
