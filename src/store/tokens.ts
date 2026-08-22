@@ -25,10 +25,10 @@
  * side effect a caller has to know exists (this project already learned
  * that lesson once, the hard way — see D-008).
  */
-import type { Pool } from 'pg';
+import type { QueryExecutor } from './query-executor.js';
 
 /** The highest token this database has issued so far, or `null` if no write has ever happened. */
-export async function currentToken(pool: Pool): Promise<number | null> {
+export async function currentToken(pool: QueryExecutor): Promise<number | null> {
   const { rows } = await pool.query<{ max_token: string | null }>(
     'select max(token) as max_token from write_log',
   );
@@ -68,7 +68,7 @@ export async function currentToken(pool: Pool): Promise<number | null> {
  * a public type any future caller could hand a malformed value through
  * directly, not a fix for an observed bug in either existing caller.
  */
-export async function assertTokenObserved(pool: Pool, token: number): Promise<void> {
+export async function assertTokenObserved(pool: QueryExecutor, token: number): Promise<void> {
   const requested = Number(token);
   if (!Number.isInteger(requested) || requested < 0) {
     throw new Error(

@@ -6,10 +6,9 @@
  * writes and reads) — this file only ever proves or changes what facts
  * exist.
  */
-import type { Pool, PoolClient } from 'pg';
-
 import { getLatestNamespaceConfig } from '../schema/publish.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
+import type { ConnectionSource, QueryExecutor } from './query-executor.js';
 
 export interface TupleKey {
   objectNs: string;
@@ -108,7 +107,7 @@ export function validateIdentifiers(tuple: TupleKey): TupleError[] {
  * removed from a newer schema version must still be revocable for tuples
  * written under an older one; see `docs/DECISIONS.md`.
  */
-async function validateAgainstSchema(pool: Pool, tuple: TupleKey): Promise<TupleError[]> {
+async function validateAgainstSchema(pool: QueryExecutor, tuple: TupleKey): Promise<TupleError[]> {
   const config = await getLatestNamespaceConfig(pool, tuple.objectNs);
   if (!config) {
     return [
@@ -260,7 +259,7 @@ export const WRITE_LOG_LOCK_OBJID = 0;
  * existing `BEGIN`/`COMMIT`/`ROLLBACK` wrapping exactly, the same reasoning
  * `publishOne`'s own doc comment gives for its own lock.
  */
-async function acquireWriteLogLock(client: PoolClient): Promise<void> {
+async function acquireWriteLogLock(client: QueryExecutor): Promise<void> {
   await client.query('select pg_advisory_xact_lock($1, $2)', [
     WRITE_LOG_LOCK_CLASSID,
     WRITE_LOG_LOCK_OBJID,
@@ -268,7 +267,7 @@ async function acquireWriteLogLock(client: PoolClient): Promise<void> {
 }
 
 async function insertWriteLog(
-  client: PoolClient,
+  client: QueryExecutor,
   operation: 'write' | 'delete',
   tuple: TupleKey,
 ): Promise<number> {
@@ -300,7 +299,10 @@ async function insertWriteLog(
  * this call, that fact holds," whether or not this exact call is what
  * created it.
  */
-export async function writeTuple(pool: Pool, tuple: TupleKey): Promise<WriteTupleResult> {
+export async function writeTuple(
+  pool: ConnectionSource,
+  tuple: TupleKey,
+): Promise<WriteTupleResult> {
   const identifierErrors = validateIdentifiers(tuple);
   if (identifierErrors.length > 0) {
     return { ok: false, errors: identifierErrors };
@@ -337,7 +339,25 @@ export async function writeTuple(pool: Pool, tuple: TupleKey): Promise<WriteTupl
     await client.query('COMMIT');
     return { ok: true, token, created: (rowCount ?? 0) > 0 };
   } catch (err) {
-    await client.query('ROLLBACK');
+    // The ROLLBACK call's own failure must never replace `err` — found and
+    // fixed via DST D0's crash-injection work (`docs/DECISIONS.md`): a
+    // connection that died mid-transaction can't run a ROLLBACK any more
+    // than it could run anything else, so a naive `await
+    // client.query('ROLLBACK')` here would throw a second, different error
+    // that silently masks the real one this catch block is already
+    // propagating — a caller would see "connection terminated" instead of
+    // whatever actually made this write fail. Same "cleanup's own outcome
+    // must never overwrite the thing that actually matters" reasoning
+    // `src/store/migrate.ts`'s own `runMigrations` already applies to its
+    // advisory-unlock cleanup.
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Swallowed deliberately — see comment above. Postgres releases the
+      // connection (and anything it held) on its own once it's actually
+      // gone; there is nothing left to clean up here that matters more than
+      // `err` reaching the caller unchanged.
+    }
     throw err;
   } finally {
     client.release();
@@ -350,7 +370,10 @@ export async function writeTuple(pool: Pool, tuple: TupleKey): Promise<WriteTupl
  * the consistency token, for the same reason a redundant write does (see
  * `writeTuple`).
  */
-export async function deleteTuple(pool: Pool, tuple: TupleKey): Promise<DeleteTupleResult> {
+export async function deleteTuple(
+  pool: ConnectionSource,
+  tuple: TupleKey,
+): Promise<DeleteTupleResult> {
   const identifierErrors = validateIdentifiers(tuple);
   if (identifierErrors.length > 0) {
     return { ok: false, errors: identifierErrors };
@@ -381,7 +404,13 @@ export async function deleteTuple(pool: Pool, tuple: TupleKey): Promise<DeleteTu
     await client.query('COMMIT');
     return { ok: true, token, deleted: (rowCount ?? 0) > 0 };
   } catch (err) {
-    await client.query('ROLLBACK');
+    // See writeTuple's own identical catch block for why the ROLLBACK
+    // call's own failure must never replace `err`.
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Swallowed deliberately — see writeTuple's own identical comment.
+    }
     throw err;
   } finally {
     client.release();
@@ -414,7 +443,10 @@ interface RawTupleRow {
 }
 
 /** Every stored tuple on one object, optionally narrowed to one relation — "who has R on O". */
-export async function listTuplesByObject(pool: Pool, filter: TupleFilter): Promise<TupleRow[]> {
+export async function listTuplesByObject(
+  pool: QueryExecutor,
+  filter: TupleFilter,
+): Promise<TupleRow[]> {
   const conditions = ['object_ns = $1', 'object_id = $2'];
   const params: string[] = [filter.objectNs, filter.objectId];
   if (filter.relation !== undefined) {
@@ -432,7 +464,7 @@ export async function listTuplesByObject(pool: Pool, filter: TupleFilter): Promi
 
 /** Every stored tuple naming one subject — "what does S have". */
 export async function listTuplesBySubject(
-  pool: Pool,
+  pool: QueryExecutor,
   subjectNs: string,
   subjectId: string,
 ): Promise<TupleRow[]> {
