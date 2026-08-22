@@ -62,6 +62,17 @@ let pool: Pool;
 beforeAll(async () => {
   container = await new PostgreSqlContainer('postgres:16-alpine').start();
   pool = new Pool({ connectionString: container.getConnectionUri() });
+  pool.on('error', (err) => {
+    // pg's own documented contract: without this, an idle client hitting a
+    // background/network-level error (most commonly this file's own container
+    // being stopped in afterAll while a pooled connection was still technically
+    // open, though the identical gap applies to any Pool in this file) crashes
+    // the whole test run with an unhandled 'error' event, even though every
+    // real assertion already passed — a known pg gotcha, not a bug in this
+    // file's own test logic. Logged, not swallowed: still visible if it ever
+    // fires somewhere other than expected teardown.
+    console.error(`pool error (expected during container teardown): ${err.message}`);
+  });
   await runMigrations(pool, MIGRATIONS_DIR);
 }, 120_000);
 
@@ -287,6 +298,17 @@ describe('a malformed namespace, relation, or id is rejected before it reaches t
   const unreachablePool = new Pool({
     connectionString: 'postgres://nobody:nothing@127.0.0.1:1/unreachable',
     connectionTimeoutMillis: 300,
+  });
+  unreachablePool.on('error', (err) => {
+    // pg's own documented contract: without this, an idle client hitting a
+    // background/network-level error (most commonly this file's own container
+    // being stopped in afterAll while a pooled connection was still technically
+    // open, though the identical gap applies to any Pool in this file) crashes
+    // the whole test run with an unhandled 'error' event, even though every
+    // real assertion already passed — a known pg gotcha, not a bug in this
+    // file's own test logic. Logged, not swallowed: still visible if it ever
+    // fires somewhere other than expected teardown.
+    console.error(`pool error (expected during container teardown): ${err.message}`);
   });
 
   afterAll(async () => {
@@ -726,6 +748,17 @@ describe('fail-closed: an unreachable database fails a store operation rather th
     connectionString: 'postgres://nobody:nothing@127.0.0.1:1/unreachable',
     connectionTimeoutMillis: 300,
   });
+  unreachablePool.on('error', (err) => {
+    // pg's own documented contract: without this, an idle client hitting a
+    // background/network-level error (most commonly this file's own container
+    // being stopped in afterAll while a pooled connection was still technically
+    // open, though the identical gap applies to any Pool in this file) crashes
+    // the whole test run with an unhandled 'error' event, even though every
+    // real assertion already passed — a known pg gotcha, not a bug in this
+    // file's own test logic. Logged, not swallowed: still visible if it ever
+    // fires somewhere other than expected teardown.
+    console.error(`pool error (expected during container teardown): ${err.message}`);
+  });
 
   afterAll(async () => {
     await unreachablePool.end();
@@ -796,6 +829,17 @@ describe('a token pinned to a just-observed write never ignores an earlier, stil
   beforeAll(async () => {
     raceContainer = await new PostgreSqlContainer('postgres:16-alpine').start();
     racePool = new Pool({ connectionString: raceContainer.getConnectionUri() });
+    racePool.on('error', (err) => {
+      // pg's own documented contract: without this, an idle client hitting a
+      // background/network-level error (most commonly this file's own container
+      // being stopped in afterAll while a pooled connection was still technically
+      // open, though the identical gap applies to any Pool in this file) crashes
+      // the whole test run with an unhandled 'error' event, even though every
+      // real assertion already passed — a known pg gotcha, not a bug in this
+      // file's own test logic. Logged, not swallowed: still visible if it ever
+      // fires somewhere other than expected teardown.
+      console.error(`pool error (expected during container teardown): ${err.message}`);
+    });
     await runMigrations(racePool, MIGRATIONS_DIR);
     raceNs = uniqueName('race_doc');
     const published = await publishSchema(racePool, documentSchemaSource(raceNs));
