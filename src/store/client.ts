@@ -32,6 +32,23 @@ export function getPool(config: PoolConfig = {}): Pool {
       connectionTimeoutMillis: 5_000,
       ...config,
     });
+    // pg's own documented contract: the pool emits 'error' on behalf of any
+    // IDLE client that hits a background/network-level error (the server
+    // restarting, a network blip, a load balancer resetting a connection).
+    // Node's default behavior for an EventEmitter's unhandled 'error' event
+    // is to throw — with no listener here, a single idle connection's
+    // transient error would crash this entire process, not just fail one
+    // request. The pool itself already recovers on its own (a fresh
+    // connection opens for the next query); this listener only stops that
+    // recovery from taking the whole process down with it. Confirmed this
+    // is a real, previously-unguarded gap, not a defensive-by-habit
+    // addition: the identical missing listener is what caused every
+    // `test-integration` CI job's intermittent "Unhandled Errors" failure
+    // (see `docs/DECISIONS.md`) — this is the same fix, applied to the one
+    // place it matters most.
+    pool.on('error', (err) => {
+      console.error(`Postgres pool: an idle client encountered an error — ${err.message}`);
+    });
   }
   return pool;
 }
