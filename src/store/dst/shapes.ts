@@ -53,6 +53,7 @@
  */
 import type { TupleKey } from '../tuples.js';
 import type { FakeStoreState, RelationTupleRow } from './state.js';
+import { fetchReachableFrontierVia } from './frontier.js';
 
 export interface FakeQueryResult<Row = Record<string, unknown>> {
   rows: Row[];
@@ -324,75 +325,34 @@ const listTupleSubjectsHandler: ShapeHandler = ({ state, params, visibleAsOf }) 
 };
 
 /**
- * D2's own deliberately narrow implementation of `fetchReachableFrontier`'s
- * real recursive CTE (`src/resolve/production/resolver.ts`) — see
- * `docs/DST-PROPOSAL.md`'s phased plan: the real, multi-level
- * userset-subject BFS, proven equivalent to Postgres by a committed
- * differential-fuzz corpus, is D3's own named deliverable
- * (`fetchReachableFrontierVia`), not D2's. This handler answers correctly
- * for exactly the part of the real query's semantics that needs no
- * recursion at all — the seed row (`depth: 0`, the starting
- * `(object, relation)` itself), always present in the real CTE's own
- * `UNION ALL` regardless of whether any recursion ever happens — and
- * **throws**, rather than silently returning an incomplete frontier, the
- * moment this `(object, relation)` actually has a real, snapshot-visible
- * userset-subject edge (`subjectRelation !== null`) that real recursion
- * *could actually reach* — see this handler's own `maxDepth` handling
- * immediately below for what "could actually reach" means precisely. Per
- * this file's own top-of-file doc comment and `docs/DST-PROPOSAL.md`'s
- * "Two grafts" section: a wrong (silently incomplete) answer is strictly
- * worse than a loud, named failure — this is that same discipline applied
- * to a *semantic* gap, not just an unrecognized SQL string.
- *
- * **`maxDepth` (`$4` in the real query) genuinely matters here, not just
- * for realism.** The real recursive term is gated by `m.depth < $4`; at
- * the seed row's own `depth = 0`, that guard is `0 < $4`, which is
- * `false` whenever `$4 <= 0` — meaning real Postgres's own recursion
- * *structurally cannot fire*, regardless of what userset-subject tuples
- * exist, the instant a caller's remaining depth budget hits zero (a real,
- * reachable case: `productionCheck(..., { maxDepth: 0 })`, or an ordinary
- * permission-indirection chain that happens to bottom out exactly at
- * `env.CHECK_MAX_DEPTH`). In that case the seed-only row this handler
- * always computes already **is** the true, complete answer real Postgres
- * would return too — throwing anyway would be a false positive, exactly
- * the "misrecognizes a case it could actually answer" failure this file's
- * whole exact-match discipline exists to avoid, just at the semantic layer
- * instead of the SQL-text layer. So the throw below only fires when a
- * userset edge exists *and* real recursion could have reached it
- * (`maxDepth > 0`) — caught live during D2's own adversarial review
- * (`docs/DECISIONS.md` D-099), not assumed correct from the first draft.
- *
- * This is enough to reproduce D-092's own flagship phantom-witness
- * scenario faithfully: that bug's real counterexample is specifically
- * about a *plain* grant tuple (no userset nesting) becoming visible to
- * `fetchTuplesOnFrontier`'s read but not `fetchReachableFrontier`'s
- * earlier one (or vice versa) — a plain grant is exactly what
- * `fetchTuplesOnFrontier` reads off the seed row this handler always
- * returns; no multi-level recursion is needed to reproduce or close that
- * specific race. See `docs/DECISIONS.md` D-099 for the full reasoning.
+ * `fetchReachableFrontier`'s real recursive CTE (`src/resolve/production/
+ * resolver.ts`), answered by DST D3's own real, multi-level BFS
+ * (`fetchReachableFrontierVia`, `src/store/dst/frontier.ts`) — see that
+ * file's own top-of-file doc comment for the full fidelity argument
+ * (iterative working-table semantics, per-iteration `DISTINCT ON` dedup,
+ * per-row path cycle guard, the `maxDepth` boundary) and `docs/DECISIONS.md`
+ * D-100 for the differential-equivalence suite that proves it against real
+ * Postgres. Replaces D2's own deliberately narrower seed-row-only stopgap
+ * (`docs/DECISIONS.md` D-099) — the "throw, this needs D3" guard that
+ * stopgap carried is gone: this handler now genuinely answers every case,
+ * not just the no-recursion-needed one.
  */
 const fetchReachableFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf }) => {
   const [ns, id, relation, maxDepth] = params as [string, string, string, number];
-  const hasReachableUsersetEdge =
-    maxDepth > 0 &&
-    state.relationTuples.some(
-      (row) =>
-        row.objectNs === ns &&
-        row.objectId === id &&
-        row.relation === relation &&
-        row.subjectRelation !== null &&
-        isVisible(row.commitSeq, visibleAsOf),
-    );
-  if (hasReachableUsersetEdge) {
-    throw new Error(
-      `DST fake store: fetchReachableFrontier's D2 seed-only handler cannot answer ` +
-        `(${ns}:${id}#${relation}) — a real, snapshot-visible userset-subject edge exists on ` +
-        `it, and multi-level frontier recursion is D3's own job (docs/DST-PROPOSAL.md's phased ` +
-        `plan), not yet implemented here. See this handler's own doc comment.`,
-    );
-  }
-  const seedRow = { ns, id, relation, depth: 0, path: [`${ns}:${id}#${relation}`] };
-  return { rows: [seedRow], rowCount: 1 };
+  const rows = fetchReachableFrontierVia(state, ns, id, relation, maxDepth, visibleAsOf);
+  // A plain-data map, matching this file's own tupleRowToApiShape idiom —
+  // `DstFrontierRow` is a nominally-declared interface, which TypeScript
+  // does not treat as assignable to `Record<string, unknown>` even with
+  // identical property names, so the rows are re-packaged as fresh object
+  // literals rather than returned as-is.
+  const apiRows = rows.map((r) => ({
+    ns: r.ns,
+    id: r.id,
+    relation: r.relation,
+    depth: r.depth,
+    path: r.path,
+  }));
+  return { rows: apiRows, rowCount: apiRows.length };
 };
 
 /** Real Postgres's `unnest($1::text[]), unnest($2::text[]), unnest($3::text[])` join is positional — one join row per array index. Mirrors that exactly rather than, say, a cross product. */

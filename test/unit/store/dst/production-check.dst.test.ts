@@ -42,7 +42,11 @@ const USERSET_SCHEMA_SOURCE = [
   '  permission view = viewer',
   '}',
   'namespace group {',
-  '  relation member: user',
+  // Self-referential (group#member as its own subject type) — matches
+  // schema/example.authz's own real group.member declaration exactly.
+  // D3's own multi-level-recursion tests need real nested-group chains,
+  // not just a single userset hop straight to a plain user.
+  '  relation member: user | group#member',
   '}',
 ].join('\n');
 
@@ -278,17 +282,26 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
   );
 });
 
-describe("D2's own disclosed scope limit — the frontier handler throws rather than silently under-report a real userset-subject edge it cannot yet traverse (D3's job)", () => {
-  it('a-check-that-would-need-real-frontier-recursion-throws-a-clear-named-error-instead-of-a-silent-wrong-denial', async () => {
+/**
+ * D2 shipped a deliberately narrow seed-only frontier handler that threw
+ * rather than silently mis-answer any check needing real userset-subject
+ * recursion (`docs/DECISIONS.md` D-099) — D3 (`docs/DECISIONS.md` D-100)
+ * replaces it with `fetchReachableFrontierVia`, a real, multi-level BFS.
+ * These tests are what D2's own "throws, this needs D3" tests became: the
+ * *identical* schemas and tuple graphs that used to throw now genuinely
+ * resolve, through real recursion, via the real, unmodified
+ * `productionCheck`.
+ */
+describe('real multi-level userset-subject recursion, genuinely working through productionCheck for the first time (D3, D-100)', () => {
+  it('a-single-hop-userset-edge-that-would-have-thrown-under-D2-now-resolves-allowed-through-real-recursion', async () => {
     const state = createFakeStoreState();
     seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
     seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
     const source = createFakeConnectionSource(state);
 
-    // A real userset-subject tuple — document:readme#viewer@group:eng#member
-    // — the exact shape fetchReachableFrontier's real recursive term exists
-    // to follow, and D2's own seed-only handler explicitly does not.
-    const write = await writeTuple(source, {
+    // document:readme#viewer@group:eng#member — the exact shape D2's own
+    // seed-only handler could not traverse and threw on instead.
+    const edgeWrite = await writeTuple(source, {
       objectNs: 'document',
       objectId: 'readme',
       relation: 'viewer',
@@ -296,36 +309,88 @@ describe("D2's own disclosed scope limit — the frontier handler throws rather 
       subjectId: 'eng',
       subjectRelation: 'member',
     });
-    expect(write.ok).toBe(true);
+    expect(edgeWrite.ok).toBe(true);
+    // alice is a real, direct member of group:eng.
+    const membershipWrite = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'eng',
+      relation: 'member',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(membershipWrite.ok).toBe(true);
 
-    await expect(
-      productionCheck(
-        source,
-        { ns: 'user', id: 'alice' },
-        { ns: 'document', id: 'readme' },
-        'view',
-      ),
-    ).rejects.toThrow(/D3's own job/);
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'alice' },
+      { ns: 'document', id: 'readme' },
+      'view',
+    );
+    expect(result.allowed).toBe(true);
   });
 
-  it('control-the-identical-schema-with-no-userset-edge-actually-written-resolves-normally-through-the-same-guard', async () => {
+  it('control-the-identical-userset-edge-with-a-subject-who-is-not-a-member-anywhere-resolves-denied-not-a-throw', async () => {
     const state = createFakeStoreState();
     seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
     seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
     const source = createFakeConnectionSource(state);
 
-    // Only a plain grant — no userset-subject tuple exists on this object,
-    // so the guard's own `hasUsersetEdge` check must find nothing and let
-    // this resolve normally, proving the guard doesn't over-fire on a
-    // schema that merely *allows* userset subjects without one present.
-    const write = await writeTuple(source, {
+    const edgeWrite = await writeTuple(source, {
       objectNs: 'document',
       objectId: 'readme',
       relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+    expect(edgeWrite.ok).toBe(true);
+    // No group:eng membership grant for mallory anywhere.
+
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'mallory' },
+      { ns: 'document', id: 'readme' },
+      'view',
+    );
+    expect(result.allowed).toBe(false);
+  });
+
+  it('a-two-level-nested-group-chain-resolves-allowed-proving-real-multi-hop-recursion-not-just-one-level', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
+    const source = createFakeConnectionSource(state);
+
+    // document:readme#viewer@group:eng#member
+    //   -> group:eng#member@group:backend#member
+    //        -> group:backend#member@user:alice
+    // Two real userset hops between the check's own subject and object.
+    const edgeWrite = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+    expect(edgeWrite.ok).toBe(true);
+    const nestedWrite = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'eng',
+      relation: 'member',
+      subjectNs: 'group',
+      subjectId: 'backend',
+      subjectRelation: 'member',
+    });
+    expect(nestedWrite.ok).toBe(true);
+    const membershipWrite = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'backend',
+      relation: 'member',
       subjectNs: 'user',
       subjectId: 'alice',
     });
-    expect(write.ok).toBe(true);
+    expect(membershipWrite.ok).toBe(true);
 
     const result = await productionCheck(
       source,
@@ -337,26 +402,27 @@ describe("D2's own disclosed scope limit — the frontier handler throws rather 
   });
 
   /**
-   * Caught live by D2's own adversarial review pass, not assumed correct
-   * from the first draft (`docs/DECISIONS.md` D-099): the guard above
-   * ignores real Postgres's own `maxDepth` (`$4`) ceiling on the frontier
-   * query's recursive term (`m.depth < $4`). At the seed row's own
-   * `depth = 0`, that guard is false whenever `maxDepth <= 0` — real
-   * Postgres's own recursion *cannot* fire regardless of what tuples
-   * exist, so the seed-only answer this handler always computes already
-   * is the true, complete one, and throwing anyway would be a false
-   * positive. `maxDepth: 0` here reaches `fetchReachableFrontier` as
-   * `remainingDepth = Math.max(0, 0 - 0) = 0` (`resolver.ts`'s own
-   * `resolve()`), the exact boundary this test targets.
+   * The exact `maxDepth: 0` boundary D2's own adversarial review caught a
+   * real bug in (`docs/DECISIONS.md` D-099: the seed-only handler ignored
+   * `maxDepth` and threw even when real recursion couldn't have fired
+   * either). Now answered by the real BFS's own `while (iterationDepth <
+   * maxDepth)` bound (`src/store/dst/frontier.ts`) — `maxDepth: 0` means
+   * zero rounds ever run, matching real Postgres's own `m.depth < $4`
+   * guard at the seed row's own `depth = 0` exactly. Kept as its own test
+   * because the underlying property (a userset edge a zero depth budget
+   * cannot reach resolves a clean denial, never a throw) is still real and
+   * still worth pinning down, even though the mechanism proving it changed
+   * from "a guard declines to fire" to "recursion genuinely has no budget
+   * to run."
    */
-  it('a-userset-edge-that-a-zero-remaining-depth-budget-could-never-actually-reach-does-not-trigger-the-guard', async () => {
+  it('a-userset-edge-that-a-zero-remaining-depth-budget-cannot-reach-resolves-a-clean-denial-not-a-throw', async () => {
     const state = createFakeStoreState();
     seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
     seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
     const source = createFakeConnectionSource(state);
 
-    // The identical userset-subject tuple the guard-firing test above uses
-    // — the difference here is entirely the maxDepth budget, not the data.
+    // The identical userset-subject tuple this describe block's own first
+    // test uses — the difference here is entirely the maxDepth budget.
     const write = await writeTuple(source, {
       objectNs: 'document',
       objectId: 'readme',
