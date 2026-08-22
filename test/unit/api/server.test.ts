@@ -49,7 +49,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 
-import { buildServer } from '../../../src/api/server.js';
+import { buildServer, trustExactlyOneRealProxyHop } from '../../../src/api/server.js';
 import { env } from '../../../src/config/env.js';
 
 import * as checksModule from '../../../src/audit/checks.js';
@@ -891,5 +891,46 @@ describe('finding #3: a spoofed X-Forwarded-For prefix cannot obtain a fresh rat
       expect(res.statusCode).toBe(404);
     }
     expect(sawRateLimited).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. D-104 — Fastify 5.12.1 silently removed numeric `trustProxy` support
+//     at the runtime level (not just its types): `trustProxy: 1` on that
+//     version stops honoring `X-Forwarded-For` at all, always resolving
+//     `request.ip` to the raw socket peer. `trustExactlyOneRealProxyHop`
+//     (`src/api/server.ts`) reimplements the identical "trust exactly one
+//     hop" semantics as the `TrustProxyFunction` form Fastify 5.12.1 still
+//     accepts — live-verified (see that function's own doc comment) against
+//     real listening servers on both Fastify versions before this test was
+//     written; this pins the same properties down permanently. The
+//     "spoofed prefix never wins" property itself is already covered
+//     end-to-end through a real server by finding #3 above (unmodified
+//     since D-104 — it still passes against this function exactly as it
+//     did against the literal `trustProxy: 1`); these tests pin down the
+//     pure function's own hop-by-hop decisions directly.
+// ---------------------------------------------------------------------------
+
+describe('D-104: trustExactlyOneRealProxyHop reimplements trustProxy: 1 as a TrustProxyFunction', () => {
+  it('trusts-only-hop-0-the-socket-itself-never-a-second-hop', () => {
+    // hop 0 is always the socket's own peer address -- trusting it as a
+    // proxy (continue walking past it) is exactly "trust one real hop."
+    expect(trustExactlyOneRealProxyHop('127.0.0.1', 0)).toBe(true);
+    // Any hop past the socket must never itself be trusted as a further
+    // proxy -- otherwise a client could chain fabricated addresses ahead of
+    // the real one and still have one of them trusted.
+    expect(trustExactlyOneRealProxyHop('9.9.9.9', 1)).toBe(false);
+    expect(trustExactlyOneRealProxyHop('6.6.6.6', 2)).toBe(false);
+    expect(trustExactlyOneRealProxyHop('1.1.1.1', 5)).toBe(false);
+  });
+
+  it('never-trusts-hop-0-when-the-socket-address-itself-is-empty-fails-closed-not-open', () => {
+    // Fastify 5.12.1's own behavior change was motivated by exactly this
+    // case (documented upstream as an IISNode-on-Windows edge case: a
+    // socket whose remoteAddress is undefined/null). If we don't know who's
+    // connected to us, we have no basis to trust what they claim about
+    // anyone upstream either -- matching Fastify's own hardened built-in
+    // behavior for this case, not the pre-5.12.1 behavior it replaced.
+    expect(trustExactlyOneRealProxyHop('', 0)).toBe(false);
   });
 });
