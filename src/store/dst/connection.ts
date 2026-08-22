@@ -48,6 +48,51 @@
  * interleave at that `await`, exactly modeling one real connection
  * blocking behind another's held lock while a third, unrelated connection
  * keeps making progress.
+ *
+ * **Snapshot transactions (D2, `docs/DECISIONS.md` D-099).** A connection
+ * that receives the exact text `resolver.ts`'s `productionCheck` issues —
+ * `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` — enters a third
+ * transaction mode (`TxState.Snapshot`), distinct from `Open`'s
+ * write-buffering: real Postgres's `REPEATABLE READ` freezes every read in
+ * the transaction at one MVCC snapshot, anchored not at `BEGIN` but at the
+ * transaction's *first real query* (Postgres's own documented behavior,
+ * and the exact ordering `resolver.ts`'s own `assertTokenObservedOnSnapshot`
+ * doc comment relies on). This connection replicates that ordering
+ * precisely: `snapshotSeq` is captured — `state.nextCommitSeq - 1`, the
+ * highest `commitSeq` any row has actually committed at, at this exact
+ * moment — the first time a real (non-transaction-control) statement runs
+ * after entering `Snapshot` mode, never at the `BEGIN` statement itself.
+ * Every read for the rest of this transaction carries that frozen
+ * `visibleAsOf` value into `shapes.ts`'s handlers (see that file's own doc
+ * comment for how each handler honors it) — a row committed *after*
+ * `snapshotSeq` is invisible to this connection for the rest of its life,
+ * even though, in real logical time, that later commit may have already
+ * happened by the time this connection's *next* query actually runs.
+ *
+ * **Read-only enforced by construction, not just by convention.** A
+ * snapshot transaction should never attempt a write — nothing in
+ * `productionCheck`'s own real call surface does — but rather than leave
+ * that an unstated assumption, `bufferOp` throws immediately if ever
+ * invoked while `txState === Snapshot`, the same "enforce it structurally,
+ * don't just document it" discipline `docs/DST-PROPOSAL.md`'s own "Two
+ * grafts" section applies to the pg-backed side's snapshot-anchoring
+ * order.
+ *
+ * **The pause mechanism (D2, test-only).** Real Postgres has no
+ * controllable pause point mid-transaction — `docs/DECISIONS.md` D-092's
+ * own regression test had to resort to a real `LOCK TABLE
+ * namespace_configs IN ACCESS EXCLUSIVE MODE` against an *unrelated* table
+ * just to manufacture one wide enough to race against deterministically.
+ * The whole point of simulating at the storage seam is that this fake
+ * doesn't need a trick like that: `armNextConnectionPause` (see
+ * `source.ts`) arms a one-shot pause, after N successful statements on the
+ * next connection opened, that genuinely suspends this connection's
+ * `(N+1)`th `.query()` call — a real pending `Promise`, exactly like a
+ * blocked lock acquisition — until a test calls the `resume` callback that
+ * arming call returned. This gives a DST test the same deterministic
+ * control over "commit a concurrent write while this check is mid-flight"
+ * that D-092's real regression test needed a real-Postgres table lock to
+ * fake.
  */
 import type { FakeStoreState } from './state.js';
 import { lookupShape, normalizeSql, type FakeQueryResult, type PendingOp } from './shapes.js';
@@ -64,11 +109,17 @@ export interface FakeConnection {
 export interface FakeConnectionOptions {
   /** Test-only: after this many successful `.query()` calls on this connection, the next call throws and the connection's own uncommitted buffer and locks are discarded — see this file's own top-of-file doc comment. `undefined` (the default) never crashes. */
   crashAfterStatements?: number;
+  /** D2, test-only: after this many successful `.query()` calls on this connection, the `(N+1)`th call suspends until `pauseGate` resolves — see this file's own top-of-file doc comment on the pause mechanism, and `source.ts`'s `armNextConnectionPause`. `undefined` (the default) never pauses. */
+  pauseAfterStatements?: number;
+  /** D2, test-only: the `Promise` a paused statement `await`s before proceeding — resolved externally by the `resume` callback `armNextConnectionPause` returns. Only meaningful together with `pauseAfterStatements`. */
+  pauseGate?: Promise<void>;
 }
 
 const enum TxState {
   Idle = 'idle',
   Open = 'open',
+  /** D2 — a `REPEATABLE READ READ ONLY` snapshot transaction; see this file's own top-of-file doc comment. */
+  Snapshot = 'snapshot',
 }
 
 // The four real lock statement texts this codebase issues, matched by
@@ -80,6 +131,8 @@ const XACT_TWOINT_LOCK = normalizeSql('select pg_advisory_xact_lock($1, $2)');
 const XACT_HASH_LOCK = normalizeSql('select pg_advisory_xact_lock(hashtext($1))');
 const SESSION_LOCK = normalizeSql('select pg_advisory_lock($1, $2)');
 const SESSION_UNLOCK = normalizeSql('select pg_advisory_unlock($1, $2)');
+/** The exact literal text `resolver.ts`'s `productionCheck` issues to open its snapshot transaction — see this file's own top-of-file doc comment on `TxState.Snapshot`. */
+const SNAPSHOT_BEGIN = 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY';
 
 /**
  * Builds this engine's own opaque lock key for the two-integer
@@ -104,6 +157,15 @@ export class FakeConnectionImpl implements FakeConnection {
   private pending: PendingOp[] = [];
   private dead = false;
   private statementsExecuted = 0;
+  // D2 — see this file's own top-of-file doc comment on TxState.Snapshot.
+  // `snapshotSeq` is only meaningful once `snapshotAnchored` is true;
+  // both reset to their initial values on COMMIT/ROLLBACK.
+  private snapshotSeq: number | undefined;
+  private snapshotAnchored = false;
+  // D2, test-only — see this file's own top-of-file doc comment on the
+  // pause mechanism. One-shot: consumed the first time the threshold is
+  // reached, never fires again on this same connection.
+  private pauseConsumed = false;
 
   constructor(
     private readonly state: FakeStoreState,
@@ -140,11 +202,26 @@ export class FakeConnectionImpl implements FakeConnection {
           "this transaction's own uncommitted buffer was discarded",
       );
     }
+    if (
+      !this.pauseConsumed &&
+      this.options.pauseAfterStatements !== undefined &&
+      this.statementsExecuted === this.options.pauseAfterStatements &&
+      this.options.pauseGate
+    ) {
+      this.pauseConsumed = true;
+      await this.options.pauseGate;
+    }
     this.statementsExecuted += 1;
 
     const normalized = sql.trim().toUpperCase();
     if (normalized === 'BEGIN') {
       this.txState = TxState.Open;
+      return { rows: [], rowCount: 0 };
+    }
+    if (normalized === SNAPSHOT_BEGIN) {
+      this.txState = TxState.Snapshot;
+      this.snapshotAnchored = false;
+      this.snapshotSeq = undefined;
       return { rows: [], rowCount: 0 };
     }
     if (normalized === 'COMMIT') {
@@ -153,6 +230,8 @@ export class FakeConnectionImpl implements FakeConnection {
       for (const op of this.pending) op(this.state, commitSeq);
       this.pending = [];
       this.txState = TxState.Idle;
+      this.snapshotAnchored = false;
+      this.snapshotSeq = undefined;
       // Postgres releases every transaction-scoped advisory lock this
       // session holds at COMMIT, unconditionally — not just ones acquired
       // in exactly this statement sequence. Session-scoped locks (the
@@ -164,11 +243,23 @@ export class FakeConnectionImpl implements FakeConnection {
     if (normalized === 'ROLLBACK') {
       this.pending = [];
       this.txState = TxState.Idle;
+      this.snapshotAnchored = false;
+      this.snapshotSeq = undefined;
       // Postgres releases xact-scoped advisory locks on ROLLBACK exactly
       // as it does on COMMIT — see the COMMIT branch's own comment above.
       releaseLocksForConnection(this.state.locks, this.connectionId, 'xact');
       return { rows: [], rowCount: 0 };
     }
+
+    // D2 — REPEATABLE READ's snapshot anchors at the transaction's first
+    // *real* query, never at BEGIN itself (see this file's own top-of-file
+    // doc comment). This is that anchor point: the first non-transaction-
+    // control statement reached while in Snapshot mode.
+    if (this.txState === TxState.Snapshot && !this.snapshotAnchored) {
+      this.snapshotSeq = this.state.nextCommitSeq - 1;
+      this.snapshotAnchored = true;
+    }
+    const visibleAsOf = this.txState === TxState.Snapshot ? this.snapshotSeq : undefined;
 
     const key = normalizeSql(sql);
 
@@ -206,6 +297,16 @@ export class FakeConnectionImpl implements FakeConnection {
 
     const handler = lookupShape(sql);
     const bufferOp = (op: PendingOp): void => {
+      if (this.txState === TxState.Snapshot) {
+        // Read-only, enforced by construction, not just left as an
+        // unstated assumption — see this file's own top-of-file doc
+        // comment. Nothing in productionCheck's real call surface ever
+        // reaches here; this exists to fail loudly if that ever changes.
+        throw new Error(
+          'DST fake connection: a write was attempted inside a REPEATABLE READ READ ONLY ' +
+            'snapshot transaction — real Postgres would reject this too',
+        );
+      }
       if (this.txState === TxState.Open) {
         this.pending.push(op);
         return;
@@ -223,7 +324,7 @@ export class FakeConnectionImpl implements FakeConnection {
     // runtime-verified shape — matches the real `pg` driver's own
     // `.query<Row>(...)` exactly: it doesn't validate the requested
     // generic against what actually came back either.
-    return handler({ state: this.state, params, bufferOp }) as FakeQueryResult<Row>;
+    return handler({ state: this.state, params, bufferOp, visibleAsOf }) as FakeQueryResult<Row>;
   }
 
   release(): void {

@@ -91,7 +91,7 @@
  * D-092).** Every read this file issues on behalf of one `productionCheck`
  * call — every `sqlRelationMembershipWithWitness` frontier/tuple fetch,
  * every `listTupleSubjects` call for a `tupleToUserset` hop — now runs
- * inside one `REPEATABLE READ` transaction, pinned to one `pg.PoolClient`
+ * inside one `REPEATABLE READ` transaction, pinned to one connection
  * acquired once at the top of `productionCheck` and released once at the
  * bottom. Before this, every one of those reads was its own independent,
  * autocommit `pool.query()` call with no shared snapshot at all: a
@@ -116,8 +116,22 @@
  * `productionCheck`'s own doc comment for the one deliberate, disclosed gap
  * this fix does *not* close (schema-config reads, `getConfig`, stay on the
  * plain `pool`, outside this transaction — see that doc comment for why).
+ *
+ * **`pool: ConnectionSource`/`client: QueryExecutor`, not concrete
+ * `pg.Pool`/`pg.PoolClient` — DST D2 (`docs/DECISIONS.md` D-099).** The
+ * same non-breaking narrowing D0/D1 already applied to `src/store/tuples
+ * .ts`/`tokens.ts`/`publish.ts`/`migrate.ts`: a real `Pool`/`PoolClient`
+ * still satisfies these structurally, so every real caller (`authz
+ * check`, `POST /check`, `src/audit/checks.ts`) keeps working with zero
+ * changes. **This narrowing is orthogonal to `docs/DECISIONS.md` D-022**,
+ * which forbids the *reference* resolver (`src/resolve/reference/
+ * resolver.ts`) sharing code with the *production* one — parameterizing
+ * which physical driver answers this file's own storage calls touches
+ * neither side of that isolation boundary: nothing here imports from or
+ * shares code with `src/resolve/reference/`, and D-022's own rule was
+ * never about how *this* file talks to Postgres.
  */
-import type { Pool, PoolClient } from 'pg';
+import type { ConnectionSource, QueryExecutor } from '../../store/query-executor.js';
 
 import { env } from '../../config/env.js';
 import type { NamespaceConfig, RewriteRule } from '../../schema/dsl/types.js';
@@ -346,17 +360,19 @@ type ProductionOutcome =
  *
  * `pool` and `client` are deliberately two separate fields, used for two
  * deliberately different things (full-repo audit finding #1,
- * `docs/DECISIONS.md` D-092): `client` is the one `pg.PoolClient` whose
+ * `docs/DECISIONS.md` D-092): `client` is the one connection whose
  * `REPEATABLE READ` transaction every `relation_tuples`/`write_log` read
  * in this check runs inside — `sqlRelationMembershipWithWitness` and
  * `listTupleSubjects` both take it, never `pool`. `pool` is kept only for
  * `getConfig`'s own `namespace_configs` lookups, which deliberately stay
  * *outside* that transaction — see `productionCheck`'s own doc comment for
- * why that's a disclosed, reasoned scoping choice, not an oversight.
+ * why that's a disclosed, reasoned scoping choice, not an oversight (and,
+ * since DST D2, no longer a *type*-forced one either — see that doc
+ * comment).
  */
 interface WalkContext {
-  pool: Pool;
-  client: PoolClient;
+  pool: ConnectionSource;
+  client: QueryExecutor;
   maxDepth: number;
   schemaCache: Map<string, NamespaceConfig | null>;
   depthReached: { value: number };
@@ -622,7 +638,7 @@ interface TupleSubjectRow {
  * *within* whatever it points to is a separate question, resolved by
  * recursing `computedUserset` on the new object.
  *
- * Takes `client` (this check's own `REPEATABLE READ`-pinned `PoolClient`),
+ * Takes `client` (this check's own `REPEATABLE READ`-pinned connection),
  * never `pool` — full-repo audit finding #1, `docs/DECISIONS.md` D-092.
  * This is exactly the kind of `relation_tuples` read that fix exists for:
  * without it, a `tupleToUserset` hop's own subject list could be read from
@@ -631,7 +647,7 @@ interface TupleSubjectRow {
  * check.
  */
 async function listTupleSubjects(
-  client: PoolClient,
+  client: QueryExecutor,
   object: EntityRef,
   relation: string,
 ): Promise<EntityRef[]> {
@@ -668,7 +684,7 @@ interface FrontierRow {
  * backstop. The seed row (`depth = 0`, the starting `(object, relation)`
  * itself) is always present, even with zero recursion.
  *
- * Takes `client` (this check's own `REPEATABLE READ`-pinned `PoolClient`),
+ * Takes `client` (this check's own `REPEATABLE READ`-pinned connection),
  * never `pool` — full-repo audit finding #1, `docs/DECISIONS.md` D-092. See
  * `productionCheck`'s own doc comment for the transaction this runs inside.
  *
@@ -735,7 +751,7 @@ interface FrontierRow {
  * per the reachability argument above.
  */
 async function fetchReachableFrontier(
-  client: PoolClient,
+  client: QueryExecutor,
   object: EntityRef,
   relation: string,
   maxDepth: number,
@@ -797,7 +813,7 @@ interface FrontierTupleRow {
 /**
  * Every real `relation_tuples` row stored on any of `frontier`'s nodes, in
  * one query. Takes `client` (this check's own `REPEATABLE READ`-pinned
- * `PoolClient`), never `pool` — the exact query pair (this one, and the
+ * connection), never `pool` — the exact query pair (this one, and the
  * `fetchReachableFrontier` call that produced `frontier`) full-repo audit
  * finding #1's concrete counterexample was about: without a shared
  * snapshot, a userset edge this function's caller already saw could be
@@ -806,7 +822,7 @@ interface FrontierTupleRow {
  * comment for the transaction this now runs inside.
  */
 async function fetchTuplesOnFrontier(
-  client: PoolClient,
+  client: QueryExecutor,
   frontier: ReadonlyMap<string, FrontierRow>,
 ): Promise<FrontierTupleRow[]> {
   if (frontier.size === 0) return [];
@@ -945,7 +961,7 @@ type SqlRelationOutcome =
  * witness reconstruction changes either guarantee, since both live inside
  * `fetchReachableFrontier`'s own recursive CTE, untouched.
  *
- * Takes `client` (this check's own `REPEATABLE READ`-pinned `PoolClient`),
+ * Takes `client` (this check's own `REPEATABLE READ`-pinned connection),
  * never `pool` — full-repo audit finding #1, `docs/DECISIONS.md` D-092.
  * The frontier fetch and the tuple-on-frontier fetch immediately below are
  * exactly the query *pair* that finding's own concrete counterexample
@@ -957,7 +973,7 @@ type SqlRelationOutcome =
  * transaction this now runs inside.
  */
 async function sqlRelationMembershipWithWitness(
-  client: PoolClient,
+  client: QueryExecutor,
   object: EntityRef,
   relation: string,
   subject: EntityRef,
@@ -996,14 +1012,24 @@ async function sqlRelationMembershipWithWitness(
  * observed `token` — full-repo audit finding #1, `docs/DECISIONS.md`
  * D-092.
  *
- * Deliberately **not** a call to `src/store/tokens.ts`'s
- * `assertTokenObserved` (also deliberately not imported for that reason):
- * that function takes a `Pool`, not a `PoolClient` — structurally, a
- * `pg.PoolClient` is not assignable to `pg.Pool` (it's missing `Pool`-only
- * members like `totalCount`), so it cannot run *inside* this specific
- * transaction's snapshot without changing that function's own exported
- * signature, which is outside this fix's file scope (see this project's
- * own `docs/DECISIONS.md` D-092 entry for that disclosed tradeoff).
+ * Still **not** a call to `src/store/tokens.ts`'s `assertTokenObserved`
+ * (also still not imported for that reason), but the *reason* has changed
+ * since this function was first written — worth stating precisely rather
+ * than leaving stale reasoning in place (`docs/DECISIONS.md` D-092's own
+ * "Revisit if" flagged exactly this: "if `assertTokenObserved`... [is]
+ * ever widened to a smaller structural type... `assertTokenObservedOnSnapshot`
+ * ... should be deleted and replaced with a direct call"). That widening
+ * happened in D0 (`src/store/tokens.ts`'s `assertTokenObserved` now takes
+ * `QueryExecutor`, satisfied by both `Pool` and this function's own
+ * `client` parameter) — so the original *structural* barrier is gone, and
+ * `assertTokenObserved(client, atToken)` would type-check today. This
+ * function is kept separate anyway, by deliberate choice now rather than
+ * by type-system necessity: its own error message names *this check's own
+ * transaction snapshot* specifically (see the thrown message below),
+ * distinguishing a rare, expected-possible snapshot-anchoring race from
+ * the pool-level pre-check `productionCheck` already ran moments earlier —
+ * collapsing the two would silently lose that distinction for anyone
+ * debugging why the second check failed when the first one just passed.
  * `productionCheck` still calls the real, unchanged `assertTokenObserved
  * (pool, atToken)` first — before ever opening this transaction — for its
  * already-tested malformed-token validation (`NaN`, negative, non-integer)
@@ -1027,7 +1053,7 @@ async function sqlRelationMembershipWithWitness(
  * "a real, testable assertion rather than an assumption" — `docs/
  * CONSISTENCY.md`'s own words for `assertTokenObserved` itself.
  */
-async function assertTokenObservedOnSnapshot(client: PoolClient, token: number): Promise<void> {
+async function assertTokenObservedOnSnapshot(client: QueryExecutor, token: number): Promise<void> {
   const { rows } = await client.query<{ max_token: string | null }>(
     'select max(token) as max_token from write_log',
   );
@@ -1060,7 +1086,7 @@ async function assertTokenObservedOnSnapshot(client: PoolClient, token: number):
  * this whole check performs — across however many `resolve`/`evalRewrite`
  * recursions and `sqlRelationMembershipWithWitness`/`listTupleSubjects`
  * calls a union/intersection/exclusion/tupleToUserset tree needs — runs on
- * one `PoolClient` acquired here, inside one `REPEATABLE READ` transaction
+ * one connection acquired here, inside one `REPEATABLE READ` transaction
  * opened here and committed (or rolled back) here. `REPEATABLE READ`, not
  * `SERIALIZABLE`: this transaction only ever reads, so it needs Postgres's
  * snapshot-isolation guarantee (one consistent point in time for every read
@@ -1069,11 +1095,16 @@ async function assertTokenObservedOnSnapshot(client: PoolClient, token: number):
  * for, for no benefit a read-only transaction could ever collect on.
  *
  * **One disclosed, deliberate gap: `getConfig`'s `namespace_configs`
- * lookups stay on the plain `pool`, outside this transaction.** Two
- * reasons, not one. First, structural: `getLatestNamespaceConfig`
- * (`src/schema/publish.ts`) takes a `Pool`, and widening that signature is
- * outside this fix's file scope (disclosed, not silently worked around —
- * see `docs/DECISIONS.md` D-092). Second, and more load-bearing: the risk
+ * lookups stay on the plain `pool`, outside this transaction.** Originally
+ * two reasons; now one. The original structural one — `getLatestNamespaceConfig`
+ * (`src/schema/publish.ts`) took a `Pool`, and widening that signature was
+ * outside this fix's own file scope — no longer applies: DST D0 already
+ * narrowed `getLatestNamespaceConfig` to the same `QueryExecutor` shape
+ * this file's own `pool: ConnectionSource` satisfies (`docs/DECISIONS.md`
+ * D-097), and D2 narrowed this file's own types to match, so nothing
+ * structurally prevents running `getConfig` inside the `REPEATABLE READ`
+ * transaction today. It still deliberately doesn't, because the second,
+ * more load-bearing reason was always sufficient on its own: the risk
  * this transaction closes for `relation_tuples` — two reads observing
  * *different* real moments in the database's history — is already
  * narrower for schema config than it looks. `WalkContext.schemaCache`
@@ -1090,7 +1121,7 @@ async function assertTokenObservedOnSnapshot(client: PoolClient, token: number):
  * `relation_tuples`.
  */
 export async function productionCheck(
-  pool: Pool,
+  pool: ConnectionSource,
   subject: EntityRef,
   object: EntityRef,
   relationOrPermission: string,
