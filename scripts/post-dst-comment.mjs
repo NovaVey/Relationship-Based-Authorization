@@ -71,7 +71,18 @@ if (typeof prNumberRaw !== 'number' || !Number.isInteger(prNumberRaw) || prNumbe
     'no valid pull_request.number in the GitHub event payload — this script only runs in a pull_request-triggered job',
   );
 }
-const prNumber = prNumberRaw;
+// Re-validated as a string against a strict digit-only pattern, immediately
+// before use — not redundant with the numeric check above, which only
+// proves `prNumberRaw` is *some* positive integer, not that the exact text
+// interpolated into the request URLs below is free of anything but digits
+// (a CodeQL finding flagged this file-derived value reaching `fetch()`
+// below; this closes the gap explicitly rather than arguing the numeric
+// guard already covers it). `prNumber` — this regex-validated string, never
+// `prNumberRaw` — is what every URL below is built from.
+const prNumber = String(prNumberRaw);
+if (!/^[1-9][0-9]*$/.test(prNumber)) {
+  throw new Error(`pull_request.number "${prNumber}" is not a plain positive integer`);
+}
 
 const raw = readFileSync(reportPath, 'utf8');
 if (raw.trim().length === 0) {
