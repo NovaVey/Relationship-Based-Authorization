@@ -96,6 +96,38 @@ grant always failing the run outright**, regardless of how rare it was,
 and a false deny reported but never blocking on its own — the asymmetry
 is deliberate, because the two failure modes are not equally dangerous.
 
+## Also proven: the write path survives a crash mid-transaction, and every advisory lock actually blocks
+
+Differential fuzzing (above) proves the **check engine** never grants a
+permission no real path supports. A second, complementary effort —
+deterministic simulation testing (DST) — proves the **write path** itself
+stays correct under faults an ordinary integration test can't reach on
+demand: a connection dying mid-transaction, two writers genuinely racing
+for the same advisory lock. It runs against an in-memory fake at the
+storage seam, never inside real Postgres — Postgres isn't crash-injectable
+or byte-for-byte replayable from outside its own process the way this
+project's own code is, and claiming otherwise would be the kind of
+overclaim this project's soundness language already refuses to make (see
+**[`docs/DST-PROPOSAL.md`](docs/DST-PROPOSAL.md)**'s full design and
+`docs/DECISIONS.md` D-095 for why). Two phases have landed so far, each
+surfacing a real, previously-undiscovered bug, not just re-proving
+something already believed:
+
+- **D0** — a crash injected between the tuple-row insert and its
+  write-log insert leaves neither behind. Building faithful crash
+  injection exposed a real one live: a naive rollback-on-error handler
+  with no inner try/catch silently replaced the real failure with the
+  rollback's own whenever a genuinely dead connection couldn't run
+  `ROLLBACK` either (D-097).
+- **D1** — a real, Promise-based advisory-lock engine (a FIFO wait queue,
+  not a boolean flag or polling) generalizes the D-083 write-log-lock
+  regression test across seeds, and proves a session-scoped lock
+  (`migrate.ts`'s migrations lock) genuinely auto-releases when its
+  holding connection dies (D-098).
+
+`npx vitest run test/unit/store/dst/` runs all of it — no Postgres, no
+Docker, identical result every time.
+
 ## Try it yourself — under 10 minutes, from a clean clone
 
 ```bash
@@ -211,10 +243,11 @@ authenticates them is out of scope entirely.
 
 What this project actually contributes is the proof methodology —
 differential fuzzing against an independent oracle, asymmetric verdicts
-that treat an over-grant as categorically worse than an under-grant, and
-resolution-path audit trails for every decision — applied carefully to a
-well-understood model (Zanzibar), not a novel authorization model of its
-own. It demonstrates the ability to design, build, and prove correct
+that treat an over-grant as categorically worse than an under-grant,
+resolution-path audit trails for every decision, and deterministic
+simulation testing of the write path itself under crash/lock faults (see
+above) — applied carefully to a well-understood model (Zanzibar), not a
+novel authorization model of its own. It demonstrates the ability to design, build, and prove correct
 relationship-based authorization infrastructure end to end. If you want
 this done against your own product's real schema rather than this
 repository's example one, see **[`docs/DELIVERY.md`](docs/DELIVERY.md)**.
@@ -262,6 +295,7 @@ src/
   config/    validated environment loading
   schema/    the namespace DSL — parser, compiler, publish
   store/     migrations, the tuple store, consistency tokens
+    dst/     deterministic simulation testing — the in-memory fake storage seam (docs/DST-PROPOSAL.md)
   resolve/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
     production/  the real, SQL-backed check engine
