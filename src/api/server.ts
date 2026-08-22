@@ -207,6 +207,68 @@ async function runOrInfrastructureError<T>(
   }
 }
 
+/**
+ * Replaces the literal `trustProxy: 1` D-082 originally shipped — Fastify
+ * 5.12.1 silently dropped `number` from `trustProxy`'s accepted type, and
+ * it's not a types-only change: verified live (`docs/DECISIONS.md` D-104)
+ * that the underlying hop-counting mechanism `trustProxy: 1` relied on was
+ * removed from Fastify's own runtime in that release too — a real socket
+ * server with `trustProxy: 1` on Fastify 5.12.1 silently ignores
+ * `X-Forwarded-For` entirely, always resolving `request.ip` to the raw
+ * socket peer (the reverse proxy's own address, never the real client's).
+ * In this project's real single-reverse-proxy deployment (Railway), that
+ * collapses every distinct caller's `@fastify/rate-limit` budget into one
+ * shared bucket — the exact failure class D-065/D-082 already fixed once,
+ * reintroduced by the framework itself, silently, with no error anywhere.
+ *
+ * This function reimplements `trustProxy: 1`'s own semantics directly,
+ * using the `TrustProxyFunction` form Fastify 5.12.1 still accepts
+ * (`(address, hop) => boolean`, forwarded verbatim to `@fastify/proxy-addr`
+ * — Fastify itself invokes this once per address in the
+ * `[socket, ...X-Forwarded-For entries nearest-first]` chain, walking
+ * outward from the socket; `true` means "this address is itself a trusted
+ * proxy, keep walking past it," `false` means "stop here — this address is
+ * the real client," and the walk never proceeds past a `false`). Hop 0 is
+ * always the socket's own peer address; trusting it as a proxy (and
+ * nothing past it) is exactly "trust one real hop" — the one reverse proxy
+ * this deployment shape actually has, per `serve.ts`'s own binding
+ * rationale, never a second, client-controlled hop.
+ *
+ * `Boolean(address)` guards hop 0 specifically: only treat the socket as a
+ * trusted proxy if we genuinely have its address. Fastify 5.12.1's own
+ * behavior change was motivated by exactly the inverse case — a socket
+ * whose `remoteAddress` is itself undefined/null (documented upstream as
+ * an IISNode-on-Windows edge case) previously still had its
+ * `X-Forwarded-For` trusted, which is unsafe: if we don't even know who's
+ * connected to us, we have no basis to trust what they claim about anyone
+ * upstream of them either. This guard makes that fail closed here too —
+ * an unknown socket address now falls back to that (missing) address
+ * directly, exactly like Fastify 5.12.1's own hardened built-in behavior,
+ * rather than trusting the header regardless.
+ *
+ * **Verified live, not assumed:** fetched both `fastify@5.12.0` and
+ * `fastify@5.12.1` tarballs directly and diffed them (`docs/DECISIONS.md`
+ * D-104) — the only relevant change is `fastify.d.ts` dropping `number`
+ * from `trustProxy`'s type, matching a real, deliberate runtime rewrite in
+ * the same release. This exact function was then run against a real
+ * listening Fastify 5.12.1 server, hit with real HTTP requests, and its
+ * `request.ip`/`request.ips` output compared byte-for-byte against a real
+ * Fastify 5.12.0 server configured with the literal `trustProxy: 1` for
+ * five scenarios: a single real proxy hop; a different single real hop; a
+ * client-fabricated prefix ahead of the real hop (D-082's own original
+ * repro — `X-Forwarded-For: 6.6.6.6, 9.9.9.9` must resolve to `9.9.9.9`,
+ * never the fabricated `6.6.6.6`); no header at all (direct connection);
+ * and a longer fabricated multi-hop chain. All five matched exactly. The
+ * one claim this function makes that could **not** be verified the same
+ * way: `light-my-request`'s own `.inject()` always substitutes its own
+ * default remote address whenever a falsy one is passed, so the genuinely-
+ * undefined-socket-address path above rests on reading Fastify's own
+ * source and the `@fastify/proxy-addr` contract, not an executed
+ * reproduction — disclosed here rather than left silently unverified.
+ */
+export const trustExactlyOneRealProxyHop = (address: string, hop: number): boolean =>
+  hop === 0 && Boolean(address);
+
 export interface BuildServerOptions {
   /**
    * Overrides the Fastify/pino request logger this function would otherwise
@@ -244,28 +306,33 @@ export async function buildServer(
   pool: Pool,
   options: BuildServerOptions = {},
 ): Promise<FastifyInstance> {
-  // `trustProxy: 1` (D-065, corrected by full-repo audit finding — MEDIUM,
-  // 2026-08-16, see docs/DECISIONS.md D-065's own "Update:" note) —
-  // `serve.ts` binds `0.0.0.0` specifically so this process can be reached
-  // "from outside the process (a container, a platform like Railway)" (see
-  // that file's own doc comment) — a platform-hosted deployment reached
-  // this way typically sits behind exactly ONE reverse proxy/load balancer
-  // hop, not an arbitrary chain, and never answers client sockets directly.
-  // Without any trust, every request's rate-limit key (`request.ip`, the
-  // default `keyGenerator`) resolves to the proxy's own address for every
-  // caller alike, collapsing every distinct real client onto one shared
-  // budget. `true` was the original fix for that, but `true` means "trust
+  // `trustProxy: trustExactlyOneRealProxyHop` (originally the literal
+  // `trustProxy: 1`, D-082; replaced with this function in D-104 when
+  // Fastify 5.12.1 removed numeric `trustProxy` support at the runtime
+  // level, not just in its types — see that function's own doc comment
+  // above for the full mechanism and live verification) — `serve.ts` binds
+  // `0.0.0.0` specifically so this process can be reached "from outside the
+  // process (a container, a platform like Railway)" (see that file's own
+  // doc comment) — a platform-hosted deployment reached this way typically
+  // sits behind exactly ONE reverse proxy/load balancer hop, not an
+  // arbitrary chain, and never answers client sockets directly. Without any
+  // trust, every request's rate-limit key (`request.ip`, the default
+  // `keyGenerator`) resolves to the proxy's own address for every caller
+  // alike, collapsing every distinct real client onto one shared budget.
+  // `true` was the original D-065 fix for that, but `true` means "trust
   // every hop `X-Forwarded-For` claims," including hops the *client itself*
   // prepends ahead of the one real proxy-appended hop — a caller can send
   // `X-Forwarded-For: <anything>, <real-proxy-ip>` and have `request.ip`
   // resolve to their own fabricated value, defeating every rate limit in
   // this file (confirmed live: `trustProxy: true` resolves such a request
-  // to the client's own spoofed address; `trustProxy: 1` — trust exactly
-  // one hop from the right, i.e. the address the actual reverse proxy
-  // appended — resolves it correctly regardless of what the client
-  // prepends). `1` is the fix: it trusts precisely the one real hop this
-  // deployment shape has, never an attacker-controlled prefix. See
-  // `docs/DECISIONS.md` D-065 for the full history and revisit condition.
+  // to the client's own spoofed address; trusting exactly one hop from the
+  // right, i.e. the address the actual reverse proxy appended — resolves it
+  // correctly regardless of what the client prepends). Trusting precisely
+  // the one real hop this deployment shape has, never an attacker-
+  // controlled prefix, is the fix — D-082 first shipped it as the literal
+  // `1`, D-104 re-expresses the identical semantics as a function once
+  // Fastify's own `number` support was removed. See `docs/DECISIONS.md`
+  // D-082 and D-104 for the full history and revisit conditions.
   // `bodyLimit` (D-067's own disclosed-but-not-yet-implemented "defense in
   // depth" recommendation, docs/DECISIONS.md): a hard ceiling on every
   // request body, enforced at the HTTP content-type-parsing layer, before
@@ -288,7 +355,7 @@ export async function buildServer(
   // tighter, field-specific ceiling layered on top of this one.
   const app = Fastify({
     logger: options.logger ?? { level: env.LOG_LEVEL },
-    trustProxy: 1,
+    trustProxy: trustExactlyOneRealProxyHop,
     bodyLimit: 262_144,
   });
 
@@ -495,8 +562,8 @@ export async function buildServer(
    * instance, never a module-level global that would leak state across
    * separate `buildServer()` calls in the same process (every test file in
    * this project builds a fresh app per test). 1000 requests per rolling
-   * 60-second window per `request.ip` (the same `trustProxy: 1`-resolved
-   * value every other limiter in this file already uses) — deliberately
+   * 60-second window per `request.ip` (the same `trustExactlyOneRealProxyHop`
+   * -resolved value every other limiter in this file already uses) — deliberately
    * far more generous than `writeRateLimit`'s 20/min or
    * `gatedReadRateLimit`'s 200/min: this exists only to bound a genuine
    * flood (D-065's own scenario), never to police normal admin traffic,
