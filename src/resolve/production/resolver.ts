@@ -1168,7 +1168,25 @@ export async function productionCheck(
       ? { allowed: true, path: outcome.proof, depth: depthReached.value }
       : { allowed: false, depth: depthReached.value };
   } catch (err) {
-    await client.query('ROLLBACK');
+    // The ROLLBACK call's own failure must never replace `err` — the exact
+    // bug class found and fixed via DST crash-injection work in
+    // src/store/tuples.ts, src/schema/publish.ts, and src/store/migrate.ts
+    // (docs/DECISIONS.md D-097/D-098), missed here until the second
+    // full-repo audit (D-106): a connection that died mid-check can't run
+    // a ROLLBACK any more than it could run anything else, so a naive
+    // `await client.query('ROLLBACK')` here would throw a second, different
+    // error that silently masks the real one this catch block is already
+    // propagating — an operator would see "connection terminated" instead
+    // of whatever actually made the check fail, at exactly the moment the
+    // real cause matters most.
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Swallowed deliberately — see comment above. Postgres releases the
+      // connection (and anything it held) on its own once it's actually
+      // gone; there is nothing left to clean up here that matters more
+      // than `err` reaching the caller unchanged.
+    }
     throw err;
   } finally {
     client.release();

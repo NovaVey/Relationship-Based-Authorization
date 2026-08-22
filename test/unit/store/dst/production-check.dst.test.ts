@@ -134,6 +134,58 @@ describe('DST D2 — productionCheck against the in-memory fake, no Postgres (ba
   });
 });
 
+// ---------------------------------------------------------------------------
+// D-106 (second full-repo audit, findings #2/#10) — productionCheck's catch
+// block ran an unprotected `ROLLBACK` on a possibly-already-dead connection,
+// which could silently replace the real error with a misleading one. The
+// exact bug class D0's crash-injection work already found and fixed for
+// writeTuple/deleteTuple/publishOne/runMigrations (docs/DECISIONS.md
+// D-097/D-098) — this file's own `armNextConnectionCrash` gives the same
+// mechanism direct access to productionCheck's transaction for the first
+// time.
+// ---------------------------------------------------------------------------
+
+describe('D-106 — a connection that dies after BEGIN but before COMMIT never has its own real error masked by a ROLLBACK failure', () => {
+  it('the-error-productionCheck-throws-is-the-original-crash-not-a-rollback-failure-error', async () => {
+    const { source } = freshPlainSource();
+    // Statement 0 is `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`
+    // (resolver.ts's own first query) — crashAfterStatements: 1 lets that
+    // one statement succeed, then crashes the very next query productionCheck
+    // issues, reproducing "BEGIN succeeded, the check itself then failed."
+    source.armNextConnectionCrash(1);
+
+    await expect(
+      productionCheck(
+        source,
+        { ns: 'user', id: 'alice' },
+        { ns: 'document', id: 'readme' },
+        'view',
+      ),
+    ).rejects.toThrow(/simulated crash — connection terminated mid-statement/);
+  });
+
+  it('control-the-same-crash-point-would-throw-a-different-rollback-failure-message-if-the-catch-blocks-own-rollback-were-unprotected', async () => {
+    // Not a test of production code — a direct proof that this file's own
+    // fake connection really does behave the way the finding/fix above
+    // assumes: once dead, every subsequent `.query()` (including the
+    // `ROLLBACK` an unprotected catch block would have issued) throws a
+    // second, different error. If this ever stopped being true, the
+    // "not masked" assertion above would no longer mean anything.
+    const { source } = freshPlainSource();
+    source.armNextConnectionCrash(1);
+    const client = await source.connect();
+    await expect(
+      client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'),
+    ).resolves.toBeDefined();
+    await expect(client.query('SELECT 1')).rejects.toThrow(
+      /simulated crash — connection terminated mid-statement/,
+    );
+    await expect(client.query('ROLLBACK')).rejects.toThrow(
+      /query issued on a connection that has already crashed/,
+    );
+  });
+});
+
 /**
  * D2's own flagship exit-criterion tests — full reasoning in
  * `docs/DECISIONS.md` D-099. `productionCheck`'s real statement sequence on

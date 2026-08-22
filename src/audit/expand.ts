@@ -45,11 +45,10 @@
  * hangs" fail-check this project holds every termination claim to
  * (D-024/D-027/D-029).
  */
-import type { Pool } from 'pg';
-
 import { env } from '../config/env.js';
 import type { NamespaceConfig, RewriteRule } from '../schema/dsl/types.js';
 import { getLatestNamespaceConfig } from '../schema/publish.js';
+import type { ConnectionSource, QueryExecutor } from '../store/query-executor.js';
 
 /** An object or subject reference — `ns:id`. */
 export interface EntityRef {
@@ -126,11 +125,39 @@ export type ExpandNode =
  * exactly 1.
  */
 interface WalkContext {
-  pool: Pool;
+  pool: ConnectionSource;
+  /**
+   * One connection, pinned for the life of this `expand()` call, running
+   * inside one `REPEATABLE READ` transaction (D-107) — every
+   * `relation_tuples` read (`fetchTuplesOn`) goes through this, never
+   * `ctx.pool` directly, so the whole walk sees one consistent MVCC
+   * snapshot. `getConfig` below deliberately still uses `ctx.pool`, not
+   * this — see that function's own doc comment for why, mirroring
+   * `src/resolve/production/resolver.ts`'s identical, already-reasoned
+   * `getConfig` gap exactly.
+   */
+  client: QueryExecutor;
   maxDepth: number;
   schemaCache: Map<string, NamespaceConfig | null>;
 }
 
+/**
+ * Deliberately still reads through `ctx.pool`, not `ctx.client`'s pinned
+ * transaction (D-107) — mirroring `src/resolve/production/resolver.ts`'s
+ * own identical, already-reasoned `getConfig` gap exactly. The risk the
+ * transaction above closes for `relation_tuples` (two reads observing
+ * *different* real moments in the database's history) is already narrower
+ * for schema config than it looks: `WalkContext.schemaCache` (unchanged)
+ * means a given namespace's config is fetched at most once per `expand()`
+ * call however many times the walk revisits that namespace, so the
+ * dangerous case — the *same* namespace observed at two *different*
+ * published versions within one call — was already structurally
+ * impossible before this fix and remains so. What's left unclosed is a
+ * strictly weaker property (two *different* namespaces each read as of a
+ * very slightly different moment if a schema publish, rare and
+ * admin-gated, lands mid-walk) — not the phantom-witness scenario D-107
+ * exists to close, which is specifically about `relation_tuples`.
+ */
 async function getConfig(ctx: WalkContext, ns: string): Promise<NamespaceConfig | null> {
   const cached = ctx.schemaCache.get(ns);
   if (cached !== undefined) return cached;
@@ -160,11 +187,11 @@ interface RelationTupleRow {
 }
 
 async function fetchTuplesOn(
-  pool: Pool,
+  client: QueryExecutor,
   object: EntityRef,
   relation: string,
 ): Promise<RelationTupleRow[]> {
-  const { rows } = await pool.query<RelationTupleRow>(
+  const { rows } = await client.query<RelationTupleRow>(
     `select subject_ns, subject_id, subject_relation
      from relation_tuples
      where object_ns = $1 and object_id = $2 and relation = $3`,
@@ -220,7 +247,7 @@ async function expandRelation(
   visiting: Set<string>,
   depth: number,
 ): Promise<ExpandNode> {
-  const rows = await fetchTuplesOn(ctx.pool, object, relation);
+  const rows = await fetchTuplesOn(ctx.client, object, relation);
   const directSubjects: EntityRef[] = [];
   const usersetRows = rows.filter(
     (row): row is RelationTupleRow & { subject_relation: string } => row.subject_relation !== null,
@@ -274,7 +301,7 @@ async function expandRewrite(
       return { kind: 'exclusion', object, base, subtract };
     }
     case 'tupleToUserset': {
-      const rows = await fetchTuplesOn(ctx.pool, object, rule.relation);
+      const rows = await fetchTuplesOn(ctx.client, object, rule.relation);
       const children = await mapSequential(rows, async (row) => {
         const through: EntityRef = { ns: row.subject_ns, id: row.subject_id };
         const expansion = await expandName(ctx, through, rule.computedUserset, visiting, depth + 1);
@@ -300,14 +327,48 @@ async function expandRewrite(
  * fail-closed discipline: those surface as `{ kind: 'undeclared' }` nodes,
  * not exceptions); a genuinely unreachable database still throws, same as
  * `productionCheck`.
+ *
+ * **One walk, one snapshot (second full-repo audit, finding #3; D-107).**
+ * Every `relation_tuples` read this walk issues now runs inside one
+ * `REPEATABLE READ` transaction, pinned to one connection acquired once
+ * here and released once at the bottom — exactly
+ * `src/resolve/production/resolver.ts`'s own D-092 fix, applied to the
+ * identical risk here: before this, every `fetchTuplesOn` call was its
+ * own independent, autocommit `pool.query()`, so a concurrent write
+ * landing between two of them (a deep tree issues dozens) could make the
+ * returned subject tree show members that never coexisted at any single
+ * real moment in the database's history — misleading for this project's
+ * own documented use of `authz expand` as a pre-change access-review
+ * gate. `pool: Pool` accepted here structurally satisfies
+ * `ConnectionSource` (D0's non-breaking narrowing, `docs/DECISIONS.md`),
+ * so no caller changes.
  */
 export async function expand(
-  pool: Pool,
+  pool: ConnectionSource,
   object: EntityRef,
   relationOrPermission: string,
   options: ExpandOptions = {},
 ): Promise<ExpandNode> {
   const maxDepth = options.maxDepth ?? env.CHECK_MAX_DEPTH;
-  const ctx: WalkContext = { pool, maxDepth, schemaCache: new Map() };
-  return expandName(ctx, object, relationOrPermission, new Set(), 0);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const ctx: WalkContext = { pool, client, maxDepth, schemaCache: new Map() };
+    const result = await expandName(ctx, object, relationOrPermission, new Set(), 0);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    // The ROLLBACK call's own failure must never replace `err` — the same
+    // bug class D-106 just fixed in resolver.ts's own identical catch
+    // block; guarded here from the start rather than shipped unguarded
+    // and found later.
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Swallowed deliberately — see comment above.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
