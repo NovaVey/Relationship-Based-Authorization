@@ -90,8 +90,8 @@ program
   .argument('<relation>', 'relation or permission name')
   .argument('<object>', "namespace:id, e.g. 'document:readme'")
   .option(
-    '--at-token <n>',
-    'pin the check to a consistency token returned by an earlier write/delete',
+    '--at-token <token>',
+    'pin the check to the opaque consistency token returned by an earlier write/delete',
   )
   .option('--path', 'print the real resolution path an ALLOWED result was reached through')
   .action(

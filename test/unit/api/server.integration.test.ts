@@ -36,6 +36,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { buildServer } from '../../../src/api/server.js';
 import { runMigrations } from '../../../src/store/migrate.js';
+import { decodeToken } from '../../../src/store/tokens.js';
 import { env } from '../../../src/config/env.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
@@ -213,7 +214,10 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
     expect(writeRes.statusCode).toBe(200);
     const writeBody = await parseBody(writeRes);
     expect(writeBody.created).toBe(true);
-    expect(typeof writeBody.token).toBe('number');
+    // Opaque, encoded (src/store/tokens.ts's encodeToken) — never a raw
+    // integer on the wire, though decodeToken still recovers one.
+    expect(typeof writeBody.token).toBe('string');
+    expect(Number.isInteger(decodeToken(writeBody.token))).toBe(true);
 
     // check — pinned to the write's own token (§6.3: a check pinned to a
     // token observes that write).
@@ -272,8 +276,10 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
     expect(deleteRes.statusCode).toBe(200);
     const deleteBody = await parseBody(deleteRes);
     expect(deleteBody.deleted).toBe(true);
-    expect(typeof deleteBody.token).toBe('number');
-    expect(deleteBody.token).toBeGreaterThan(writeBody.token);
+    expect(typeof deleteBody.token).toBe('string');
+    // Decode both to compare the real monotonicity property — the opaque
+    // strings themselves have no meaningful ordering.
+    expect(decodeToken(deleteBody.token)).toBeGreaterThan(decodeToken(writeBody.token));
 
     const recheckRes = await app.inject({
       method: 'POST',

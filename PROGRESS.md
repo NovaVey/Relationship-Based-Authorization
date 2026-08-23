@@ -2241,3 +2241,15 @@ Went through build spec §12's own ten-item checklist explicitly rather than ass
 `docs/INVARIANTS.md`'s "Dynamic invariants (DST)" section had said "not yet written here — this section is DST's own to add" since before DST's first commit — DST shipped in full (D0–D5) and nobody came back to fill it in. Found while re-grounding the repo's actual state for an unrelated review. Five dynamic invariants written, each cited against a real, verified-against-the-actual-file test: write atomicity under crash (D0), advisory-lock correctness under crash (D1), no phantom witness under concurrency (D2, generalizing D-092), the frontier BFS/real-Postgres equivalence (D3), and the shared fault-injection scheduler (D4). Explicitly disclaims overclaiming a parallel to the still-not-started temporal-safety layer.
 
 **Verification:** documentation-only; `npx prettier --check .` clean. Full account: `docs/DECISIONS.md` D-127.
+
+## Consistency token is now opaque on the wire (D-128)
+
+**Owner:** the main agent, directly, on `main`.
+
+`write_log.token` was exposed to every caller as a plain integer — `authz tuple write` printed it raw, the API returned it raw, `--at-token`/`atToken` both took it back raw. Nothing about that representation was ever a promise to callers, but exposing it directly made it one by accident. `src/store/tokens.ts` gains `encodeToken`/`decodeToken` — a small, versioned, base64url-encoded envelope — wired in at exactly two boundaries (the CLI's `tuple`/`check` commands, the API's `/tuples`/`/check` routes); every internal caller (`assertTokenObserved`, `ProductionCheckOptions.atToken`, the DST fake store) is untouched.
+
+Explicitly not a security fix — no signature, no integrity check, stated plainly in D-128 — a forged token can only ever widen or narrow which freshness floor a check waits for, never grant a permission the tuple data doesn't already grant. Fail-checked live: `encodeToken` reverted to a raw `String(token)`, 10 real tests failed for the right reason, reverted, reconfirmed green.
+
+**Verification:** `npx vitest run` (47 files, 602 tests, up from 578), `npx eslint .`, `npx tsc --noEmit`, `npx prettier --check .`, `npm run build` all clean. Full account: `docs/DECISIONS.md` D-128.
+
+Second of the small batch of improvements identified while reviewing a proposed consistency-layer plan against this repo's actual state (first: `docs/INVARIANTS.md`'s dynamic-invariants section, D-127).

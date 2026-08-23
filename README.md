@@ -374,7 +374,7 @@ authz schema compile <file>                         parse + compile a namespace 
 authz schema publish <file>                         compile and publish a new namespace_configs version
 authz tuple write <object> <relation> <subject>     write a tuple, prints the returned consistency token
 authz tuple delete <object> <relation> <subject>
-authz check <subject> <relation> <object> [--at-token <n>] [--path]   --path: print the real resolution path (see "What an allow actually looks like here" above)
+authz check <subject> <relation> <object> [--at-token <token>] [--path]   --path: print the real resolution path (see "What an allow actually looks like here" above)
 authz expand <object> <relation>                    print the resolved subject tree
 authz soundness run [--queries N] [--seed S] [--format text|markdown|json] [--dry-run] [--progress N]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted; --progress: "checked X/Y queries" on stderr every N queries)
 authz serve                                         start the Fastify API server

@@ -68,6 +68,7 @@ import type { PerformCheckResult } from '../audit/checks.js';
 import type { ResolutionStep } from '../resolve/production/resolver.js';
 import type { ExpandNode } from '../audit/expand.js';
 import type { WriteTupleResult, DeleteTupleResult } from '../store/tuples.js';
+import { encodeToken } from '../store/tokens.js';
 import type { SchemaCompileResult } from '../schema/dsl/errors.js';
 import type { CompiledSchema } from '../schema/dsl/types.js';
 import type { PublishResult, PublishedNamespace } from '../schema/publish.js';
@@ -95,8 +96,16 @@ export interface CheckResponseBody {
   object: ApiEntityRef;
   /** The actual maximum recursion depth this check reached — `ProductionCheckResult.depth`, passed through unchanged. */
   depth: number;
-  /** Present only when the caller pinned the check to a consistency token (§6.3). */
-  atToken?: number;
+  /**
+   * Present only when the caller pinned the check to a consistency token
+   * (§6.3) — the same opaque, encoded string form `tupleWriteResponse`/
+   * `tupleDeleteResponse` return, never the raw internal integer.
+   * `checkResponse` itself does the encoding (`src/store/tokens.ts`'s
+   * `encodeToken`); see that file's own doc comment for why the wire
+   * form is opaque while every internal caller still passes/compares a
+   * plain `number`.
+   */
+  atToken?: string;
   /**
    * Present if and only if `allowed` is `true` — mirrors
    * `ProductionCheckResult`'s own "present iff allowed" contract exactly,
@@ -149,7 +158,7 @@ export function checkResponse(
       relation,
       object,
       depth: result.depth,
-      ...(atToken !== undefined ? { atToken } : {}),
+      ...(atToken !== undefined ? { atToken: encodeToken(atToken) } : {}),
       ...(result.allowed ? { path: result.path } : {}),
     },
   };
@@ -202,7 +211,8 @@ export function expandResponse(
 // ---------------------------------------------------------------------------
 
 export interface TupleWriteResponseBody {
-  token: number;
+  /** Opaque, encoded (`src/store/tokens.ts`'s `encodeToken`) — never the raw internal integer. Pass this exact string as a later check's `atToken`. */
+  token: string;
   /** `false` when the tuple already existed — still a successful write (see `src/store/tuples.ts`'s own idempotency doc comment), never an error. */
   created: boolean;
 }
@@ -229,11 +239,12 @@ export type TupleWriteApiResponse =
  */
 export function tupleWriteResponse(result: WriteTupleResult): TupleWriteApiResponse {
   if (!result.ok) return tupleValidationError('write', result.errors);
-  return { status: 200, body: { token: result.token, created: result.created } };
+  return { status: 200, body: { token: encodeToken(result.token), created: result.created } };
 }
 
 export interface TupleDeleteResponseBody {
-  token: number;
+  /** Opaque, encoded (`src/store/tokens.ts`'s `encodeToken`) — never the raw internal integer. Pass this exact string as a later check's `atToken`. */
+  token: string;
   /** `false` when there was no such tuple to delete — still a successful, idempotent no-op, never an error. */
   deleted: boolean;
 }
@@ -244,7 +255,7 @@ export type TupleDeleteApiResponse =
 /** Mirrors `tupleWriteResponse` exactly — see its own doc comment. */
 export function tupleDeleteResponse(result: DeleteTupleResult): TupleDeleteApiResponse {
   if (!result.ok) return tupleValidationError('delete', result.errors);
-  return { status: 200, body: { token: result.token, deleted: result.deleted } };
+  return { status: 200, body: { token: encodeToken(result.token), deleted: result.deleted } };
 }
 
 // ---------------------------------------------------------------------------
