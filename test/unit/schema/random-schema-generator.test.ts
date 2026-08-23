@@ -79,13 +79,22 @@ describe('generateRandomSchema — every generated schema compiles for real', ()
     expect(failures).toEqual([]);
   });
 
-  it('1000 seeds at high option ceilings (5 namespaces, depth 4, all operators) all compile', () => {
+  it('300 seeds at high option ceilings (5 namespaces, depth 4, all operators) all compile', () => {
+    // 300, not 1000: CI runner speed varies enough between runs (one
+    // observed run: 1000 iterations took 23.35s; a later run of the
+    // identical code took 49.35s and blew through a 45s timeout with
+    // every assertion still passing) that iteration count itself needed
+    // to come down, not just the timeout back it's checked against.
+    // 300 is still comfortably enough to see every rewrite-rule operator
+    // appear (each showed up within the first ~10 of 500+ seeds in
+    // local runs) while cutting both the typical and worst-case runtime
+    // by roughly 3x.
     const failures: string[] = [];
     let sawTupleToUserset = false;
     let sawIntersection = false;
     let sawExclusion = false;
     let sawUnion = false;
-    for (let i = 0; i < 1000; i += 1) {
+    for (let i = 0; i < 300; i += 1) {
       const seed = `stress-sweep-${i}`;
       try {
         const result = generateRandomSchema(seed, {
@@ -113,7 +122,7 @@ describe('generateRandomSchema — every generated schema compiles for real', ()
     expect(sawIntersection).toBe(true);
     expect(sawExclusion).toBe(true);
     expect(sawUnion).toBe(true);
-  }, 45_000);
+  }, 60_000);
 
   it('a single-namespace, principal-only schema (no earlier structural namespace to target) still compiles', () => {
     const result = generateRandomSchema('edge-single-namespace', {
