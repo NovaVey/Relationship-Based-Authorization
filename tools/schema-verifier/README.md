@@ -220,11 +220,13 @@ author.
 `.github/workflows/schema-verifier.yml` runs `verify-schema` against
 `schema/example.invariant` (this repo's own real, live demo schema,
 `schema/example.authz` — not a testing fixture) on every PR and push to
-`main` — build spec §9's own exit criterion, closed. It is **not yet** a
-required status check (`docs/github-governance.md` Step 2) — that's a
-separate, deliberate decision left for once the workflow has run green at
-least once on a real PR. See `docs/DECISIONS.md` D-123 for the full
-account, including why that invariant's own goal is non-monotone (an
+`main` — build spec §9's own exit criterion, closed. It has now run green
+on three real PRs (#83, #84, #85) and is designated a required status
+check in `docs/github-governance.md` Step 2 — applying that designation in
+GitHub's own branch-protection settings is a manual, one-time admin step
+outside what any tool available to this project can do (see that doc's own
+closing note). See `docs/DECISIONS.md` D-123 for the full account of the
+workflow itself, including why that invariant's own goal is non-monotone (an
 exclusion) and genuinely reports `HOLDS up to k = 1`, never an
 unconditional proof — and why the job still gates on that as a pass, not
 a failure (that file's own "Exit-code gating" section).

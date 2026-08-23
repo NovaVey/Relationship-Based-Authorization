@@ -46,10 +46,20 @@ Create a rule targeting `main` with:
   - **Require branches to be up to date before merging**
   - Once each check has run at least once on a PR (open any PR to trigger
     them), select these exact checks — the job names come directly from
-    `.github/workflows/ci.yml`:
+    `.github/workflows/ci.yml`, plus `schema-verifier` from
+    `.github/workflows/schema-verifier.yml`:
     - `lint-and-typecheck`
     - `test (22)`
     - `build`
+    - `schema-verifier` — added once the workflow had run green on three
+      real PRs (#83, #84, #85), per the deliberate hold stated in
+      `docs/DECISIONS.md` D-123 and the schema verifier's own build spec
+      §9 exit criterion ("wire it as a required PR check on this repo's
+      own schemas"). It checks `banned_member_never_views_org` against
+      `schema/example.authz` on every PR — gates on exit code `{0, 2}` =
+      pass, `{1, 3}` = fail (D-123's own "Exit-code gating" section has
+      the full reasoning for why a non-monotone `HOLDS up to k = 1` still
+      counts as a pass here).
   - Do **not** add `security-audit` or `test-integration` to this list —
     both are intentionally advisory (`continue-on-error: true` /
     `test-integration`'s own comment in the workflow) under the Standard
