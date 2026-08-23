@@ -2076,3 +2076,21 @@ A new fixture schema (`tools/schema-verifier/fixtures/schemas/tenancy.authz`) cl
 **Verification:** `npx tsc --noEmit -p tools/schema-verifier/tsconfig.json`, `npx eslint .`, `npx prettier --check .` all clean. `npx vitest run --config tools/schema-verifier/vitest.config.ts`: 3 files, 49 tests (19 IR + 18 invariant-language + 12 reachability) — including all three fixtures returning their documented verdict with a real witness where claimed, a real intersection (`folder.sensitive_review`) correctly yielding `UNKNOWN`, and a self-referential nested-group cycle resolving to a real witness without hanging.
 
 §5 has no dedicated build-spec checkpoint of its own (the real `CHECKPOINT 4` — "the most important checkpoint in the file" — comes only after §6, counterexample self-validation). Holding here anyway: §6 needs live replay against the real check engine (a real database), which is substantial additional work best started fresh rather than folded into the same pass as §5.
+
+## Schema verifier — §6 counterexample self-validation, CHECKPOINT 4 (D-117)
+
+**Owner:** the main agent, directly, on the `verifier` branch.
+
+`checkAndValidate` (`tools/schema-verifier/src/validate/`) wraps §5's search with the automatic self-validation the build spec requires: a `VIOLATED` verdict's witness is replayed tuple-by-tuple through the real, unmodified `writeTuple` and `productionCheck`, on a fresh DST fake scratch store (no real Postgres available in this environment, and none needed — the fake is the exact same storage seam those functions already run against throughout DST). The real engine's `allow` confirms the counterexample; a denial, or any rejected tuple, is a `mismatch`, reported loudly. A `HOLDS` verdict gets the complementary empirical check — N random type-valid tuple sets thrown at the same goal, none may ever produce `allow`.
+
+**Self-validation caught a real bug in its own code on the first live run**, exactly as it's meant to: `tenant_isolation`'s witness names `orgB` (a valid mixed-case invariant variable, D-115) as a tuple id — but the real tuple store only accepts lowercase `snake_case` ids, and the very first replay reported a rejection, not a real engine/IR disagreement. Fixed with a small label-to-valid-id mapper, used consistently everywhere a witness label becomes a real tuple id.
+
+**CHECKPOINT 4 — the exit criteria are met and shown, not just asserted:**
+
+- `tenant_isolation` and `positive_control`: both `VIOLATED`, both `confirmed` — the real engine's own resolution path (a real `tupleToUserset` hop through a real `directGrant`) is logged directly in the test output. This is the exact ask: real tuples, a real check, a real `allow`, reproducible by anyone in seconds.
+- `no_public_path_to_private_document`: `HOLDS`, empirically confirmed clean across 25 fuzzed tuple sets against the real engine.
+- The fail-check: `private_document#owner`'s real `service_account`-only restriction is deliberately widened (a corrupted IR edge, simulating exactly the class of bug §3 warned about), the search wrongly reports `VIOLATED`, and self-validation — checking the witness against the real, uncorrupted schema — rejects the tuple outright and reports `mismatch` with a specific, correct reason. The real, uncorrupted graph is independently re-confirmed `HOLDS` in the same test.
+
+**Verification:** `npx tsc --noEmit -p tools/schema-verifier/tsconfig.json`, `npx eslint .`, `npx prettier --check .` all clean. `npx vitest run --config tools/schema-verifier/vitest.config.ts`: 4 files, 54 tests (19 IR + 18 invariant-language + 12 reachability + 5 self-validation), all green. Full design notes and the caught-bug narrative: `docs/DECISIONS.md` D-117.
+
+CHECKPOINT 4 closes here, per the build spec's own numbering — §7 (the non-monotone fragment: intersection and exclusion) is the next phase.
