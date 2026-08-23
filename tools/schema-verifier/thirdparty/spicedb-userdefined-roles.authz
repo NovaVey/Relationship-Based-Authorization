@@ -1,0 +1,36 @@
+// §10 third-party schema survey — SpiceDB's "user-defined-roles" example
+// (JIRA-style custom roles). Source (fetched verbatim):
+// https://raw.githubusercontent.com/authzed/examples/main/schemas/user-defined-roles/schema-and-data.yaml
+//
+// A near-direct translation — SpiceDB already separates relation/
+// permission the same way this DSL does. `role#member` nested-userset
+// references (e.g. `issue_creator: role#member`) map onto this DSL's own
+// `type#relation` subject-type syntax directly.
+//
+// Deliberately partial: only `role` and `project` are translated, not the
+// original's `issue`/`comment`/`attachment`/`contact` namespaces — this
+// survey checks `role#delete` specifically, whose entire reachable
+// closure is `role`/`project`, so the rest is out of scope for this
+// entry, not silently dropped.
+
+namespace role {
+  relation project: project
+  relation member: user
+  relation built_in_role: project
+
+  permission delete = project->role_manager - built_in_role->role_manager
+  permission add_user = project->role_manager
+}
+
+namespace project {
+  relation issue_creator: role#member
+  relation issue_assigner: role#member
+  relation any_issue_resolver: role#member
+  relation assigned_issue_resolver: role#member
+  relation comment_creator: role#member
+  relation comment_deleter: role#member
+  relation role_manager: role#member
+
+  permission create_issue = issue_creator
+  permission create_role = role_manager
+}

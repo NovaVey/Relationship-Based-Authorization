@@ -1,0 +1,18 @@
+// §10 third-party schema survey — SpiceDB's own Schema Language
+// Reference, "typechecking" example. Source (fetched verbatim):
+// https://raw.githubusercontent.com/authzed/docs/main/app/spicedb/concepts/schema/page.mdx
+//
+// Direct translation. The docs themselves call this out as a real
+// authoring bug the schema language's own `use typechecking` directive
+// exists to catch at write-schema time: "a call to CheckPermission for
+// document#edit will _always_ return false at runtime because no
+// relationship can simultaneously be for a user subject and for a
+// serviceaccount subject." This survey checks that exact claim from the
+// other direction — statically, not just "at runtime."
+
+namespace document {
+  relation viewer: user
+  relation admin: serviceaccount
+
+  permission edit = viewer & admin
+}

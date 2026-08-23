@@ -1,0 +1,17 @@
+// §10 third-party schema survey — OpenFGA's "Expenses" sample store.
+// Source (fetched verbatim): https://raw.githubusercontent.com/openfga/sample-stores/main/stores/expenses/model.fga
+// See thirdparty/README.md for the OpenFGA relation/permission split
+// rule. Neither `can_manage` nor `approver` has a direct-grant term in
+// the original ("note that an employee cannot be directly be assigned to
+// be an approver" — README) — both translate as pure permissions, no
+// companion relation.
+
+namespace employee {
+  relation manager: employee
+  permission can_manage = manager | manager->can_manage
+}
+
+namespace report {
+  relation submitter: employee
+  permission approver = submitter->can_manage
+}

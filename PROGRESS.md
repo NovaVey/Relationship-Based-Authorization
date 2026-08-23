@@ -2182,3 +2182,28 @@ Build spec §9's own usage line: `verify-schema <schema-file> --invariants <file
 **Verification:** `npx vitest run` (13 files, 115 tests, up from 12/88 — 13 pure-function tests plus 15 real-subprocess tests against every known-answer-corpus fixture), `npx eslint .`, `npx tsc --noEmit -p tsconfig.json`, `npx prettier --check .` all clean, plus a fresh-clone reproduction of the README's own updated CLI usage line and Quickstart. Full account: `docs/DECISIONS.md` D-122.
 
 **This is the CLI half of §9 only.** The other half — "wire it as a required PR check on this repo's own schemas" — needs a `.github/workflows/` file and `tools/schema-verifier/` actually landing on `main`, both outside this branch's own absolute file-touch discipline. Raised explicitly for a decision rather than silently widening that discipline or silently skipping §9's own exit criterion — not yet resolved as of this entry.
+
+## Schema verifier — §9 fully closed: `tools/schema-verifier/` lands on `main`, CI wired (D-123)
+
+**Owner:** the main agent, directly.
+
+The CI-wiring question above was resolved via an explicit decision: merge `verifier` into `main` for real (PR #82, squash — this repo's branch protection allows only squash, confirmed live), then build the workflow as a real follow-up (PR #83) once the module existed on `main` to reference. The old `verifier`-branch file-touch discipline is now moot — it applied only while that branch was in use.
+
+- **PR #82.** Verified CI-safe before opening it, not assumed: root `lint`/`typecheck`/`test`/`build`/`format:check` each confirmed to skip `tools/schema-verifier/` entirely (ESLint's own nested-config-boundary behavior; tsconfig/vitest `include` globs never reaching `tools/**`). All 11 real CI checks passed on the actual merge. `origin/verifier` was auto-deleted on merge; its full commit history is preserved by a `verifier-landed` tag (pushed by the repo owner directly — this session's git credentials can push branches but not tags, confirmed via a live `403`).
+- **PR #83 — `.github/workflows/schema-verifier.yml`.** Runs `verify-schema` against a new `schema/example.invariant` (`banned_member_never_views_org`, checked against this repo's own real `schema/example.authz`) on every PR/push to `main`. A real authoring bug (`banned(s) = o` instead of `banned(o) = s`) was caught by actually running the CLI before writing the workflow. Gates on `{0, 2}` = pass, `{1, 3}` = fail; fail-checked live by temporarily adding a leaky permission and confirming the job would fail, then reverting. Not yet a required status check — deliberately deferred until it's run green on a real PR.
+
+**Verification:** root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite (13 files, 115 tests) both clean from `main`. Full account: `docs/DECISIONS.md` D-123.
+
+## Schema verifier — §10 closed: twelve third-party schemas surveyed, `docs/FINDINGS.md` published (D-124)
+
+**Owner:** the main agent, directly, on `schema-verifier-thirdparty-survey`.
+
+Two background research agents fetched real, verbatim, source-cited schema content from `openfga/sample-stores` and `authzed/examples`/`authzed/docs`. Twelve schemas — six per ecosystem — were translated into this repo's own DSL (`tools/schema-verifier/thirdparty/*.authz`) and checked with the real CLI against an invariant their own docs state or imply (`*.invariant`); results and methodology in `docs/FINDINGS.md` and `tools/schema-verifier/thirdparty/README.md`.
+
+- **Translation methodology.** OpenFGA's `define X: [T] or Y or Z from W` splits into `relation X_direct: T` + `permission X = X_direct | Y | W->Z`; SpiceDB is closer to 1:1. Two real compiler restrictions came up repeatedly — `type#relation` must name a genuine relation, never a permission, and every type in a traversed union relation must declare whatever the traversal reaches — both worked around with a faithful restructuring (splitting a union relation by target type) everywhere the math allowed it, disclosed in each file's own header.
+- **The survey's own biggest finding.** This invariant language has no negative-constraint primitive (`distinct`/`relationEquals` are both positive pins only), so any goal permission reachable via a relation directly grantable to the tested subject's type is trivially escapable regardless of what the invariant meant to probe. Confirmed to recur identically across eight of the twelve entries, across six different domains and both ecosystems — a property of the language, not of any one schema. Two entries (`spicedb-superuser`, a documented intentional backdoor; `spicedb-docs-style-sharing`, whose own `assertFalse` proves real sibling-group isolation this survey can't verify) specifically demonstrate rule 1 (`VIOLATED` ≠ vulnerability).
+- **Final tally:** 12 schemas, 9 `VIOLATED` (all self-validated), 3 `HOLDS` (1 exact, 2 bounded non-monotone), 0 `UNKNOWN`, 0 tool errors. Two source schemas (OpenFGA's `superadmin`, SpiceDB's `caveats`) excluded outright as "Not analyzed" — both are built entirely around ABAC/caveat concepts this DSL has no equivalent for.
+
+**Verification:** all twelve schema/invariant pairs re-run against the real CLI in one pass immediately before writing `docs/FINDINGS.md`. Root and `tools/schema-verifier` suites both clean with `thirdparty/` present. Full account: `docs/DECISIONS.md` D-124.
+
+This closes build spec §10 and its `CHECKPOINT 6`. Per §0's own rule (stop at every checkpoint, wait for a reply), holding here rather than continuing automatically into §11's remaining sweep or §12's definition-of-done checklist.

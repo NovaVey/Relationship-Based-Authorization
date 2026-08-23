@@ -1,0 +1,20 @@
+// Plain org membership never implies repo admin. The README states repo
+// admin comes from either a direct grant or organization.repo_admin
+// (itself independently grantable — "Users can have repository admin
+// access on organizations, and thus have admin access to all
+// repositories owned by that organization") — never from mere
+// organization membership on its own. repo#admin's rewrite closure
+// (admin_direct | owner->repo_admin) never references organization
+// member_direct at all, so this is expected to be a genuine, exact
+// monotone HOLDS — type-level unreachability, the same shape as this
+// tool's own no-public-path-to-private-document fixture.
+invariant plain_org_member_never_gets_repo_admin {
+  s: user
+  o: organization
+  r: repo
+
+  member_direct(o) = s
+  owner(r) = o
+
+  goal: admin(s, r)
+}

@@ -1,0 +1,15 @@
+// Mirrors the source's own assertFalse: a member of one group_with_parent
+// (analysis) should never view a document shared only with a distinct
+// sibling group (engineering), even though both share a common parent.
+invariant sibling_group_member_cannot_view_other_group_document {
+  a: user
+  analysis: group_with_parent
+  engineering: group_with_parent
+  d: document
+
+  member(analysis) = a
+  viewer_group(d) = engineering
+  distinct(analysis, engineering)
+
+  goal: view(a, d)
+}

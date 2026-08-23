@@ -1,0 +1,14 @@
+// A workspace guest (a distinct, unrelated relation with no rewrite path
+// into member/writer/commenter anywhere in the schema) should never
+// become a writer on one of that workspace's channels just by being a
+// guest.
+invariant workspace_guest_never_becomes_channel_writer {
+  u: user
+  w: workspace
+  c: channel
+
+  guest(w) = u
+  parent_workspace(c) = w
+
+  goal: writer(u, c)
+}

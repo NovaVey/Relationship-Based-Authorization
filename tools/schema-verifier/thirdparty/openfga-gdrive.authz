@@ -1,0 +1,36 @@
+// §10 third-party schema survey — OpenFGA's "Google Drive" sample store.
+// Source (fetched verbatim): https://raw.githubusercontent.com/openfga/sample-stores/main/stores/gdrive/model.fga
+//
+// See thirdparty/README.md for the OpenFGA relation/permission split
+// rule and the wildcard-subject expressiveness gap. `folder.viewer` and
+// `doc.viewer` are both typed `[user, user:*, group#member]` in the
+// source — the `user:*` (any user) wildcard term is dropped per that
+// disclosed gap; every invariant below is chosen to not depend on it.
+// `folder.viewer` also carries rewrite terms (`or owner or viewer from
+// parent`), so it splits into `viewer_direct` + a `viewer` permission
+// per the OpenFGA translation rule; `doc.viewer` has no rewrite terms in
+// the source, so it stays a bare (wildcard-dropped) relation.
+
+namespace group {
+  relation member: user
+}
+
+namespace folder {
+  relation owner: user
+  relation parent: folder
+  relation viewer_direct: user | group#member
+
+  permission can_create_file = owner
+  permission viewer = viewer_direct | owner | parent->viewer
+}
+
+namespace doc {
+  relation owner: user
+  relation parent: folder
+  relation viewer: user | group#member
+
+  permission can_change_owner = owner
+  permission can_read = viewer | owner | parent->viewer
+  permission can_share = owner | parent->owner
+  permission can_write = owner | parent->owner
+}

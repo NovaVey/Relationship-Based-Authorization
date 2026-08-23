@@ -208,8 +208,9 @@ reachable from the invariant's own goal permission:
 
 This tool never edits, generates, or migrates a schema. A `VIOLATED`
 verdict is a modeling question for whoever owns the schema, not
-automatically a vulnerability — see `docs/FINDINGS.md` (§10, not yet
-written) for that distinction applied to schemas this tool didn't author.
+automatically a vulnerability — see `docs/FINDINGS.md` for that
+distinction applied to twelve real, published schemas this tool didn't
+author.
 
 ## CI
 
@@ -225,12 +226,27 @@ exclusion) and genuinely reports `HOLDS up to k = 1`, never an
 unconditional proof — and why the job still gates on that as a pass, not
 a failure (that file's own "Exit-code gating" section).
 
+## Third-party schema survey
+
+`docs/FINDINGS.md` — build spec §10, `CHECKPOINT 6`, closed. Twelve real,
+published schemas (six OpenFGA `sample-stores`, six SpiceDB
+`authzed/examples`) translated (`thirdparty/*.authz`) and checked against
+invariants their own docs state or imply (`thirdparty/*.invariant`); see
+`thirdparty/README.md` for the translation methodology and the disclosed
+expressiveness gaps (wildcard subjects, ABAC caveats/conditions). The
+survey's own biggest finding: nine of the twelve are `VIOLATED`, and eight
+of those share one root cause — this invariant language has no way to
+state a _negative_ precondition, only positive pins (`distinct`,
+`relationEquals`), so any goal permission reachable via a directly-
+grantable relation of the tested subject's type is trivially escapable
+regardless of what the invariant meant to probe. That's a real limit on
+what this language can currently verify, not a defect in any of the
+twelve source schemas.
+
 ## What's not built yet
 
 Tracked, explicit future work — not silently missing:
 
-- **Third-party schema survey** (`docs/FINDINGS.md`, analyzing schemas
-  this project didn't write) — build spec §10, `CHECKPOINT 6`.
 - Explicitly out of scope for this tool entirely (build spec §13): no
   edits to the schema parser, engine, or storage layer; no consistency
   tokens; no SMT solver; no performance work; no web UI.

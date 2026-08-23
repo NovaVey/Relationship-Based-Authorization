@@ -1,0 +1,21 @@
+// §10 third-party schema survey — SpiceDB's "ai-agents" example ("AI
+// Agents acting on behalf of a user"). Source (fetched verbatim):
+// https://raw.githubusercontent.com/authzed/examples/main/schemas/ai-agents/schema-and-data.yaml
+//
+// Direct translation — no gaps. `edit = writer` deliberately has no
+// `->delegates` term at all, unlike `view` — the schema's own doc
+// comment states this is intentional: "an AI agent can view a document
+// if it acts on behalf of a reader or a writer... " but never edit.
+
+namespace user {
+  relation agent: ai_agent
+  permission delegates = agent
+}
+
+namespace document {
+  relation writer: user
+  relation reader: user
+
+  permission edit = writer
+  permission view = reader | edit | reader->delegates | writer->delegates
+}

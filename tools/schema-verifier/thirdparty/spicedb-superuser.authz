@@ -1,0 +1,34 @@
+// §10 third-party schema survey — SpiceDB's own "superuser / site-wide
+// permissions" example (a deliberately-designed root/backdoor role).
+// Source (fetched verbatim):
+// https://raw.githubusercontent.com/authzed/examples/main/schemas/superuser/schema-and-data.yaml
+// README (fetched verbatim, same directory): "Access is granted to all
+// resources of a specific type to a super-admin user." The fixture's own
+// assertTrue (`document:lasers#admin@user:drevil`, reached only via
+// platform:evilempire's administrator) confirms this backdoor is
+// intended behavior, not a bug in the source.
+//
+// Disclosed restructuring: the source's `owner: user | organization`
+// followed by `owner + owner->admin` relies on SpiceDB silently skipping
+// subject types that don't define the traversed permission (`user` has
+// no `admin`). This compiler requires every type in a traversed relation
+// to declare the target, so `owner` is split by type into `owner_user`
+// and `owner_org` — semantically identical, since `owner_user` alone
+// (with no further arrow) is exactly what the original's `user`-typed
+// owner tuples contributed.
+
+namespace document {
+  relation owner_user: user
+  relation owner_org: organization
+  permission admin = owner_user | owner_org | owner_org->admin
+}
+
+namespace organization {
+  relation platform: platform
+  permission admin = platform->super_admin
+}
+
+namespace platform {
+  relation administrator: user
+  permission super_admin = administrator
+}

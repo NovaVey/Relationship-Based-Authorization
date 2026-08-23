@@ -1,0 +1,14 @@
+// Document admin should require being an owner (directly, or via the
+// owning organization's admin) — not just any random user. Pin the
+// document's owner to a specific organization o, then ask whether an
+// arbitrary user u gets admin without any pin tying u to o or its
+// platform at all.
+invariant document_admin_requires_ownership_chain {
+  u: user
+  o: organization
+  d: document
+
+  owner_org(d) = o
+
+  goal: admin(u, d)
+}

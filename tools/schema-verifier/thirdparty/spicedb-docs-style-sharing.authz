@@ -1,0 +1,45 @@
+// §10 third-party schema survey — SpiceDB's own "group membership and
+// parent-of/child-of relations" example. Source (fetched verbatim):
+// https://raw.githubusercontent.com/authzed/examples/main/schemas/docs-style-sharing/schema-and-data.yaml
+// README (fetched verbatim, same directory): "Access can be granted via
+// direct access, or by being member of a group (that can be a child of
+// another group) that has access to the resource." The fixture's own
+// assertFalse proves real sibling-group isolation: an analyst (member of
+// the `analysis` group only) cannot view a document shared only with the
+// `engineering` group, even though both share a common parent (`company`).
+//
+// Disclosed restructuring, not a semantic gap: the source's
+// `document.viewer` is typed `user | group_with_parent#view |
+// group_with_child#view`, nesting into a *permission* on each group
+// type. This compiler's `#` syntax can only name a genuine relation.
+//   - `group_with_child#view` is a pure alias (`permission view = child`,
+//     no other term) — swapping it for `group_with_child#child` (the
+//     underlying relation) is exactly equivalent, not a simplification.
+//   - `group_with_parent#view` is NOT a pure alias (`member | parent->
+//     member`), so it can't be substituted the same way. Instead
+//     `document.viewer` is split by target type: `viewer` keeps
+//     `user | group_with_child#child`, and a new `viewer_group:
+//     group_with_parent` relation carries the group_with_parent case,
+//     reached via `viewer_group->view` (a tupleset traversal into that
+//     group's real `view` permission — semantically identical to the
+//     original's `group_with_parent#view` nesting).
+
+namespace group_with_parent {
+  relation parent: group_with_parent
+  relation member: user
+
+  permission view = member | parent->member
+}
+
+namespace group_with_child {
+  relation child: user | group_with_child#child
+
+  permission view = child
+}
+
+namespace document {
+  relation viewer: user | group_with_child#child
+  relation viewer_group: group_with_parent
+
+  permission view = viewer | viewer_group->view
+}

@@ -1,0 +1,18 @@
+// Cross-organization isolation: a user's access to a feature is gated by
+// membership in the *specific* organization the feature's entitlement
+// belongs to. Pin u as a member of o1, and pin f's entitlement e to a
+// *different* organization o2 (distinct(o1, o2)) — can u still access f?
+invariant feature_access_requires_membership_in_entitled_org {
+  u: user
+  o1: organization
+  o2: organization
+  e: entitlement
+  f: feature
+
+  member(o1) = u
+  org(e) = o2
+  associated_entitlement(f) = e
+  distinct(o1, o2)
+
+  goal: access(u, f)
+}

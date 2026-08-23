@@ -1,0 +1,13 @@
+// document#edit can never be granted to anyone — viewer:user and
+// admin:serviceaccount are disjoint subject types, so the intersection
+// `viewer & admin` can never be satisfied by any real tuple set (a
+// tuple's subject has exactly one type). SpiceDB's own docs state this
+// plainly: "a call to CheckPermission for document#edit will _always_
+// return false at runtime." No constraints needed — type-level
+// unreachability. Expected exact monotone HOLDS.
+invariant edit_always_unreachable_for_any_user {
+  s: user
+  d: document
+
+  goal: edit(s, d)
+}

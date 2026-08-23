@@ -1,0 +1,20 @@
+// A built-in role can never be deleted, even by a project's own role
+// manager. The source schema's own validation proves this directly:
+// `role:admin#delete: []` (empty — no one can satisfy it) versus
+// `role:project_manager#delete` (non-empty — a non-built-in role CAN be
+// deleted by the same admin). Formalized: pin p as manageable (m is a
+// role_manager of p), pin r as p's own role AND flagged built_in_role —
+// ask whether delete(m, r) is still reachable despite that. Exclusion
+// (`project->role_manager - built_in_role->role_manager`) should block
+// it structurally, the same way org#view's exclusion already does in
+// schema/example.invariant — expected: exact monotone HOLDS.
+invariant built_in_role_never_deletable {
+  m: user
+  p: project
+  r: role
+
+  project(r) = p
+  built_in_role(r) = p
+
+  goal: delete(m, r)
+}

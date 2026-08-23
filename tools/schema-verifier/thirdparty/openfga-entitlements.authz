@@ -1,0 +1,22 @@
+// §10 third-party schema survey — OpenFGA's "Entitlements" sample store
+// (same domain as spicedb-entitlements.authz, different ecosystem).
+// Source (fetched verbatim): https://raw.githubusercontent.com/openfga/sample-stores/main/stores/entitlements/model.fga
+//
+// See thirdparty/README.md for the OpenFGA relation/permission split
+// rule. `subscriber_member` and `can_access` are pure tuple-to-userset
+// computations (`from`) with no direct-grant term in the original — both
+// translate as pure permissions, no companion relation.
+
+namespace organization {
+  relation member: user
+}
+
+namespace plan {
+  relation subscriber: organization
+  permission subscriber_member = subscriber->member
+}
+
+namespace feature {
+  relation associated_plan: plan
+  permission can_access = associated_plan->subscriber_member
+}

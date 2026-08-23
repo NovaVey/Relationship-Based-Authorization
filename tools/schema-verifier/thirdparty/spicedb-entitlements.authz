@@ -1,0 +1,19 @@
+// §10 third-party schema survey — SpiceDB's "entitlements" example (SaaS
+// feature tiers). Source (fetched verbatim):
+// https://raw.githubusercontent.com/authzed/examples/main/schemas/entitlements/schema-and-data.yaml
+//
+// Direct translation, no gaps.
+
+namespace organization {
+  relation member: user
+}
+
+namespace entitlement {
+  relation org: organization
+  permission subscribed_member = org->member
+}
+
+namespace feature {
+  relation associated_entitlement: entitlement
+  permission access = associated_entitlement->subscribed_member
+}
