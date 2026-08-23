@@ -82,14 +82,22 @@ describe('checkAndValidate — self-validation runs automatically on every VIOLA
   it('no_public_path_to_private_document — HOLDS, and empirical fuzzing against the real engine finds no counterexample', async () => {
     const invariant = loadInvariant('no-public-path-to-private-document.invariant');
     const { result, validation } = await checkAndValidate(graph, tenancy, invariant, {
-      trials: 25,
-      seed: 7,
+      fuzz: { trials: 25, seed: 7 },
     });
     expect(result.verdict).toBe('HOLDS');
     expect(validation).toEqual({ kind: 'empirically-clean', sampled: 25 });
   });
 
-  it('an UNKNOWN verdict (intersection) gets no self-validation attempt at all', async () => {
+  it('an UNKNOWN verdict gets no self-validation attempt at all', async () => {
+    // Written before §7 existed, when checkAndValidate had no fallback for
+    // an intersection/exclusion goal and every such goal was UNKNOWN by
+    // construction. §7 now routes this to boundedSearch instead — real
+    // folder-schema growth (viewer | edit) & sensitive_reviewer reaches 25
+    // candidate tuples even at k = 1, over MAX_BOUNDED_CANDIDATES, so this
+    // is still UNKNOWN, but now for a disclosed, bound-specific reason
+    // (see `result.reason`), not because intersection is unhandled — this
+    // fixture is kept as the "still UNKNOWN, still no validation attempt"
+    // regression case for whichever of the two reasons currently applies.
     const example = loadSchema(REAL_SCHEMA_DIR, 'example.authz');
     const exampleGraph = buildSchemaGraph(example);
     const source = [
@@ -107,6 +115,8 @@ describe('checkAndValidate — self-validation runs automatically on every VIOLA
       parsed.invariants[0]!,
     );
     expect(result.verdict).toBe('UNKNOWN');
+    expect(result.fragment).toBe('non-monotone');
+    expect(result.reason).toContain('candidate');
     expect(validation).toEqual({ kind: 'not-applicable' });
   });
 });

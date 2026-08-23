@@ -158,8 +158,9 @@ satisfiability — union-find plus a type check, never a solver. A
 unify these" fact the union-find carries throughout.
 
 Reaching an intersection or exclusion edge yields `UNKNOWN` immediately
-— §7 (not yet built) is where those are handled; §5 never guesses.
-Cycles are handled with a per-search-path visited-node set, exactly as
+from this function — §7, below, is where those are actually handled;
+`checkInvariant` itself never guesses. Cycles are handled with a
+per-search-path visited-node set, exactly as
 §3 anticipated: a revisited node is a dead end for that branch, not a
 hang and not an automatic pass, matching the monotone fragment's own
 small-model property that a minimal witness never needs to unroll a
@@ -199,6 +200,56 @@ exists to enforce — a witness reading perfectly sensibly on paper
 moment it met the real tuple store, since `orgB` (a valid variable name)
 isn't a valid tuple id (lowercase only). Full account: `docs/DECISIONS.md`
 D-117.
+
+### The non-monotone fragment (§7) — bounded search over intersection/exclusion
+
+Intersection and exclusion don't have a small-model property the way
+union/computedUserset/tupleToUserset do — `checkInvariant` (§5) can't
+search them exactly, and never pretends to; it returns `UNKNOWN` the
+instant it meets one. §7 gives that case a real answer instead of leaving
+it there, for schemas where a caller is willing to accept "checked up to
+a bound" rather than an exact result.
+
+`tools/schema-verifier/src/reachability/scanReachability(graph,
+goalNodeId)` walks *every* edge reachable from the goal — unlike §5's
+search, it never stops at an intersection/exclusion edge — and reports
+which fragment the schema (as reachable from that one goal) falls into,
+plus every relation node it passed through. `checkAndValidate` consults
+this first, on every call: a `'monotone'` result routes to §5 and §6
+exactly as before; a `'non-monotone'` result routes to
+`tools/schema-verifier/src/bounded/boundedSearch` instead, and skips
+self-validation entirely — every verdict this path returns already came
+from the real engine directly, so there is nothing left to replay.
+
+`boundedSearch` fixes a bound `k` on the number of fresh instances per
+type, enumerates every type-valid candidate tuple up to that bound
+(`bounded/candidates.ts`, drawn straight from each reachable relation's
+own real `subjectTypes` — never generate-and-filter), and brute-forces
+every *subset* of those candidates directly through the real, unmodified
+`productionCheck`. The first subset that produces `allow` is `VIOLATED`;
+exhausting every subset with none allowing is always reported as `HOLDS
+up to k = N` — a bare `HOLDS` is never returned for this fragment, per
+the build spec's own explicit warning that collapsing "no counterexample
+found within a bound" into an unqualified `HOLDS` is exactly the failure
+mode that makes a verifier actively dangerous. An invariant's own
+`relationEquals` constraints (`blocked(o) = s`) are held fixed as *given*
+facts in every subset tried, never left to the enumeration to include or
+omit — without that, a claim like "a blocked user can never publish"
+would be meaningless, since nothing would keep `blocked` itself true. A
+hard ceiling, `MAX_BOUNDED_CANDIDATES`, refuses to run rather than hang
+once the candidate count would make brute force impractical — disclosed
+as `UNKNOWN` with a specific reason, not a silent stall.
+
+This is deliberately *not* a second, hand-modeled evaluator for what
+intersection/exclusion mean — the real engine already knows, and asking
+it directly for each candidate subset is both simpler and more
+trustworthy than a bespoke non-monotone semantics this tool would have to
+get exactly right on its own. The real fallback for the general,
+unbounded case is SMT (out of scope for v1); `docs/DECISIONS.md` D-118
+has the full design, the tractability tradeoffs behind this project's own
+default bound, and an encoding sketch for what a future SMT-backed phase
+would need to handle — recursion, in particular, being the actual
+obstacle a bare SMT call doesn't solve by itself.
 
 ## Dynamic invariants (DST)
 
