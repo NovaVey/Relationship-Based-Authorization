@@ -185,6 +185,39 @@ unlike the rest of DST, it genuinely needs a real database to check itself
 against. `.github/workflows/dst.yml` runs the DB-free suite on every PR and
 nightly at a much larger seed count — see D5/D-102 above.
 
+## What's next: a static schema verifier
+
+Both proofs above are existential: differential fuzzing samples random
+`(schema, tuple graph, query)` triples and confirms the check engine
+agrees with an independent oracle on each one; DST confirms the write
+path survives specific injected faults. Neither says anything about a
+tuple set neither has happened to try yet. A third, complementary effort
+now underway asks a universal question instead — for a _given schema_, is
+there any possible tuple set at all that could ever produce an unsafe
+grant — proved once, structurally, rather than sampled.
+
+Two prerequisites have landed on `main` so far: the namespace DSL's
+grammar is now frozen for v1 (tag `schema-dsl-frozen-v1`, D-114) so the
+verifier has a stable target to check against, and a general-purpose
+random _schema_ generator (`src/schema/dsl/random.ts` — distinct from
+`src/soundness/generators.ts`'s existing tuple-_data_ generator above)
+now exists for the verifier's own future property tests. Everything past
+that — the schema-graph IR, the invariant language, and a working
+`HOLDS`/`VIOLATED`/`UNKNOWN` reachability search over the schema graph's
+monotone fragment — is built and tested on a working branch, not yet
+merged; nothing about static safety is a shipped claim here yet.
+
+Building that search against a real schema already produced one honest,
+non-obvious result worth naming even before this is shipped: a
+"tenant isolation" invariant worded exactly the way an obvious first
+attempt would state it turns out to be structurally unprovable as
+`HOLDS` for any realistic schema — a constraint that pins one relation
+doesn't foreclose an entirely different, unconstrained relation
+satisfying the same goal. That's the kind of finding this project's
+whole soundness language exists to surface rather than paper over; full
+account in `docs/DECISIONS.md` D-116 on the `verifier` branch. Track
+real, current status in [`PROGRESS.md`](PROGRESS.md).
+
 ## Try it yourself — under 10 minutes, from a clean clone
 
 ```bash
