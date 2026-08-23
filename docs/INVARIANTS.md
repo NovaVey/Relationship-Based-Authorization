@@ -104,34 +104,76 @@ rather than stopping at the first.
 `tools/schema-verifier/fixtures/invariants/` ships three invariants,
 required by build spec §4:
 
+All three are checked against `tools/schema-verifier/fixtures/schemas/
+tenancy.authz` — a small, purpose-built schema (not a copy of, or edit
+to, `schema/example.authz`, which has no tenant/org-scoping relations at
+all) authored specifically to give these three invariants real relations
+to resolve against.
+
 - **`tenant-isolation.invariant`** — build spec §4's own worked example,
   verbatim in shape: a user in one organization must never get `view` on
-  a document belonging to another. Expected verdict once §5 exists:
-  `HOLDS`.
-- **`no-public-path-to-private-document.invariant`** — structurally the
-  same shape (distinct + two relation-equality constraints + a goal),
-  applied at a narrower granularity: a user whose only standing is
-  membership in some general-access group must never get `view` on a
-  document scoped to a different, more restricted group. Expected
-  verdict once §5 exists: `HOLDS`.
+  a document belonging to another. **Verdict: `VIOLATED`**, not `HOLDS` —
+  and that's the real finding, not a fixture bug. `tenancy.authz`'s
+  `document.view = tenant->member` never once consults `user.tenant`; it
+  only asks whether the subject is a `member` of whichever org the
+  document's own `tenant` tuple names. `tenant(s) = orgA` pins a
+  relation the permission's rewrite rule doesn't use, so nothing stops a
+  witness from giving `s` a second, unconstrained `organization:orgB#
+member` tuple alongside it. See `docs/DECISIONS.md` D-116 for the
+  general principle this demonstrates: a `relationEquals` constraint can
+  prove a leak real; it essentially never proves one impossible, because
+  it pins one `(object, relation)` slot and the search's own terminal
+  edge is almost always a different one.
+- **`no-public-path-to-private-document.invariant`** — recast around the
+  kind of claim this constraint vocabulary _can_ prove unconditionally:
+  type-level unreachability. `o`'s type is `private_document`, whose
+  `view` permission (`= owner`, `owner: service_account`) never accepts
+  `user` anywhere in its rewrite closure, directly or transitively — no
+  constraints needed at all. **Verdict: `HOLDS`**, and it's true
+  regardless of what tuples anyone ever writes, not true-until-someone-
+  adds-one.
 - **`positive-control.invariant`** — deliberately satisfiable: no
   constraints at all beyond the typed variables and the goal, so any
-  schema where `view` can ever be granted (a bare `viewer` tuple is
-  enough) satisfies it. Its entire purpose is proving the verifier's
-  search can actually find a witness when one plainly exists — a
-  verifier whose search is broken and therefore always reports `HOLDS`
-  is worse than no verifier, and this fixture is the check against
-  exactly that failure mode. Expected verdict once §5 exists: `VIOLATED`,
-  with a one-tuple witness.
+  schema where `view` can ever be granted at all satisfies it. Its
+  entire purpose is proving the verifier's search can actually find a
+  witness when one plainly exists — a verifier whose search is broken
+  and therefore always reports `HOLDS` is worse than no verifier, and
+  this fixture is the check against exactly that failure mode.
+  **Verdict: `VIOLATED`**, with a real witness (`document.tenant` then
+  `organization.member` — `tenancy.authz` has no bare `viewer` relation
+  to shortcut through, so this also doubles as confirmation the search
+  finds a two-hop witness just as readily as a one-hop one).
 
-Both non-control fixtures reference relation names (`tenant`, `member`,
-`visibility`) that no real schema in this repository currently declares —
-`schema/example.authz`'s namespaces have no cross-namespace tenant/org
-scoping today. That's a known, deliberate gap, not an oversight: build
-spec §4 is the invariant _language_, checked independent of any schema;
-choosing or authoring a real fixture schema whose relations these
-invariants actually resolve against is §5's job, once an invariant and a
-schema graph are walked together for the first time.
+### Checking an invariant (§5)
+
+`tools/schema-verifier/src/reachability/checkInvariant(graph, schema,
+invariant)` walks the schema-graph IR (§3) backward from the goal
+permission, over the **monotone fragment only** — union,
+computedUserset, tupleToUserset. Each tuple-to-userset hop introduces a
+fresh object variable, unified via union-find with any invariant
+constraint already naming that same `(object, relation)` slot; each
+terminal (direct) edge checks the accumulated bindings for
+satisfiability — union-find plus a type check, never a solver. A
+`distinct(...)` group is enforced the same way, as a standing "never
+unify these" fact the union-find carries throughout.
+
+Reaching an intersection or exclusion edge yields `UNKNOWN` immediately
+— §7 (not yet built) is where those are handled; §5 never guesses.
+Cycles are handled with a per-search-path visited-node set, exactly as
+§3 anticipated: a revisited node is a dead end for that branch, not a
+hang and not an automatic pass, matching the monotone fragment's own
+small-model property that a minimal witness never needs to unroll a
+cycle.
+
+**The load-bearing lesson from building this** — see `docs/DECISIONS.md`
+D-116 for the full account — is that `relationEquals` constraints are
+good at proving a leak is real, and essentially powerless to prove one
+is impossible: pinning `(object, relation)` slot A says nothing about
+slot B, and a witness is always free to populate B on its own. A
+provable `HOLDS`, with only the two constraint kinds §4 ships today,
+needs the schema graph itself to offer no path at all from the goal
+subject's type to the goal permission — type-level unreachability, not a
+constraint argument.
 
 ## Dynamic invariants (DST)
 

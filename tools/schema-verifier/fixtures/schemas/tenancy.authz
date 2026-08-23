@@ -1,0 +1,46 @@
+// A minimal, purpose-built schema for the schema verifier's own §5 worked
+// examples. Not a copy of schema/example.authz — that schema has no
+// tenant/org-scoping relations at all — and not meant to model a real
+// product; every namespace and relation here exists only to make the
+// three fixtures in docs/INVARIANTS.md actually checkable against a real,
+// compiled schema, which was a disclosed gap when those fixtures first
+// landed (see docs/DECISIONS.md D-115's own "Revisit if" note).
+
+namespace organization {
+  relation member: user | group#member
+}
+
+namespace group {
+  relation member: user | group#member
+}
+
+namespace user {
+  // Exists purely so `tenant(s) = orgA`-style invariant constraints
+  // type-check against a real relation. Deliberately unused by
+  // `document.view`'s own rewrite rule below — see
+  // tenant-isolation.invariant's own comment for why that's the entire
+  // point of this fixture, not an oversight.
+  relation tenant: organization
+}
+
+namespace document {
+  relation tenant: organization
+
+  permission view = tenant->member
+}
+
+namespace service_account {
+  // Placeholder relation only — this DSL requires every namespace to
+  // declare at least one member; nothing in this fixture ever writes a
+  // tuple against it.
+  relation member: service_account
+}
+
+namespace private_document {
+  // `owner`'s subject type is `service_account` only — never `user`,
+  // directly or transitively. See no-public-path-to-private-document's
+  // own comment for what that buys the verifier.
+  relation owner: service_account
+
+  permission view = owner
+}

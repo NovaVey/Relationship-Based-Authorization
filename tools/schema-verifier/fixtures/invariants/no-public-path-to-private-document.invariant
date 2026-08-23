@@ -1,24 +1,30 @@
-// "No public path to a private document": a user whose only standing is
-// membership in some general-access group must never get `view` on a
-// document scoped to a different, more restricted group — structurally
-// the same shape as tenant isolation (distinct + two relation-equality
-// constraints + a goal), because "this class of leak" is the same claim
-// at a different granularity: a rewrite-rule path that quietly widens who
-// a permission reaches beyond the boundary its own relations imply.
+// "No public path to a private document" — revised while building §5
+// (monotone reachability). The original version (distinct + two
+// relation-equality constraints, structurally mirroring tenant-isolation)
+// turned out to demonstrate the *same* verdict tenant-isolation does, for
+// the same reason: a relation-equality constraint pins one specific
+// (object, relation) slot, but the terminal edge the search actually
+// needs to satisfy the goal is a *different* slot the constraint never
+// touches — so nothing stops the search from just adding that edge's
+// tuple directly. See tenant-isolation.invariant's own comment, and
+// docs/DECISIONS.md D-116, for the full reasoning; the short version is
+// that a relation-equality constraint can rule a leak *in* (as evidence
+// it's real) but essentially never rules one *out*, because it never
+// forecloses an unrelated, unconstrained tuple satisfying the goal a
+// completely different way.
 //
-// Same caveat as tenant-isolation.invariant: `member` and `visibility`
-// aren't first-class concepts here either, just relation names this
-// invariant expects a real schema to resolve in §5. Expected verdict once
-// §5 exists: HOLDS.
+// A structural guarantee that constraints alone can't produce is
+// available a different way: type-level unreachability. This fixture's
+// `o` is `private_document` (tools/schema-verifier/fixtures/schemas/
+// tenancy.authz), whose `view` permission's entire rewrite closure —
+// `owner: service_account` only — never once accepts `user` as a valid
+// subject, directly or transitively. No constraints are needed at all:
+// no tuple set, however constructed, can ever satisfy this goal, because
+// the schema graph itself has no path from a `user`-typed variable to
+// `private_document#view`. Expected verdict once §5 exists: HOLDS.
 invariant no_public_path_to_private_document {
   s: user
-  o: document
-  publicGroup: group
-  restrictedGroup: group
-
-  distinct(publicGroup, restrictedGroup)
-  member(s) = publicGroup
-  visibility(o) = restrictedGroup
+  o: private_document
 
   goal: view(s, o)
 }

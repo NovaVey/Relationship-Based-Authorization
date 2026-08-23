@@ -37,17 +37,17 @@ describe('parseInvariants — the three worked fixtures all load', () => {
     expect(inv.goal).toEqual({ permission: 'view', subject: 's', object: 'o' });
   });
 
-  it('no-public-path-to-private-document.invariant parses with two distinct groups and two relation constraints', () => {
+  it('no-public-path-to-private-document.invariant parses with zero constraints — a type-unreachability claim, not a constraint one', () => {
     const result = parseInvariants(loadFixture('no-public-path-to-private-document.invariant'));
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
     const inv = result.invariants[0]!;
     expect(inv.name).toBe('no_public_path_to_private_document');
-    expect(inv.constraints).toEqual([
-      { kind: 'distinct', variables: ['publicGroup', 'restrictedGroup'] },
-      { kind: 'relationEquals', relation: 'member', subject: 's', value: 'publicGroup' },
-      { kind: 'relationEquals', relation: 'visibility', subject: 'o', value: 'restrictedGroup' },
+    expect(inv.variables).toEqual([
+      { name: 's', type: 'user' },
+      { name: 'o', type: 'private_document' },
     ]);
+    expect(inv.constraints).toEqual([]);
     expect(inv.goal).toEqual({ permission: 'view', subject: 's', object: 'o' });
   });
 
