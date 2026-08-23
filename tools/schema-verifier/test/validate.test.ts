@@ -16,7 +16,8 @@ import { buildSchemaGraph } from '../src/ir/index.js';
 import type { DirectEdge, GraphEdge, SchemaGraph } from '../src/ir/index.js';
 import { parseInvariants } from '../src/invariants/index.js';
 import type { Invariant } from '../src/invariants/index.js';
-import { checkAndValidate } from '../src/validate/index.js';
+import type { WitnessTuple } from '../src/reachability/index.js';
+import { checkAndValidate, fuzzHolds, replayWitness } from '../src/validate/index.js';
 
 const SCHEMA_FIXTURE_DIR = fileURLToPath(new URL('../fixtures/schemas/', import.meta.url));
 const INVARIANT_FIXTURE_DIR = fileURLToPath(new URL('../fixtures/invariants/', import.meta.url));
@@ -86,6 +87,29 @@ describe('checkAndValidate — self-validation runs automatically on every VIOLA
     });
     expect(result.verdict).toBe('HOLDS');
     expect(validation).toEqual({ kind: 'empirically-clean', sampled: 25 });
+  });
+
+  it('fuzzHolds actually detects a real counterexample when one exists — not a no-op that always reports clean', async () => {
+    // §8a's own mutation-testing exercise (docs/DECISIONS.md D-119,
+    // mutation M9) found that nothing in this suite would notice
+    // fuzzHolds silently never reporting a counterexample: every fixture
+    // that reaches it via checkAndValidate (no_public_path_to_private_
+    // document, above) is one where HOLDS is genuinely, structurally
+    // true, so an honest fuzzer and a broken always-clean one behave
+    // identically there. This calls fuzzHolds directly — bypassing
+    // checkAndValidate's own HOLDS-gated routing — against
+    // positive_control (trivially satisfiable, D-116's own "positive
+    // control" fixture) to prove the fuzzer itself has real teeth: with
+    // enough trials it does find `allow`, not just "no assertion ever
+    // ran against a real gap." Seed 1 (this module's own default)
+    // reliably finds it at the default trial/tuple count.
+    const invariant = loadInvariant('positive-control.invariant');
+
+    const validation = await fuzzHolds(tenancy, invariant, { seed: 1 });
+
+    expect(validation.kind).toBe('empirical-counterexample');
+    if (validation.kind !== 'empirical-counterexample') throw new Error('unreachable');
+    expect(validation.engineResult.allowed).toBe(true);
   });
 
   it('an UNKNOWN verdict gets no self-validation attempt at all', async () => {
@@ -177,5 +201,42 @@ describe('checkAndValidate — a deliberately corrupted IR edge makes the mismat
     if (validation.kind !== 'mismatch') throw new Error('unreachable');
     expect(validation.reason).toContain('rejected by the real schema');
     expect(validation.reason).toContain('owner');
+  });
+
+  it('replayWitness reports mismatch when every witness tuple writes successfully but the real engine still denies the goal — a wrong/incomplete witness, not a rejected tuple', async () => {
+    // §8a's own mutation-testing exercise (docs/DECISIONS.md D-119,
+    // mutation M8) found that the fail-check above only ever exercises
+    // replayWitness's *first* mismatch branch (a witness tuple the real
+    // schema rejects outright) — nothing in the suite reached the
+    // *second* branch (every tuple writes fine, but the real engine's own
+    // rewrite-rule logic still denies the goal). A mutation that always
+    // reported `confirmed` once every write succeeded went completely
+    // uncaught. This directly unit-tests replayWitness against a
+    // hand-built witness that's individually type-valid (a real
+    // `tenancy.authz` relation, a real subject type) but deliberately
+    // incomplete: `document:o#tenant@organization:org1` alone never
+    // grants `view`, since `document.view = tenant->member` also needs a
+    // tuple granting `s` membership in that same org — a genuine
+    // `checkInvariant` witness would never omit it, so this is
+    // replayWitness's own behavior in isolation, the same "test the
+    // module directly" approach `generateCandidateTuples`'s own probe
+    // test (bounded.test.ts) already uses.
+    const tenancy = loadSchema(SCHEMA_FIXTURE_DIR, 'tenancy.authz');
+    const invariant = loadInvariant('positive-control.invariant');
+    const incompleteWitness: WitnessTuple[] = [
+      {
+        objectType: 'document',
+        object: 'o',
+        relation: 'tenant',
+        subjectType: 'organization',
+        subject: 'org1',
+      },
+    ];
+
+    const validation = await replayWitness(incompleteWitness, tenancy, invariant);
+
+    expect(validation.kind).toBe('mismatch');
+    if (validation.kind !== 'mismatch') throw new Error('unreachable');
+    expect(validation.reason).toContain('real engine denied');
   });
 });

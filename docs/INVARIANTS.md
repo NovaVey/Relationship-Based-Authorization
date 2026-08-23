@@ -211,7 +211,7 @@ it there, for schemas where a caller is willing to accept "checked up to
 a bound" rather than an exact result.
 
 `tools/schema-verifier/src/reachability/scanReachability(graph,
-goalNodeId)` walks *every* edge reachable from the goal — unlike §5's
+goalNodeId)` walks _every_ edge reachable from the goal — unlike §5's
 search, it never stops at an intersection/exclusion edge — and reports
 which fragment the schema (as reachable from that one goal) falls into,
 plus every relation node it passed through. `checkAndValidate` consults
@@ -225,14 +225,14 @@ from the real engine directly, so there is nothing left to replay.
 type, enumerates every type-valid candidate tuple up to that bound
 (`bounded/candidates.ts`, drawn straight from each reachable relation's
 own real `subjectTypes` — never generate-and-filter), and brute-forces
-every *subset* of those candidates directly through the real, unmodified
+every _subset_ of those candidates directly through the real, unmodified
 `productionCheck`. The first subset that produces `allow` is `VIOLATED`;
 exhausting every subset with none allowing is always reported as `HOLDS
 up to k = N` — a bare `HOLDS` is never returned for this fragment, per
 the build spec's own explicit warning that collapsing "no counterexample
 found within a bound" into an unqualified `HOLDS` is exactly the failure
 mode that makes a verifier actively dangerous. An invariant's own
-`relationEquals` constraints (`blocked(o) = s`) are held fixed as *given*
+`relationEquals` constraints (`blocked(o) = s`) are held fixed as _given_
 facts in every subset tried, never left to the enumeration to include or
 omit — without that, a claim like "a blocked user can never publish"
 would be meaningless, since nothing would keep `blocked` itself true. A
@@ -240,7 +240,7 @@ hard ceiling, `MAX_BOUNDED_CANDIDATES`, refuses to run rather than hang
 once the candidate count would make brute force impractical — disclosed
 as `UNKNOWN` with a specific reason, not a silent stall.
 
-This is deliberately *not* a second, hand-modeled evaluator for what
+This is deliberately _not_ a second, hand-modeled evaluator for what
 intersection/exclusion mean — the real engine already knows, and asking
 it directly for each candidate subset is both simpler and more
 trustworthy than a bespoke non-monotone semantics this tool would have to
@@ -250,6 +250,53 @@ has the full design, the tractability tradeoffs behind this project's own
 default bound, and an encoding sketch for what a future SMT-backed phase
 would need to handle — recursion, in particular, being the actual
 obstacle a bare SMT call doesn't solve by itself.
+
+### Testing the verifier itself (§8)
+
+Every claim above rests on the shipped tests actually being able to fail
+— §8 is where that gets checked directly, three ways, rather than
+assumed from a green run.
+
+**Mutation testing.** Nine hand-curated, single-change mutations, applied
+one at a time straight to this tool's own core algorithmic files (the
+union-find's conflict detection, the search's cycle safety and terminal
+type check, fragment detection, the bounded-search ceiling, and both of
+`generateGivenTuples`/`collectPoolNamespaces`'s own real bugs from §7),
+each confirmed to turn the suite red for the right reason, then reverted
+— this project's own standing "mutate the real code, confirm red,
+restore" discipline, now run across the whole tool at once rather than
+one feature at a time. Two mutations went completely uncaught on the
+first pass — not noise, but real gaps: `collectPoolNamespaces`'s own
+contribution turned out to be silently masked by a different line
+nearby, and `replayWitness`'s second `mismatch` branch (engine denies
+despite every tuple writing successfully) had no test reaching it at
+all. Both closed with new, deliberately isolating tests rather than left
+disclosed-but-open. Full mutation list, outcomes, and the two closed
+gaps: `docs/DECISIONS.md` D-119.
+
+**Differential-against-brute-force.** `src/schema/dsl/random.ts`'s own
+header comment states this exactly, quoting the build spec: "on small
+random schemas from §2b, run the verifier against a deliberately dumb
+exhaustive checker." §7's `boundedSearch` already _is_ that checker —
+`tools/schema-verifier/test/differential.test.ts` turns it into a
+genuine second, independent oracle for §5's exact search specifically:
+for every random schema/goal where `checkInvariant` reports `HOLDS`,
+`boundedSearch` is run over the same reachable relations and must never
+find a counterexample either. Deliberately the `HOLDS` direction only —
+every `VIOLATED` §5 produces is already confirmed against the real
+engine on every real run (§6); `HOLDS` previously had only empirical
+sampling. A disagreement here would be exactly the "actively dangerous"
+failure mode §5's own doc comment warns about, caught by an independent
+implementation rather than assumed away by a clean test run.
+
+**A known-answer corpus.** `tools/schema-verifier/test/known-
+answers.test.ts` gathers every fixture invariant this project ships —
+all five, across both fragments and both verdicts — into one literal
+table with its exact committed result and the `docs/DECISIONS.md` entry
+that reasoned out why, swept in a single loop. Not a duplicate of the
+scattered mechanism-specific assertions elsewhere; this is the one place
+a reader sees every answer this project has ever committed to as
+correct, at a glance.
 
 ## Dynamic invariants (DST)
 

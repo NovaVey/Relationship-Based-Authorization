@@ -16,7 +16,11 @@ import { describe, expect, it } from 'vitest';
 
 import { compileSchema } from '../../../src/schema/dsl/compiler.js';
 import type { CompiledSchema } from '../../../src/schema/dsl/types.js';
-import { boundedSearch, MAX_BOUNDED_CANDIDATES } from '../src/bounded/index.js';
+import {
+  boundedSearch,
+  generateCandidateTuples,
+  MAX_BOUNDED_CANDIDATES,
+} from '../src/bounded/index.js';
 import { buildSchemaGraph } from '../src/ir/index.js';
 import { parseInvariants } from '../src/invariants/index.js';
 import type { Invariant } from '../src/invariants/index.js';
@@ -180,5 +184,39 @@ describe('boundedSearch — MAX_BOUNDED_CANDIDATES refuses to run rather than ha
     expect(result.fragment).toBe('non-monotone');
     expect(result.reason).toContain(String(MAX_BOUNDED_CANDIDATES));
     expect(result.reason).toContain('ceiling');
+  });
+});
+
+describe("generateCandidateTuples — collectPoolNamespaces pools a relation's own subject type, independent of the invariant's own goal types", () => {
+  it("still generates candidates for a subject-only type (`user`, not declared as its own namespace) when the invariant's own goal subject/object types are something else entirely", () => {
+    // §8a's own mutation-testing exercise (docs/DECISIONS.md D-119,
+    // mutation M7) found that a naive version of this test — reusing
+    // `intersection-approve.invariant` (`s: user, o: document`) — doesn't
+    // actually isolate `collectPoolNamespaces`'s own contribution: since
+    // that invariant's own goal subject type already happens to be
+    // `user`, `buildInstancePools`'s separate, unconditional
+    // `namespaces.add(subjectType)` line masks a completely broken
+    // `collectPoolNamespaces` and the test still passes for the wrong
+    // reason. This probe instead declares goal subject/object types that
+    // don't correspond to anything in the schema at all — so the only
+    // way `user` can end up with a pool, and `editor`'s own candidate
+    // tuples exist at all, is `collectPoolNamespaces` itself walking
+    // `editor`'s real declared `subjectTypes`.
+    const schema = loadSchema(SCHEMA_FIXTURE_DIR, 'non-monotone.authz');
+    const source = [
+      'invariant probe {',
+      '  s: nonexistent_subject_type',
+      '  o: nonexistent_object_type',
+      '  goal: editor(s, o)',
+      '}',
+    ].join('\n');
+    const parsed = parseInvariants(source);
+    if (!parsed.ok) throw new Error('probe invariant failed to parse');
+    const invariant = parsed.invariants[0]!;
+
+    const candidates = generateCandidateTuples(schema, ['document#editor'], invariant, 1);
+
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.subjectType === 'user')).toBe(true);
   });
 });
