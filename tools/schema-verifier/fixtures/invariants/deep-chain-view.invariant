@@ -1,0 +1,16 @@
+// §8c's depth-limit pathological fixture, paired with
+// `depth-exceeds-limit.authz` — a chain of 30 distinct namespaces, only
+// the last of which grants directly. This invariant's own goal
+// (`view(s, o)` where `o: level0`) is what `test/pathological-depth-
+// limit.test.ts` checks: the static search finds a real 30-hop witness
+// (no depth cap of its own), but self-validation correctly reports
+// `mismatch` — the real engine's own `CHECK_MAX_DEPTH` (default 25,
+// `src/config/env.ts`) denies it. See that test's own doc comment for
+// the full account of why this is a genuine, disclosed static/runtime
+// disagreement, not a bug in either component.
+invariant deep_chain_view {
+  s: user
+  o: level0
+
+  goal: view(s, o)
+}

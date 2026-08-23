@@ -1,0 +1,33 @@
+// §9's own CLI test fixture: a single `--invariants` file naming more
+// than one invariant, to prove `verify-schema` actually checks every one
+// and combines their exit codes correctly (worst-wins — see
+// src/cli/exitCodes.ts). Both invariant bodies below are copied verbatim
+// from their own dedicated fixture files, not reworded — see
+// `no-public-path-to-private-document.invariant` and
+// `tenant-isolation.invariant` for the full reasoning behind each; this
+// file exists only to put both in one place, not to re-derive them.
+//
+// Against tools/schema-verifier/fixtures/schemas/tenancy.authz:
+// `no_public_path_to_private_document` → HOLDS (exit 0),
+// `tenant_isolation` → VIOLATED (exit 1) — so the combined exit code
+// this file's own CLI test asserts on is 1, not 0.
+
+invariant no_public_path_to_private_document {
+  s: user
+  o: private_document
+
+  goal: view(s, o)
+}
+
+invariant tenant_isolation {
+  s: user
+  o: document
+  orgA: organization
+  orgB: organization
+
+  distinct(orgA, orgB)
+  tenant(s) = orgA
+  tenant(o) = orgB
+
+  goal: view(s, o)
+}

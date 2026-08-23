@@ -112,10 +112,34 @@ is the only setup step; there is nothing to install inside this directory.
 
 ## Checking your own schema
 
-There's no CLI yet (`verify-schema <schema-file> --invariants <file>` is
-tracked, not built — see [What's not built yet](#whats-not-built-yet)
-below). Until then, the library is what `examples/run.ts` shows: write a
-short script in the same shape —
+```
+npx tsx tools/schema-verifier/src/cli/index.ts <schema-file> --invariants <file> [--bound k] [--json]
+```
+
+Not registered as a `package.json` `bin` — this module lives entirely
+under `tools/schema-verifier/`, outside the root `package.json` this
+branch's own file-touch discipline keeps off-limits — so it's always
+invoked by path, as above, not as a bare `verify-schema` command.
+
+Exit codes: `0` holds (a genuine proof, monotone fragment only), `1`
+violated, `2` unknown or a non-monotone `HOLDS` that's only bounded, not
+proven, `3` tool error — including a schema/invariant file that fails to
+compile or parse, and the rarer case where self-validation (§6) itself
+disagrees with the search (a real static/runtime divergence, or a bug in
+the search — either way, not something to trust as a verdict). See
+`src/cli/exitCodes.ts`'s own top-of-file comment for the exact mapping,
+including the two judgment calls the build spec's own exit-code table
+doesn't spell out. A `--invariants` file may declare more than one
+invariant (`src/invariants/parser.ts` returns an array); every one is
+checked, and the process exits with the worst code among them.
+
+Human output leads with the verdict, then the counterexample tuples, then
+the engine's own confirmation — exactly the worked example above.
+`--json` prints the same information as one parseable object instead, for
+scripts and CI.
+
+Prefer calling the library directly (no subprocess, no argument parsing)?
+`examples/run.ts` shows the same shape `src/cli/verify.ts` itself wraps:
 
 ```ts
 import { compileSchema } from '../../../src/schema/dsl/compiler.js';
@@ -191,8 +215,15 @@ written) for that distinction applied to schemas this tool didn't author.
 
 Tracked, explicit future work — not silently missing:
 
-- **CLI and CI** (`verify-schema` command, required-PR-check wiring on
-  this repo's own schemas) — build spec §9.
+- **CI wiring** — `verify-schema` (above) exists and is tested end to end,
+  but nothing runs it automatically yet. Build spec §9's own exit
+  criterion is "wire it as a required PR check on this repo's own
+  schemas: the repo now proves its own tenant isolation invariant on
+  every commit" — that requires a `.github/workflows/` file and this
+  module actually landing on `main`, both of which sit outside this
+  branch's own file-touch discipline (`tools/schema-verifier/` plus two
+  docs files). Tracked as real, disclosed follow-up, not silently
+  skipped.
 - **Third-party schema survey** (`docs/FINDINGS.md`, analyzing schemas
   this project didn't write) — build spec §10, `CHECKPOINT 6`.
 - Explicitly out of scope for this tool entirely (build spec §13): no
@@ -202,9 +233,8 @@ Tracked, explicit future work — not silently missing:
 The nightly differential test (`test/differential.nightly.test.ts`, §8b —
 brute-force agreement at `k = 3`, deliberately excluded from the default
 `vitest run` because it's slow) is fully built and independently
-verified, but not yet wired into a scheduled CI job — that's part of §9
-above, not shipped early, per this branch's own file-touch discipline.
-Run it directly:
+verified, but not yet wired into a scheduled CI job — same CI-wiring gap
+as above, not shipped early. Run it directly:
 
 ```
 npx vitest run --config tools/schema-verifier/vitest.nightly.config.ts

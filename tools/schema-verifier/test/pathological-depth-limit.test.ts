@@ -38,6 +38,7 @@ import { parseInvariants } from '../src/invariants/index.js';
 import { checkAndValidate } from '../src/validate/index.js';
 
 const SCHEMA_FIXTURE_DIR = fileURLToPath(new URL('../fixtures/schemas/', import.meta.url));
+const INVARIANT_FIXTURE_DIR = fileURLToPath(new URL('../fixtures/invariants/', import.meta.url));
 
 describe('§8c — the depth limit pathological fixture: a real static/runtime disagreement, correctly caught by self-validation', () => {
   it('the static search finds a real 30-hop witness — unbounded, no depth cap of its own', async () => {
@@ -45,12 +46,15 @@ describe('§8c — the depth limit pathological fixture: a real static/runtime d
     const compiled = compileSchema(source);
     if (!compiled.ok) throw new Error('depth-exceeds-limit.authz failed to compile');
     const graph = buildSchemaGraph(compiled.schema);
+    // `deep-chain-view.invariant`: a real fixture file (§9's own CLI test
+    // loads this exact file too), not an inline string — was inline here
+    // until §9 needed a real `.invariant` file on disk to exercise the CLI
+    // end-to-end against a genuine `mismatch` outcome; promoted to a shared
+    // fixture rather than duplicated, so the two can't silently drift apart.
     const invariant = parseInvariants(
-      ['invariant deep_chain_view {', '  s: user', '  o: level0', '  goal: view(s, o)', '}'].join(
-        '\n',
-      ),
+      readFileSync(INVARIANT_FIXTURE_DIR + 'deep-chain-view.invariant', 'utf8'),
     );
-    if (!invariant.ok) throw new Error('probe invariant failed to parse');
+    if (!invariant.ok) throw new Error('deep-chain-view.invariant failed to parse');
 
     const { result, validation } = await checkAndValidate(
       graph,
