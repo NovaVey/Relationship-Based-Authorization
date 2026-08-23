@@ -1,5 +1,5 @@
 /**
- * `authz check <subject> <relation> <object> [--at-token <n>]`'s own
+ * `authz check <subject> <relation> <object> [--at-token <token>]`'s own
  * exit-code mapping — `.claude/commands/build-authz-service.md` §7's exit
  * code table applied to `src/cli/commands/check.ts`'s `check`, mirroring
  * `test/unit/cli/expand.test.ts`'s own established pattern (which itself
@@ -11,8 +11,13 @@
  *
  *   - a malformed subject/object reference exits 2, before `check` ever
  *     touches Postgres
- *   - an invalid `--at-token` (non-integer or negative) exits 2, likewise
- *     before touching Postgres
+ *   - a `--at-token` that doesn't decode exits 2, likewise before touching
+ *     Postgres (`--at-token` takes the opaque, encoded string
+ *     `authz tuple write`/`delete` print — `src/store/tokens.ts`'s
+ *     `encodeToken`/`decodeToken` — not a raw integer; this file's own
+ *     "invalid" cases below are all strings that fail to decode)
+ *   - a `--at-token` that *does* decode proceeds past the guard, same as
+ *     no `--at-token` at all
  *   - an unreachable database exits 3
  *
  * Confirmed directly against `src/cli/commands/check.ts` before writing
@@ -36,6 +41,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { env } from '../../../src/config/env.js';
 import { closePool } from '../../../src/store/client.js';
 import { check } from '../../../src/cli/commands/check.js';
+import { encodeToken } from '../../../src/store/tokens.js';
 
 /** Guaranteed unreachable: nothing listens on this port on the loopback interface in any environment this test runs in — same constant `expand.test.ts`/`soundness.test.ts` already establish. */
 const UNREACHABLE_DATABASE_URL = 'postgres://user:pass@127.0.0.1:1/definitely_nonexistent_db';
@@ -67,7 +73,7 @@ describe('authz check — exit codes', () => {
     expect(process.exitCode).toBe(2);
   });
 
-  it('an-invalid-at-token-that-is-not-an-integer-exits-2-before-check-ever-touches-postgres', async () => {
+  it('an-at-token-that-is-not-an-encoded-token-exits-2-before-check-ever-touches-postgres', async () => {
     env.DATABASE_URL = undefined;
     process.exitCode = undefined;
 
@@ -76,7 +82,10 @@ describe('authz check — exit codes', () => {
     expect(process.exitCode).toBe(2);
   });
 
-  it('an-invalid-at-token-that-is-negative-exits-2-before-check-ever-touches-postgres', async () => {
+  it('an-at-token-that-looks-like-a-plain-negative-integer-still-fails-to-decode-exits-2', async () => {
+    // The old numeric form ('--at-token -1') is no more valid than any
+    // other non-decoding string now — it's not "a negative integer,"
+    // it's just a string that isn't a valid encodeToken output.
     env.DATABASE_URL = undefined;
     process.exitCode = undefined;
 
@@ -85,13 +94,13 @@ describe('authz check — exit codes', () => {
     expect(process.exitCode).toBe(2);
   });
 
-  // Full-repo audit finding #11 (LOW, third audit, 2026-08-17): `Number('')`
-  // and `Number('   ')` both coerce to `0`, which passes the numeric checks
-  // below unmodified — an empty/whitespace-only `--at-token` was silently
-  // treated as the legitimately-supplied token `0` instead of rejected as
-  // malformed, unlike `soundness run --queries=""`/`--progress=""` on the
-  // same codebase.
-  it('an-invalid-at-token-that-is-empty-exits-2-before-check-ever-touches-postgres', async () => {
+  // Originally full-repo audit finding #11 (LOW, third audit, 2026-08-17),
+  // against the old numeric `--at-token`: `Number('')`/`Number('   ')` both
+  // coerce to `0`, silently treated as the legitimate token `0` instead of
+  // rejected. That specific coercion hazard doesn't exist for the opaque
+  // form (decodeToken never calls `Number()` on the raw input at all), but
+  // blank/whitespace input must still fail to decode, so the coverage stays.
+  it('an-at-token-that-is-empty-exits-2-before-check-ever-touches-postgres', async () => {
     env.DATABASE_URL = undefined;
     process.exitCode = undefined;
 
@@ -100,13 +109,26 @@ describe('authz check — exit codes', () => {
     expect(process.exitCode).toBe(2);
   });
 
-  it('an-invalid-at-token-that-is-whitespace-only-exits-2-before-check-ever-touches-postgres', async () => {
+  it('an-at-token-that-is-whitespace-only-exits-2-before-check-ever-touches-postgres', async () => {
     env.DATABASE_URL = undefined;
     process.exitCode = undefined;
 
     await check('user:alice', 'view', 'document:readme', { atToken: '   ' });
 
     expect(process.exitCode).toBe(2);
+  });
+
+  it('a-genuinely-valid-encoded-at-token-decodes-successfully-and-check-proceeds-past-the-guard', async () => {
+    // Not exit 2 (the decode guard) and not a silent success either — an
+    // unreachable database still means exit 3. Proves decodeToken's happy
+    // path is actually reached, not just that every malformed case is
+    // rejected.
+    env.DATABASE_URL = UNREACHABLE_DATABASE_URL;
+    process.exitCode = undefined;
+
+    await check('user:alice', 'view', 'document:readme', { atToken: encodeToken(1160) });
+
+    expect(process.exitCode).toBe(3);
   });
 
   it('check-against-an-unreachable-database-exits-3-not-a-silent-empty-answer', async () => {

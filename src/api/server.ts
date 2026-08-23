@@ -63,6 +63,7 @@ import { env } from '../config/env.js';
 import { performCheck } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { writeTuple, deleteTuple, type TupleKey } from '../store/tuples.js';
+import { decodeToken } from '../store/tokens.js';
 import { compileSchema } from '../schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
 import { publishSchema, listLatestNamespaceVersions } from '../schema/publish.js';
@@ -122,7 +123,15 @@ const checkBodySchema = z.object({
   subject: entityRefSchema,
   relation: identifierField(),
   object: entityRefSchema,
-  atToken: z.number().int().nonnegative().optional(),
+  // An opaque, encoded consistency token (`src/store/tokens.ts`'s
+  // `encodeToken`/`decodeToken`) — the exact string a write/delete
+  // response's own `token` field returned, never a raw integer since this
+  // project stopped exposing one (see that file's own doc comment for
+  // why). Decoded, and rejected with a normal 400 on malformed input, by
+  // the `/check` route handler below rather than by this schema, so a bad
+  // token produces the same `invalidRequestError` shape every other
+  // malformed-body case here does, not a differently-worded Zod error.
+  atToken: z.string().optional(),
 });
 
 const expandBodySchema = z.object({
@@ -707,7 +716,16 @@ export async function buildServer(
         await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
         return;
       }
-      const { subject, relation, object, atToken } = parsed.data;
+      const { subject, relation, object, atToken: opaqueAtToken } = parsed.data;
+      let atToken: number | undefined;
+      if (opaqueAtToken !== undefined) {
+        try {
+          atToken = decodeToken(opaqueAtToken);
+        } catch (err) {
+          await sendApiError(reply, invalidRequestError((err as Error).message));
+          return;
+        }
+      }
       const result = await runOrInfrastructureError(reply, () =>
         performCheck(pool, subject, object, relation, atToken !== undefined ? { atToken } : {}),
       );

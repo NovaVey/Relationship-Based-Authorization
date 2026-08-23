@@ -26,6 +26,7 @@ import {
   schemaPublishResponse,
   healthResponse,
 } from '../../../src/api/responses.js';
+import { encodeToken, decodeToken } from '../../../src/store/tokens.js';
 import type {
   ApiEntityRef,
   HealthDatabaseStatus,
@@ -87,11 +88,12 @@ describe('checkResponse — path is present, and equal to result.path, if and on
   });
 });
 
-describe('checkResponse — atToken is present, and equal to the caller-supplied value, if and only if it was passed', () => {
-  it('checkresponse-includes-an-attoken-key-equal-to-the-supplied-token-when-a-token-was-passed', () => {
+describe('checkResponse — atToken is present, opaque-encoded, and decodes back to the caller-supplied value, if and only if a token was passed', () => {
+  it('checkresponse-includes-an-attoken-key-that-decodes-back-to-the-supplied-token-when-a-token-was-passed', () => {
     const result: PerformCheckResult = { allowed: false, depth: 0 };
     const response = checkResponse(subject, 'viewer', object, result, 987654);
-    expect(response.body.atToken).toBe(987654);
+    expect(response.body.atToken).toBe(encodeToken(987654));
+    expect(decodeToken(response.body.atToken as string)).toBe(987654);
     expect(Object.prototype.hasOwnProperty.call(response.body, 'atToken')).toBe(true);
   });
 
@@ -108,8 +110,17 @@ describe('checkResponse — atToken is present, and equal to the caller-supplied
     // at exactly this value.
     const result: PerformCheckResult = { allowed: false, depth: 0 };
     const response = checkResponse(subject, 'viewer', object, result, 0);
-    expect(response.body.atToken).toBe(0);
+    expect(response.body.atToken).toBe(encodeToken(0));
+    expect(decodeToken(response.body.atToken as string)).toBe(0);
     expect(Object.prototype.hasOwnProperty.call(response.body, 'atToken')).toBe(true);
+  });
+
+  it('checkresponse-attoken-is-not-parseable-as-a-plain-integer-the-opacity-property', () => {
+    // The whole point of encodeToken: a caller must not be able to treat
+    // this as a raw number to compare/increment/decrement.
+    const result: PerformCheckResult = { allowed: false, depth: 0 };
+    const response = checkResponse(subject, 'viewer', object, result, 42);
+    expect(Number.isNaN(Number(response.body.atToken))).toBe(true);
   });
 });
 
@@ -228,18 +239,28 @@ const deleteErrors: TupleError[] = [
   { code: 'undeclared_relation', message: 'relation not declared' },
 ];
 
-describe('tupleWriteResponse — ok:true renders 200 with {token, created} verbatim', () => {
+describe('tupleWriteResponse — ok:true renders 200 with {token, created}, token opaque-encoded', () => {
   it('tuplewriteresponse-ok-true-with-created-true-renders-200-with-token-and-created-verbatim', () => {
     const result: WriteTupleResult = { ok: true, token: 42, created: true };
-    expect(tupleWriteResponse(result)).toEqual({ status: 200, body: { token: 42, created: true } });
+    expect(tupleWriteResponse(result)).toEqual({
+      status: 200,
+      body: { token: encodeToken(42), created: true },
+    });
   });
 
   it('tuplewriteresponse-ok-true-with-created-false-still-renders-200-not-an-error-idempotent-no-op-write', () => {
     const result: WriteTupleResult = { ok: true, token: 42, created: false };
     expect(tupleWriteResponse(result)).toEqual({
       status: 200,
-      body: { token: 42, created: false },
+      body: { token: encodeToken(42), created: false },
     });
+  });
+
+  it('tuplewriteresponse-token-decodes-back-to-the-real-integer-and-is-not-parseable-as-one-directly', () => {
+    const result: WriteTupleResult = { ok: true, token: 1160, created: true };
+    const { body } = tupleWriteResponse(result) as { body: { token: string } };
+    expect(decodeToken(body.token)).toBe(1160);
+    expect(Number.isNaN(Number(body.token))).toBe(true);
   });
 });
 
@@ -258,12 +279,12 @@ describe("tupleWriteResponse — ok:false delegates to tupleValidationError('wri
   });
 });
 
-describe('tupleDeleteResponse — ok:true renders 200 with {token, deleted} verbatim', () => {
+describe('tupleDeleteResponse — ok:true renders 200 with {token, deleted}, token opaque-encoded', () => {
   it('tupledeleteresponse-ok-true-with-deleted-true-renders-200-with-token-and-deleted-verbatim', () => {
     const result: DeleteTupleResult = { ok: true, token: 43, deleted: true };
     expect(tupleDeleteResponse(result)).toEqual({
       status: 200,
-      body: { token: 43, deleted: true },
+      body: { token: encodeToken(43), deleted: true },
     });
   });
 
@@ -271,7 +292,7 @@ describe('tupleDeleteResponse — ok:true renders 200 with {token, deleted} verb
     const result: DeleteTupleResult = { ok: true, token: 43, deleted: false };
     expect(tupleDeleteResponse(result)).toEqual({
       status: 200,
-      body: { token: 43, deleted: false },
+      body: { token: encodeToken(43), deleted: false },
     });
   });
 });

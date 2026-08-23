@@ -1,6 +1,6 @@
 /**
  * `authz check` — build spec §7: `authz check <subject> <relation> <object>
- * [--at-token <n>]`. Subject and object both use the plain `namespace:id`
+ * [--at-token <token>]`. Subject and object both use the plain `namespace:id`
  * form (never `namespace:id#relation`) — a check always asks about a
  * concrete principal, never a userset reference (Zanzibar's own Check API
  * has the same restriction; a userset isn't a thing you check membership
@@ -14,6 +14,7 @@
  */
 import { performCheck } from '../../audit/checks.js';
 import { getPool, closePool } from '../../store/client.js';
+import { decodeToken } from '../../store/tokens.js';
 import { env } from '../../config/env.js';
 import type { ResolutionStep } from '../../resolve/production/resolver.js';
 import { parseEntityArg, isValidIdentifier } from '../entity-ref.js';
@@ -118,7 +119,8 @@ export interface CheckCliOptions {
  * applied elsewhere in this CLI (see `tuple.ts`): 0 the check ran and
  * printed a real answer (allowed *or* denied — denial is information, not
  * an error), 2 a malformed argument (bad subject/object reference, a
- * non-numeric `--at-token`), 3 an infrastructure failure (DB unreachable,
+ * `--at-token` that doesn't decode — see `src/store/tokens.ts`'s
+ * `decodeToken`), 3 an infrastructure failure (DB unreachable,
  * a supplied token this database hasn't observed yet, or the audit-log
  * write itself failing — all three surface as a thrown error from
  * `performCheck`, never a silent `false` and never an answer reported
@@ -151,27 +153,19 @@ export async function check(
 
   let atToken: number | undefined;
   if (options.atToken !== undefined) {
-    // Blank/whitespace-only rejected explicitly, before the numeric checks
-    // below (full-repo audit finding #11, LOW, third audit, 2026-08-17):
-    // `Number('')` and `Number('   ')` both coerce to `0`, which passes
-    // both `Number.isInteger` and `atToken < 0` — an empty or
-    // whitespace-only `--at-token` was silently treated as the
-    // legitimately-supplied token `0` instead of rejected as malformed
-    // (unlike `soundness.ts`'s `--queries`/`--progress`, which reject blank
-    // input via their own `<= 0` check — `0` isn't a valid query count
-    // either way there, but `0` IS a valid `--at-token`, so that same trick
-    // doesn't carry over here and needs its own explicit guard). Also
-    // brings this in line with `src/api/server.ts`'s `checkBodySchema`
-    // (`atToken: z.number().int().nonnegative().optional()`), which already
-    // rejects a string-typed empty value for the equivalent HTTP operation.
-    if (options.atToken.trim() === '') {
-      console.error(`invalid --at-token '${options.atToken}' — must be a non-negative integer`);
-      process.exitCode = 2;
-      return;
-    }
-    atToken = Number(options.atToken);
-    if (!Number.isInteger(atToken) || atToken < 0) {
-      console.error(`invalid --at-token '${options.atToken}' — must be a non-negative integer`);
+    // `--at-token` takes the exact opaque string `authz tuple write`/
+    // `delete` printed (`src/store/tokens.ts`'s `encodeToken`), not a raw
+    // integer — `decodeToken` rejects anything else outright, including
+    // blank/whitespace-only input (full-repo audit finding #11, LOW, third
+    // audit, 2026-08-17, closed a `Number('')`-coerces-to-`0` hazard for
+    // the old numeric form; a malformed opaque string never decodes to a
+    // number at all, so that hazard doesn't recur here). Same shape as
+    // `src/api/server.ts`'s `/check` route: decode here, fail loudly here,
+    // never pass a string through to `performCheck`.
+    try {
+      atToken = decodeToken(options.atToken);
+    } catch (err) {
+      console.error(`invalid --at-token — ${(err as Error).message}`);
       process.exitCode = 2;
       return;
     }
@@ -190,7 +184,11 @@ export async function check(
     });
     console.log(
       `${subjectRaw} ${relation} ${objectRaw}: ${result.allowed ? 'ALLOWED' : 'DENIED'}` +
-        (atToken !== undefined ? ` (at token ${atToken})` : ''),
+        // Echoes the exact opaque string the caller passed, not the
+        // decoded integer — nothing about this command should print the
+        // internal representation `encodeToken`/`decodeToken` exist to
+        // hide (`src/store/tokens.ts`'s own doc comment).
+        (options.atToken !== undefined ? ` (at token ${options.atToken})` : ''),
     );
     if (options.path === true) {
       if (result.allowed && result.path) {

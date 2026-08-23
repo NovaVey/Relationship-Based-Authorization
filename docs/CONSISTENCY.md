@@ -36,19 +36,32 @@ create table write_log (
 `token` is a generated column, always equal to that row's own `id` —
 deliberately a _separate_ column from `id`, not `id` reused directly under
 a second name. One source of truth (`id` is what Postgres actually
-increments), exposed under the name callers actually reason about ("pin to
-token N") — see `docs/DECISIONS.md` for why this project chose that over
-either a second, independently-tracked counter (which could drift from
-`id`) or having every caller pin to `id` itself (which would leak an
-internal primary-key detail into this project's own public consistency
-vocabulary). Either way, it's monotonically increasing — every single
-`tuple write` or `tuple delete`, across every namespace, advances it by
-one. The CLI prints it (`authz tuple write ... ` → `token 1160`); the API
-returns it (`{"token": 1160, "created": true}`). It is nothing more
-sophisticated than "how many writes has this database seen, in order" —
-and that's exactly what makes it usable: a caller who just wrote something
-gets back a number that names the exact point in the write history their
-write landed at.
+increments), internally nothing more sophisticated than "how many writes
+has this database seen, in order" — see `docs/DECISIONS.md` D-014 for why
+this project chose that over either a second, independently-tracked
+counter (which could drift from `id`) or having every caller pin to `id`
+itself (which would leak an internal primary-key detail into this
+project's own public consistency vocabulary). It's monotonically
+increasing — every single `tuple write` or `tuple delete`, across every
+namespace, advances it by one.
+
+**What a caller actually sees is an opaque, encoded string, never that raw
+integer.** `src/store/tokens.ts`'s `encodeToken`/`decodeToken` wrap it in a
+small versioned envelope before it ever leaves this codebase — the CLI
+prints it (`authz tuple write ...` → `token eyJ2IjoxLCJ0IjoxMTYwfQ`); the
+API returns it (`{"token": "eyJ2IjoxLCJ0IjoxMTYwfQ", "created": true}`).
+This is presentation-layer opacity, not cryptographic protection — nothing
+stops a caller from decoding the base64 and reading the integer back out,
+and a forged or hand-edited token can't grant extra permissions either way
+(the token only ever gates a freshness floor via `assertTokenObserved`,
+never the authorization decision itself). What it does buy: the raw
+sequential-integer representation was never a promise to callers, and
+exposing it directly would have made it one by accident, the moment
+anything started comparing, incrementing, or persisting it as a number —
+exactly what a real Zanzibar-style zookie exists to prevent. A caller who
+just wrote something gets back a token that names the exact point in the
+write history their write landed at — they just never see, or need to
+see, which integer that actually is.
 
 **A check that supplies that token as `--at-token` (CLI) or `atToken`
 (API) is guaranteed to observe that write, and everything before it.**

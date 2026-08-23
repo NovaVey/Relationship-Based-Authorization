@@ -84,3 +84,77 @@ export async function assertTokenObserved(pool: QueryExecutor, token: number): P
     );
   }
 }
+
+/**
+ * The wire-format version this encoding produces — bumped only if the
+ * envelope shape below ever changes; `decodeToken` rejects anything else
+ * outright rather than guessing how to read it.
+ */
+const TOKEN_ENCODING_VERSION = 1;
+
+/**
+ * Wraps a raw `write_log.token` integer in an opaque, versioned string —
+ * a small JSON envelope, base64url-encoded — for every place this project
+ * hands a consistency token to a caller (the CLI's own printed `token
+ * <...>` line, the API's `token`/`atToken` JSON fields). Everywhere
+ * *inside* this codebase — `assertTokenObserved`, `ProductionCheckOptions
+ * .atToken`, `WriteTupleResult.token`, and every internal comparison —
+ * still uses the plain `number` this file's own doc comment already
+ * describes; nothing about the internal representation changes. Only the
+ * public, caller-facing form does.
+ *
+ * **What this buys, stated plainly, and what it doesn't.** This is
+ * presentation-layer opacity, not cryptographic protection — there is no
+ * signature, and a caller who decodes the base64 can read the raw
+ * integer back out. That's a deliberate, honest scope, not an oversight:
+ * a decoded (or even hand-forged) token can only ever widen or narrow
+ * *which freshness floor* `assertTokenObserved` waits for — it can never
+ * grant a permission the underlying tuple data doesn't already grant,
+ * since the token plays no role in the actual authorization decision.
+ * What opacity *does* buy: nothing about `write_log.token` being a plain
+ * sequential integer (D-014) is a promise to callers. Exposing that raw
+ * integer directly would make it one by accident, the moment any caller
+ * starts comparing, incrementing, or persisting it as a number — exactly
+ * the dependency a real Zanzibar-style zookie exists to prevent (see
+ * `docs/CONSISTENCY.md`). Wrapping it now, while nothing depends on the
+ * raw form yet, is what keeps the internal representation free to change
+ * later without that being a breaking change to anyone.
+ */
+export function encodeToken(token: number): string {
+  if (!Number.isInteger(token) || token < 0) {
+    throw new Error(
+      `cannot encode ${JSON.stringify(token)} as a consistency token — ` +
+        `must be a non-negative integer returned by an earlier write or delete`,
+    );
+  }
+  const envelope = JSON.stringify({ v: TOKEN_ENCODING_VERSION, t: token });
+  return Buffer.from(envelope, 'utf8').toString('base64url');
+}
+
+/**
+ * Reverses `encodeToken`. Throws — never falls back to a guessed or
+ * zero value — on anything that isn't exactly what `encodeToken`
+ * produces: malformed base64, malformed JSON, a missing field, an
+ * unrecognized version, or a non-integer/negative `t`. A caller handing
+ * back a corrupted, truncated, or hand-edited token gets a clear, loud
+ * error here, the same discipline `assertTokenObserved`'s own malformed-
+ * input guard already applies one layer down.
+ */
+export function decodeToken(opaque: string): number {
+  const malformed = (): Error => new Error(`'${opaque}' is not a valid consistency token`);
+
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(Buffer.from(opaque, 'base64url').toString('utf8'));
+  } catch {
+    throw malformed();
+  }
+
+  if (typeof envelope !== 'object' || envelope === null) throw malformed();
+  const { v, t }: { v?: unknown; t?: unknown } = envelope;
+
+  if (v !== TOKEN_ENCODING_VERSION) throw malformed();
+  if (typeof t !== 'number' || !Number.isInteger(t) || t < 0) throw malformed();
+
+  return t;
+}

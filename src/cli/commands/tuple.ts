@@ -5,6 +5,7 @@
  * subject (`group:eng#member`).
  */
 import { writeTuple, deleteTuple, validateIdentifiers, type TupleKey } from '../../store/tuples.js';
+import { encodeToken } from '../../store/tokens.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
 
@@ -110,7 +111,9 @@ export async function tupleWrite(
       process.exitCode = 2;
       return;
     }
-    console.log(`token ${result.token}${result.created ? '' : ' (already existed — no new row)'}`);
+    console.log(
+      `token ${encodeToken(result.token)}${result.created ? '' : ' (already existed — no new row)'}`,
+    );
   } catch (err) {
     console.error(`Postgres: ${(err as Error).message}`);
     process.exitCode = 3;
@@ -154,7 +157,9 @@ export async function tupleDelete(
       process.exitCode = 2;
       return;
     }
-    console.log(`token ${result.token}${result.deleted ? '' : ' (no such tuple — no-op)'}`);
+    console.log(
+      `token ${encodeToken(result.token)}${result.deleted ? '' : ' (no such tuple — no-op)'}`,
+    );
   } catch (err) {
     console.error(`Postgres: ${(err as Error).message}`);
     process.exitCode = 3;

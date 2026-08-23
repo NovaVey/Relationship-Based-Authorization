@@ -26,7 +26,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Pool } from 'pg';
 
-import { assertTokenObserved, currentToken } from '../../../src/store/tokens.js';
+import {
+  assertTokenObserved,
+  currentToken,
+  encodeToken,
+  decodeToken,
+} from '../../../src/store/tokens.js';
 
 /**
  * A fake `Pool` whose `query` throws immediately if ever called — the
@@ -151,5 +156,79 @@ describe('currentToken is unaffected by the assertTokenObserved fix', () => {
     const result = await currentToken(pool);
     expect(result).toBe(42);
     expect(typeof result).toBe('number');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. encodeToken/decodeToken — the opaque, versioned wire encoding a
+//    caller actually sees. Every internal function above still takes/
+//    returns the plain `number` this file's own doc comment describes;
+//    these two are the one place that number ever becomes a string.
+// ---------------------------------------------------------------------------
+
+describe('encodeToken/decodeToken round-trip every valid token', () => {
+  it.each([0, 1, 42, 1160, 9007199254740991])(
+    'round-trips-%i-through-encode-then-decode',
+    (token) => {
+      expect(decodeToken(encodeToken(token))).toBe(token);
+    },
+  );
+
+  it('encodetoken-output-is-not-parseable-as-a-plain-integer-the-opacity-property', () => {
+    // The whole reason this exists: a caller must not be able to treat
+    // this as a raw number to compare/increment/persist as one.
+    const encoded = encodeToken(1160);
+    expect(Number.isNaN(Number(encoded))).toBe(true);
+  });
+
+  it('two-different-tokens-encode-to-two-different-strings', () => {
+    expect(encodeToken(1)).not.toBe(encodeToken(2));
+  });
+
+  it('encoding-the-same-token-twice-is-deterministic-byte-identical', () => {
+    // checkResponse relies on this: it decodes a caller's own token then
+    // re-encodes it for the response body, and the round trip must be
+    // exact, not merely "decodes to the same number."
+    expect(encodeToken(1160)).toBe(encodeToken(1160));
+  });
+});
+
+describe('encodeToken rejects a malformed token before ever producing a string', () => {
+  it.each([-1, 1.5, NaN, Infinity])('throws-for-%s', (bad) => {
+    expect(() => encodeToken(bad)).toThrow(/cannot encode .* as a consistency token/);
+  });
+});
+
+describe('decodeToken rejects anything that is not exactly what encodeToken produces', () => {
+  it.each(['not-a-token', '', '   ', '-1', '42'])(
+    'throws-for-the-malformed-opaque-string-%j',
+    (bad) => {
+      expect(() => decodeToken(bad)).toThrow(/is not a valid consistency token/);
+    },
+  );
+
+  it('throws-for-a-well-formed-envelope-with-an-unrecognized-version', () => {
+    // Same shape encodeToken produces, deliberately wrong version — the
+    // one case that isn't a parse failure, so it needs its own real
+    // envelope to construct rather than a garbage string.
+    const tamperedVersion = Buffer.from(JSON.stringify({ v: 2, t: 5 }), 'utf8').toString(
+      'base64url',
+    );
+    expect(() => decodeToken(tamperedVersion)).toThrow(/is not a valid consistency token/);
+  });
+
+  it('throws-for-a-well-formed-envelope-whose-t-field-is-not-a-non-negative-integer', () => {
+    const tamperedT = Buffer.from(JSON.stringify({ v: 1, t: -5 }), 'utf8').toString('base64url');
+    expect(() => decodeToken(tamperedT)).toThrow(/is not a valid consistency token/);
+  });
+
+  it('throws-for-valid-base64-that-decodes-to-non-json', () => {
+    const notJson = Buffer.from('definitely not json', 'utf8').toString('base64url');
+    expect(() => decodeToken(notJson)).toThrow(/is not a valid consistency token/);
+  });
+
+  it('throws-for-valid-json-that-is-not-an-object-envelope', () => {
+    const bareNumber = Buffer.from('5', 'utf8').toString('base64url');
+    expect(() => decodeToken(bareNumber)).toThrow(/is not a valid consistency token/);
   });
 });

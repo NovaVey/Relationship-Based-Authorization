@@ -2233,3 +2233,15 @@ Went through build spec §12's own ten-item checklist explicitly rather than ass
 **Verification:** documentation-only. Root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite (13 files, 115 tests) both clean; lint/typecheck/format all clean. Full account: `docs/DECISIONS.md` D-126.
 
 **This closes the schema verifier project as scoped by its own build spec, §1 through §12, in full.** Every checkpoint has been reported and confirmed. Nothing remains open against the original spec.
+
+## Consistency token is now opaque on the wire (D-128)
+
+**Owner:** the main agent, directly, on `main`.
+
+`write_log.token` was exposed to every caller as a plain integer — `authz tuple write` printed it raw, the API returned it raw, `--at-token`/`atToken` both took it back raw. Nothing about that representation was ever a promise to callers, but exposing it directly made it one by accident. `src/store/tokens.ts` gains `encodeToken`/`decodeToken` — a small, versioned, base64url-encoded envelope — wired in at exactly two boundaries (the CLI's `tuple`/`check` commands, the API's `/tuples`/`/check` routes); every internal caller (`assertTokenObserved`, `ProductionCheckOptions.atToken`, the DST fake store) is untouched.
+
+Explicitly not a security fix — no signature, no integrity check, stated plainly in D-128 — a forged token can only ever widen or narrow which freshness floor a check waits for, never grant a permission the tuple data doesn't already grant. Fail-checked live: `encodeToken` reverted to a raw `String(token)`, 10 real tests failed for the right reason, reverted, reconfirmed green.
+
+**Verification:** `npx vitest run` (47 files, 602 tests, up from 578), `npx eslint .`, `npx tsc --noEmit`, `npx prettier --check .`, `npm run build` all clean. Full account: `docs/DECISIONS.md` D-128.
+
+Second of the small batch of improvements identified while reviewing a proposed consistency-layer plan against this repo's actual state (first: `docs/INVARIANTS.md`'s dynamic-invariants section, D-127).

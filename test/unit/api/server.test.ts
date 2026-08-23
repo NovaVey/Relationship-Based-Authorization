@@ -55,6 +55,7 @@ import { env } from '../../../src/config/env.js';
 import * as checksModule from '../../../src/audit/checks.js';
 import * as expandModule from '../../../src/audit/expand.js';
 import * as tuplesModule from '../../../src/store/tuples.js';
+import { encodeToken } from '../../../src/store/tokens.js';
 import * as compilerModule from '../../../src/schema/dsl/compiler.js';
 import * as publishModule from '../../../src/schema/publish.js';
 
@@ -465,7 +466,10 @@ describe('with the correct admin key, each gated route calls its domain function
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(200);
-    expect(await parseBody(res)).toEqual({ token: 42, created: true });
+    // token is the one deliberate exception to "verbatim" — the route
+    // opaque-encodes it (src/store/tokens.ts's encodeToken) before it
+    // ever reaches the response body; everything else really is verbatim.
+    expect(await parseBody(res)).toEqual({ token: encodeToken(42), created: true });
   });
 
   it('a-correct-admin-key-on-delete-tuples-calls-deletetuple-and-returns-its-result-verbatim', async () => {
@@ -482,7 +486,8 @@ describe('with the correct admin key, each gated route calls its domain function
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(200);
-    expect(await parseBody(res)).toEqual({ token: 43, deleted: true });
+    // Same token exception as the write route above.
+    expect(await parseBody(res)).toEqual({ token: encodeToken(43), deleted: true });
   });
 
   it('a-correct-admin-key-on-post-schema-publish-calls-publishschema-and-returns-its-result-verbatim', async () => {
@@ -789,7 +794,7 @@ describe("D-065: failed-auth requests never consume a gated route's rate-limit b
 
     expect(res.statusCode).toBe(200);
     expect(writeSpy).toHaveBeenCalledTimes(1);
-    expect(await parseBody(res)).toEqual({ token: 99, created: true });
+    expect(await parseBody(res)).toEqual({ token: encodeToken(99), created: true });
   });
 });
 
