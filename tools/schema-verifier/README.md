@@ -189,10 +189,13 @@ reachable from the invariant's own goal permission:
   ever — not "wasn't found," but "can't exist." This relies on a
   small-model property: if a violation exists at all, one exists using
   only object instances already reachable from the goal, so the search
-  never needs to guess at an unbounded space. `docs/DECISIONS.md` D-115
-  through D-117 have the full argument, including the counterexample
-  self-validation (§6) that replays every `VIOLATED` witness against the
-  real, unmodified production engine before it's ever reported.
+  never needs to guess at an unbounded space. `docs/DECISIONS.md` D-125
+  states the full argument in one place — why it makes unbounded search
+  tractable, and exactly where it stops applying — cross-referencing
+  D-115 through D-118 and D-120, where the pieces were originally built
+  and verified. Counterexample self-validation (§6), which replays every
+  `VIOLATED` witness against the real, unmodified production engine
+  before it's ever reported, is D-117.
 - **Non-monotone** (the schema, as reachable from the goal, uses
   intersection or exclusion anywhere): the verifier runs a **bounded**
   search instead — every type-valid tuple set up to `k` objects per type,
