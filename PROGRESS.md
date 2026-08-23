@@ -2207,3 +2207,17 @@ Two background research agents fetched real, verbatim, source-cited schema conte
 **Verification:** all twelve schema/invariant pairs re-run against the real CLI in one pass immediately before writing `docs/FINDINGS.md`. Root and `tools/schema-verifier` suites both clean with `thirdparty/` present. Full account: `docs/DECISIONS.md` D-124.
 
 This closes build spec §10 and its `CHECKPOINT 6`. Per §0's own rule (stop at every checkpoint, wait for a reply), holding here rather than continuing automatically into §11's remaining sweep or §12's definition-of-done checklist.
+
+## Schema verifier — §11 closed: the documentation sweep D-121 left open (D-125)
+
+**Owner:** the main agent, directly, on `main`.
+
+D-121 (above) shipped only the README worked example and explicitly flagged the rest of §11 as scattered-but-unswept. This entry checks that claim directly and closes it: four of §11's five `docs/DECISIONS.md` asks (the small-model property, the SMT sketch, backward-vs-forward search, mutation testing results) were genuinely already written across D-115–D-120, just never stated as one coherent, cross-referenced argument — D-125 pulls each into a single explicit paragraph pointing back to its fuller original treatment. The fifth — **why the verifier imports the parser rather than reimplementing it** — was never actually written down anywhere as its own argument, despite being followed as a consistent practice from D-114 onward; that's the one genuinely new piece of content: a static verifier's whole claim depends on its model of the schema agreeing with the real compiler's and the real engine's, so a second implementation of either is a second place that agreement could go quietly wrong with nothing positioned to catch it, and importing sidesteps the question rather than answering it well.
+
+`docs/INVARIANTS.md` was re-read in full and confirmed already correct — the dynamic-invariants section is deliberately left as DST's own stub to fill in, not a gap this branch has authority to close.
+
+**Fresh-clone reproduction, re-run rather than assumed still valid:** §9 and §10 both landed on `main` since D-121's own clone test. A fresh clone into a new scratch path, `npm install`, then the worked example, the README's own CLI usage line, and the full `tools/schema-verifier` test suite (13 files, 115 tests) all reproduced exactly — none of which existed yet when D-121 shipped.
+
+**Verification:** documentation-only change. Root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite both clean; lint/typecheck/format all clean. Full account: `docs/DECISIONS.md` D-125.
+
+This closes build spec §11 in full. Per §0's own rule, holding here — only §12 (the definition-of-done checklist) remains, and one item on it (flipping the schema-verifier CI check to "required" in branch protection) is a real open decision, not a formality.
