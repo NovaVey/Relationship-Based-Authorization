@@ -1,0 +1,15 @@
+// The positive control (§4/§5): deliberately satisfiable. No constraints
+// at all beyond the two typed variables and the goal — any schema where
+// `view` can ever be granted at all (a bare `viewer` tuple is enough)
+// satisfies this. Its entire purpose is proving the verifier's search can
+// actually find a witness when one plainly exists, not just report
+// nothing found by default. A verifier that only ever says HOLDS because
+// its search is broken is worse than no verifier — this fixture is the
+// check against that failure mode. Expected verdict once §5 exists:
+// VIOLATED, with a one-tuple witness.
+invariant positive_control_view_is_reachable {
+  s: user
+  o: document
+
+  goal: view(s, o)
+}

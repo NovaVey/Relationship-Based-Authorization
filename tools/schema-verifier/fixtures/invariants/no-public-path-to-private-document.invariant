@@ -1,0 +1,24 @@
+// "No public path to a private document": a user whose only standing is
+// membership in some general-access group must never get `view` on a
+// document scoped to a different, more restricted group — structurally
+// the same shape as tenant isolation (distinct + two relation-equality
+// constraints + a goal), because "this class of leak" is the same claim
+// at a different granularity: a rewrite-rule path that quietly widens who
+// a permission reaches beyond the boundary its own relations imply.
+//
+// Same caveat as tenant-isolation.invariant: `member` and `visibility`
+// aren't first-class concepts here either, just relation names this
+// invariant expects a real schema to resolve in §5. Expected verdict once
+// §5 exists: HOLDS.
+invariant no_public_path_to_private_document {
+  s: user
+  o: document
+  publicGroup: group
+  restrictedGroup: group
+
+  distinct(publicGroup, restrictedGroup)
+  member(s) = publicGroup
+  visibility(o) = restrictedGroup
+
+  goal: view(s, o)
+}

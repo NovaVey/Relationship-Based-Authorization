@@ -18,11 +18,7 @@ import { describe, expect, it } from 'vitest';
 
 import { compileSchema } from '../../../src/schema/dsl/compiler.js';
 import { generateRandomSchema } from '../../../src/schema/dsl/random.js';
-import type {
-  CompiledSchema,
-  RewriteRule,
-  SubjectTypeRef,
-} from '../../../src/schema/dsl/types.js';
+import type { CompiledSchema, RewriteRule, SubjectTypeRef } from '../../../src/schema/dsl/types.js';
 import { buildSchemaGraph, printSchemaGraph } from '../src/ir/index.js';
 import type {
   ComputedUsersetEdge,
@@ -38,13 +34,21 @@ import type {
 const FIXTURE_DIR = fileURLToPath(new URL('../../../schema/', import.meta.url));
 
 /** Every real `.authz` fixture in the repo except the deliberately-invalid one — see the "malformed fixture" test below for why it's excluded. */
-const REAL_FIXTURES = ['document.authz', 'example.authz', 'folder.authz', 'group.authz', 'org.authz'];
+const REAL_FIXTURES = [
+  'document.authz',
+  'example.authz',
+  'folder.authz',
+  'group.authz',
+  'org.authz',
+];
 
 function loadFixture(filename: string): CompiledSchema {
   const source = readFileSync(FIXTURE_DIR + filename, 'utf8');
   const result = compileSchema(source);
   if (!result.ok) {
-    throw new Error(`fixture ${filename} did not compile: ${result.errors.map((e) => e.message).join('; ')}`);
+    throw new Error(
+      `fixture ${filename} did not compile: ${result.errors.map((e) => e.message).join('; ')}`,
+    );
   }
   return result.schema;
 }
@@ -72,7 +76,9 @@ function reconstructDefinition(graph: SchemaGraph, id: NodeId): RewriteRule {
   if (computedUserset) {
     const target = graph.nodes.get(computedUserset.to);
     if (!target || target.kind !== 'named') {
-      throw new Error(`reconstructDefinition: computedUserset edge from ${id} must target a named node`);
+      throw new Error(
+        `reconstructDefinition: computedUserset edge from ${id} must target a named node`,
+      );
     }
     return { kind: 'computedUserset', name: target.name };
   }
@@ -91,9 +97,14 @@ function reconstructDefinition(graph: SchemaGraph, id: NodeId): RewriteRule {
     return { kind: 'union', children: unionChildren.map((e) => reconstructReference(graph, e.to)) };
   }
 
-  const intersectionChildren = edges.filter((e): e is IntersectionChildEdge => e.kind === 'intersectionChild');
+  const intersectionChildren = edges.filter(
+    (e): e is IntersectionChildEdge => e.kind === 'intersectionChild',
+  );
   if (intersectionChildren.length > 0) {
-    return { kind: 'intersection', children: intersectionChildren.map((e) => reconstructReference(graph, e.to)) };
+    return {
+      kind: 'intersection',
+      children: intersectionChildren.map((e) => reconstructReference(graph, e.to)),
+    };
   }
 
   const base = edges.find((e): e is ExclusionBaseEdge => e.kind === 'exclusionBase');
@@ -106,7 +117,9 @@ function reconstructDefinition(graph: SchemaGraph, id: NodeId): RewriteRule {
     };
   }
 
-  throw new Error(`reconstructDefinition: node ${id} has no recognizable rewrite-rule-shaped edges`);
+  throw new Error(
+    `reconstructDefinition: node ${id} has no recognizable rewrite-rule-shaped edges`,
+  );
 }
 
 /** Asserts every permission's rewrite tree, and every relation's subject-type list, round-trips exactly through the built graph. */
@@ -120,7 +133,9 @@ function assertRoundTrips(schema: CompiledSchema): void {
         throw new Error(`relation ${id} has no direct edge in the built graph`);
       }
       const reconstructed: SubjectTypeRef[] = directEdge.subjectTypes.map((st) =>
-        st.relation === undefined ? { namespace: st.namespace } : { namespace: st.namespace, relation: st.relation },
+        st.relation === undefined
+          ? { namespace: st.namespace }
+          : { namespace: st.namespace, relation: st.relation },
       );
       expect(reconstructed, `relation ${id}'s subjectTypes`).toEqual(relation.subjectTypes);
     }
@@ -188,7 +203,10 @@ describe('buildSchemaGraph — cycles are legal and represented, not rejected or
     );
     const syntheticChild = unionChildren.find((e) => graph.nodes.get(e.to)?.kind === 'synthetic');
     expect(syntheticChild).toBeDefined();
-    expect(graph.nodes.get(syntheticChild!.to)).toMatchObject({ kind: 'synthetic', rule: 'tupleToUserset' });
+    expect(graph.nodes.get(syntheticChild!.to)).toMatchObject({
+      kind: 'synthetic',
+      rule: 'tupleToUserset',
+    });
 
     const hop = (graph.edgesFrom.get(syntheticChild!.to) ?? []).find(
       (e): e is TupleToUsersetEdge => e.kind === 'tupleToUserset',
@@ -205,7 +223,11 @@ describe('buildSchemaGraph — cycles are legal and represented, not rejected or
     expect(directEdge).toBeDefined();
     if (directEdge?.kind !== 'direct') throw new Error('unreachable');
     const usersetEntry = directEdge.subjectTypes.find((st) => st.relation !== undefined);
-    expect(usersetEntry).toEqual({ namespace: 'group', relation: 'member', target: 'group#member' });
+    expect(usersetEntry).toEqual({
+      namespace: 'group',
+      relation: 'member',
+      target: 'group#member',
+    });
   });
 
   it('buildSchemaGraph does not hang or recurse infinitely on a real self-referential schema (both folder.authz and the full four-namespace example.authz)', () => {
@@ -222,21 +244,28 @@ describe('buildSchemaGraph — cycles are legal and represented, not rejected or
 });
 
 describe('buildSchemaGraph — nesting: synthetic nodes only where the tree genuinely branches', () => {
-  it("folder.sensitive_review = (viewer | edit) & sensitive_reviewer builds one synthetic union node nested inside the top-level intersection, never a redundant hop for either bare leaf", () => {
+  it('folder.sensitive_review = (viewer | edit) & sensitive_reviewer builds one synthetic union node nested inside the top-level intersection, never a redundant hop for either bare leaf', () => {
     const graph = buildSchemaGraph(loadFixture('example.authz'));
     const topEdges = graph.edgesFrom.get('folder#sensitive_review') ?? [];
-    const intersectionChildren = topEdges.filter((e): e is IntersectionChildEdge => e.kind === 'intersectionChild');
+    const intersectionChildren = topEdges.filter(
+      (e): e is IntersectionChildEdge => e.kind === 'intersectionChild',
+    );
     expect(intersectionChildren).toHaveLength(2);
 
     // One child is the bare `sensitive_reviewer` relation, reached
     // directly — no synthetic node for it.
     const bareChild = intersectionChildren.find((e) => graph.nodes.get(e.to)?.kind === 'named');
     expect(bareChild).toBeDefined();
-    expect(graph.nodes.get(bareChild!.to)).toMatchObject({ kind: 'named', name: 'sensitive_reviewer' });
+    expect(graph.nodes.get(bareChild!.to)).toMatchObject({
+      kind: 'named',
+      name: 'sensitive_reviewer',
+    });
 
     // The other child is the nested `(viewer | edit)` union, and *does*
     // get its own synthetic node — it has two union children of its own.
-    const nestedChild = intersectionChildren.find((e) => graph.nodes.get(e.to)?.kind === 'synthetic');
+    const nestedChild = intersectionChildren.find(
+      (e) => graph.nodes.get(e.to)?.kind === 'synthetic',
+    );
     expect(nestedChild).toBeDefined();
     const nestedNode = graph.nodes.get(nestedChild!.to);
     expect(nestedNode).toMatchObject({ kind: 'synthetic', rule: 'union' });
@@ -264,13 +293,21 @@ describe('printSchemaGraph — readable, deterministic output', () => {
   it('is stable across two independently-built graphs from the same schema (not just the same graph object)', () => {
     const schemaA = loadFixture('example.authz');
     const schemaB = loadFixture('example.authz');
-    expect(printSchemaGraph(buildSchemaGraph(schemaA))).toBe(printSchemaGraph(buildSchemaGraph(schemaB)));
+    expect(printSchemaGraph(buildSchemaGraph(schemaA))).toBe(
+      printSchemaGraph(buildSchemaGraph(schemaB)),
+    );
   });
 
   it('names every real node and every real edge kind from a schema exercising all five rewrite-rule kinds (example.authz, per its own header comment)', () => {
     const output = printSchemaGraph(buildSchemaGraph(loadFixture('example.authz')));
     // Nodes named by (namespace, member) exactly:
-    for (const id of ['org#view', 'org#member', 'org#banned', 'folder#sensitive_review', 'group#member']) {
+    for (const id of [
+      'org#view',
+      'org#member',
+      'org#banned',
+      'folder#sensitive_review',
+      'group#member',
+    ]) {
       expect(output).toContain(id);
     }
     // Every edge kind this fixture is documented to exercise:

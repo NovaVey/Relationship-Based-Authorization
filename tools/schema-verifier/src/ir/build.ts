@@ -13,13 +13,7 @@ import type {
   CompiledSchema,
   RewriteRule,
 } from '../../../../src/schema/dsl/types.js';
-import type {
-  DirectEdge,
-  GraphEdge,
-  GraphNode,
-  NodeId,
-  SchemaGraph,
-} from './types.js';
+import type { DirectEdge, GraphEdge, GraphNode, NodeId, SchemaGraph } from './types.js';
 
 function namedNodeId(namespace: string, name: string): NodeId {
   return `${namespace}#${name}`;
@@ -38,11 +32,23 @@ export function buildSchemaGraph(schema: CompiledSchema): SchemaGraph {
   for (const ns of Object.values(schema.namespaces)) {
     for (const relation of Object.values(ns.relations)) {
       const id = namedNodeId(ns.namespace, relation.name);
-      nodes.set(id, { kind: 'named', id, namespace: ns.namespace, name: relation.name, nodeKind: 'relation' });
+      nodes.set(id, {
+        kind: 'named',
+        id,
+        namespace: ns.namespace,
+        name: relation.name,
+        nodeKind: 'relation',
+      });
     }
     for (const permission of Object.values(ns.permissions)) {
       const id = namedNodeId(ns.namespace, permission.name);
-      nodes.set(id, { kind: 'named', id, namespace: ns.namespace, name: permission.name, nodeKind: 'permission' });
+      nodes.set(id, {
+        kind: 'named',
+        id,
+        namespace: ns.namespace,
+        name: permission.name,
+        nodeKind: 'permission',
+      });
     }
   }
 

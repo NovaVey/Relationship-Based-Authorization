@@ -1,0 +1,26 @@
+// Build spec §4's own worked example, verbatim in shape: a user in one
+// organization must never get `view` on a document belonging to another.
+// `distinct(orgA, orgB)` is the entire reason this needs to be a
+// constraint problem rather than plain reachability — "cross-tenant"
+// means precisely that these two variables must bind to different
+// objects, and a reachability answer that quietly let them collapse onto
+// the same node would be a false negative no amount of testing catches.
+//
+// `tenant` is not a first-class schema concept anywhere in this project —
+// it's an ordinary relation from a subject/object to the `organization`
+// that scopes it, same as any other relation. This invariant says that
+// without the invariant language itself needing to know what a "tenant"
+// is; §5 resolves `tenant` against whatever real schema it's checked
+// against. Expected verdict once §5 exists: HOLDS.
+invariant tenant_isolation {
+  s: user
+  o: document
+  orgA: organization
+  orgB: organization
+
+  distinct(orgA, orgB)
+  tenant(s) = orgA
+  tenant(o) = orgB
+
+  goal: view(s, o)
+}
