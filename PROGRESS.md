@@ -2233,3 +2233,11 @@ Went through build spec §12's own ten-item checklist explicitly rather than ass
 **Verification:** documentation-only. Root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite (13 files, 115 tests) both clean; lint/typecheck/format all clean. Full account: `docs/DECISIONS.md` D-126.
 
 **This closes the schema verifier project as scoped by its own build spec, §1 through §12, in full.** Every checkpoint has been reported and confirmed. Nothing remains open against the original spec.
+
+## `docs/INVARIANTS.md`'s dynamic-invariants stub, written (D-127)
+
+**Owner:** the main agent, directly, on `main`.
+
+`docs/INVARIANTS.md`'s "Dynamic invariants (DST)" section had said "not yet written here — this section is DST's own to add" since before DST's first commit — DST shipped in full (D0–D5) and nobody came back to fill it in. Found while re-grounding the repo's actual state for an unrelated review. Five dynamic invariants written, each cited against a real, verified-against-the-actual-file test: write atomicity under crash (D0), advisory-lock correctness under crash (D1), no phantom witness under concurrency (D2, generalizing D-092), the frontier BFS/real-Postgres equivalence (D3), and the shared fault-injection scheduler (D4). Explicitly disclaims overclaiming a parallel to the still-not-started temporal-safety layer.
+
+**Verification:** documentation-only; `npx prettier --check .` clean. Full account: `docs/DECISIONS.md` D-127.

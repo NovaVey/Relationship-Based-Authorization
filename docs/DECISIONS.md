@@ -1917,3 +1917,27 @@ All ten. §13's own list (no parser/engine/storage edits, no consistency tokens,
 **Local verification:** `npx prettier --check .`, `npx eslint .`, `npx tsc --noEmit -p tsconfig.json` all clean on `main` with this entry applied. Root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite (13 files, 115 tests) both green.
 
 **Revisit if:** a future PR's required-status-check list needs to change (a workflow renamed, a new one added) — that's a fresh, explicit governance decision against `docs/github-governance.md` Step 2, not an assumption that this entry's snapshot of the required list stays accurate indefinitely.
+
+## D-127 — `docs/INVARIANTS.md`'s "Dynamic invariants (DST)" section, a stub since before DST even started, now written
+
+**Date:** 2026-08-23 · **Phase:** post-12, closing a pre-existing documentation gap · **Status:** settled
+
+**What happened.** `docs/INVARIANTS.md`'s own "Dynamic invariants (DST)" section had read `"Not yet written here — this section is DST's own to add"` since before DST's first commit (D-095). DST shipped in full (D0–D5, `docs/DECISIONS.md` D-097–D-102) and never came back to fill it in — the placeholder simply outlived the branch it was written for. Found while re-grounding this repo's actual state for an unrelated review (a proposed `/build-safety-layer` plan), not from a fresh audit.
+
+**Five dynamic invariants written, each cited against a real, currently-passing test, not restated from memory of the design doc:**
+
+1. Write atomicity under crash (D0/D-097) — `tuple-store.dst.test.ts`.
+2. Advisory-lock correctness under crash (D1/D-098) — `advisory-lock.dst.test.ts`.
+3. No phantom witness under concurrency (D2/D-099, generalizing the real D-092 bug) — `production-check.dst.test.ts`.
+4. Recursive frontier BFS matches real Postgres exactly (D3/D-100) — `frontier.dst.test.ts` plus the 300-graph differential integration suite.
+5. The shared fault-injection scheduler (D4/D-101) that makes the above testable at all.
+
+Every test name and file path was verified directly against the real files before being written into the doc — not trusted from a sub-agent's earlier summary of them, given this is going into permanent documentation.
+
+**The one thing explicitly _not_ claimed, stated as plainly as the honest gaps always are in this file:** the phantom-witness property (D2/D-099) is a narrower, lower-level property — one check's own reads are internally consistent with each other — than the "new enemy problem" (a check's reads are consistent with an _acknowledged revoking write_). It is not a dynamic counterpart to any static invariant, and it does not close the temporal-safety gap `INVARIANTS.md`'s own opening section already marks "Not started." Overclaiming that parallel would have been the easy, wrong move here.
+
+**Also fixed:** the file's own opening "DST (dynamic safety)" bullet still said "its dynamic invariants belong in a section of this file too, added by that branch, not retrofitted here" — stale in the same way, since there's no longer a branch to add it. Now points at the section directly.
+
+**Local verification:** `npx prettier --check .` clean (after a `--write` pass — the new section's line-wrapping needed it). Documentation-only change; no source touched, no test suite affected.
+
+**Revisit if:** a future temporal-safety layer actually ships and needs its own dynamic invariants added here — at that point, the "not a counterpart" disclaimer above should be re-checked against what actually gets built, not assumed to still apply.
