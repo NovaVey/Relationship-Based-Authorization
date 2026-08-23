@@ -16,6 +16,6 @@
   // output-layout concern the root project's own `tsconfig.build.json`
   // comment warns about applies here.
   "extends": "../../tsconfig.json",
-  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "examples/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }

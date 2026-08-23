@@ -21,8 +21,13 @@ export default defineConfig({
     // default (PR-speed) run — matching this repo's own root
     // vitest.config.ts precedent for `*.integration.test.ts` — since it's
     // explicitly meant to be slow ("this is slow and that's fine; run it
-    // nightly, not on PRs"). `.github/workflows/schema-verifier.yml`'s own
-    // `schema-verifier-nightly` job runs it directly by path instead.
+    // nightly, not on PRs"). Run it directly with `npx vitest run --config
+    // tools/schema-verifier/vitest.nightly.config.ts`; see that file's own
+    // comment for why a second config exists instead of an `--exclude`
+    // flag here. Actual CI scheduling (a workflow that runs this on a
+    // cron) is deliberately deferred to §9, "CLI and CI" — see
+    // docs/DECISIONS.md D-120 — and stays outside this branch's own
+    // file-touch discipline until then.
     exclude: ['**/*.nightly.test.ts'],
   },
 });
