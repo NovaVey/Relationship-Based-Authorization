@@ -201,11 +201,22 @@ grammar is now frozen for v1 (tag `schema-dsl-frozen-v1`, D-114) so the
 verifier has a stable target to check against, and a general-purpose
 random _schema_ generator (`src/schema/dsl/random.ts` — distinct from
 `src/soundness/generators.ts`'s existing tuple-_data_ generator above)
-now exists for the verifier's own future property tests. The schema-graph
-IR itself — turning a compiled schema into an explicit node/edge graph,
-the verifier's first real component — is built and tested on a working
-branch, not yet merged; nothing about static safety is a shipped claim
-here yet. Track real, current status in [`PROGRESS.md`](PROGRESS.md).
+now exists for the verifier's own future property tests. Everything past
+that — the schema-graph IR, the invariant language, and a working
+`HOLDS`/`VIOLATED`/`UNKNOWN` reachability search over the schema graph's
+monotone fragment — is built and tested on a working branch, not yet
+merged; nothing about static safety is a shipped claim here yet.
+
+Building that search against a real schema already produced one honest,
+non-obvious result worth naming even before this is shipped: a
+"tenant isolation" invariant worded exactly the way an obvious first
+attempt would state it turns out to be structurally unprovable as
+`HOLDS` for any realistic schema — a constraint that pins one relation
+doesn't foreclose an entirely different, unconstrained relation
+satisfying the same goal. That's the kind of finding this project's
+whole soundness language exists to surface rather than paper over; full
+account in `docs/DECISIONS.md` D-116 on the `verifier` branch. Track
+real, current status in [`PROGRESS.md`](PROGRESS.md).
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
