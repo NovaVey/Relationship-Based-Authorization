@@ -185,38 +185,51 @@ unlike the rest of DST, it genuinely needs a real database to check itself
 against. `.github/workflows/dst.yml` runs the DB-free suite on every PR and
 nightly at a much larger seed count — see D5/D-102 above.
 
-## What's next: a static schema verifier
+## A third proof: the static schema verifier
 
 Both proofs above are existential: differential fuzzing samples random
 `(schema, tuple graph, query)` triples and confirms the check engine
 agrees with an independent oracle on each one; DST confirms the write
 path survives specific injected faults. Neither says anything about a
-tuple set neither has happened to try yet. A third, complementary effort
-now underway asks a universal question instead — for a _given schema_, is
-there any possible tuple set at all that could ever produce an unsafe
-grant — proved once, structurally, rather than sampled.
+tuple set neither has happened to try yet. `tools/schema-verifier/` asks a
+universal question instead — for a _given schema_, is there any possible
+tuple set at all that could ever produce an unsafe grant — and answers it
+once, structurally, rather than by sampling.
 
-Two prerequisites have landed on `main` so far: the namespace DSL's
-grammar is now frozen for v1 (tag `schema-dsl-frozen-v1`, D-114) so the
-verifier has a stable target to check against, and a general-purpose
-random _schema_ generator (`src/schema/dsl/random.ts` — distinct from
-`src/soundness/generators.ts`'s existing tuple-_data_ generator above)
-now exists for the verifier's own future property tests. Everything past
-that — the schema-graph IR, the invariant language, and a working
-`HOLDS`/`VIOLATED`/`UNKNOWN` reachability search over the schema graph's
-monotone fragment — is built and tested on a working branch, not yet
-merged; nothing about static safety is a shipped claim here yet.
+For the **monotone** fragment (union and tuple-to-userset only — no
+intersection, no exclusion), the answer is a genuine proof: a small-model
+property means an exhaustive search over the schema graph is enough to
+say `HOLDS` with certainty, or produce a concrete counterexample. Outside
+that fragment, it falls back to a **bounded** search (`HOLDS up to k = N`,
+never bare `HOLDS`) — honest about the difference, never silently
+promoted. Every `VIOLATED` verdict is self-validated before it's ever
+reported: the witness tuples are written to a real scratch store and
+checked through the actual, unmodified production engine, so a
+counterexample is never just a static tool's opinion. Full worked example,
+the invariant language, and the CLI's own exit-code table:
+[`tools/schema-verifier/README.md`](tools/schema-verifier/README.md).
 
-Building that search against a real schema already produced one honest,
-non-obvious result worth naming even before this is shipped: a
-"tenant isolation" invariant worded exactly the way an obvious first
-attempt would state it turns out to be structurally unprovable as
-`HOLDS` for any realistic schema — a constraint that pins one relation
-doesn't foreclose an entirely different, unconstrained relation
-satisfying the same goal. That's the kind of finding this project's
-whole soundness language exists to surface rather than paper over; full
-account in `docs/DECISIONS.md` D-116 on the `verifier` branch. Track
-real, current status in [`PROGRESS.md`](PROGRESS.md).
+It's wired into this repo's own CI as a required status check
+(`.github/workflows/schema-verifier.yml`) — every PR proves
+`org#view = member - banned` still holds against `schema/example.authz`,
+this repo's own real, live schema, not a demo fixture. And it's been run
+against twelve real, published schemas this project didn't write (six
+OpenFGA `sample-stores`, six SpiceDB `authzed/examples`) — nine came back
+`VIOLATED`, three `HOLDS`, and the survey's own biggest result is a
+finding about the invariant language itself, not any one schema: eight of
+those nine violations share one root cause — the language has no way to
+state a _negative_ precondition, so any goal reachable via a directly-
+grantable relation is trivially escapable. Full table and reasoning:
+[`docs/FINDINGS.md`](docs/FINDINGS.md).
+
+`docs/DECISIONS.md` D-114 through D-126 has the complete build history —
+the small-model property and exactly where it stops applying, the SMT
+encoding sketch for the general case, why the verifier imports this
+repo's own parser and engine rather than reimplementing either, and the
+ten-item definition-of-done checklist confirmed against the real, shipped
+result rather than assumed. Tag `schema-verifier-v1-complete` marks the
+commit where all of it closed. Track real, current status in
+[`PROGRESS.md`](PROGRESS.md).
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
@@ -397,7 +410,8 @@ src/
   cli/       the authz CLI
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
-docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, DST-PROPOSAL.md, github-governance.md, screens/
+tools/schema-verifier/  the static schema verifier — see "A third proof" above
+docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, INVARIANTS.md, FINDINGS.md, DST-PROPOSAL.md, github-governance.md, screens/
 test/
   isolation/ the inherited, repurposed proof suite — see test/isolation/README.md
   unit/      per-module unit + integration tests, one file per real claim
