@@ -2150,3 +2150,21 @@ The build spec was pasted directly into a prior session's conversation and never
 **Verification:** `npx tsc --noEmit -p tools/schema-verifier/tsconfig.json`, `npx eslint .`, `npx prettier --check .` all clean. `npx vitest run --config tools/schema-verifier/vitest.config.ts`: 10 files, 86 tests, all green (up from 7/73) — the eleventh file (`differential.nightly.test.ts`) independently verified via `vitest.nightly.config.ts`. Full account of all three gaps, the schema-mutation list, and the cycle-guard finding: `docs/DECISIONS.md` D-120.
 
 CHECKPOINT 5's own exit criteria ("eight mutations caught; differential agreement over a nightly run; corpus green") are now genuinely met against the real spec text, not a paraphrase. Holding here to report before continuing into §9 ("CLI and CI") — where the actual scheduled-workflow wiring deferred above, and the required-PR-check demonstration, both belong.
+
+## Schema verifier — §11 README worked example lands (D-121)
+
+**Owner:** the main agent, directly, on the `verifier` branch.
+
+§11's own words: "a section leading with a worked example: a schema with a three-hop leak, the invariant, the counterexample tuples, the engine confirming them. Someone should understand what the tool does from that example alone without reading prose." No `README.md` existed under `tools/schema-verifier/` before this — a from-scratch write, not an edit.
+
+- **The example.** Reused the same shape as `test/schema-mutations.test.ts`'s own mutation #3 (`private_document.linked_doc -> document.tenant -> organization.member -> user`, one of §8a's two required "subtle" mutations), given its own standalone fixture pair — `examples/three-hop-leak.authz`, `examples/three-hop-leak.invariant` — rather than reused as a runtime string-splice, so a reader can see the leak as an ordinary schema. `examples/run.ts` loads both directly through the public API (`compileSchema` → `buildSchemaGraph` → `parseInvariants` → `checkAndValidate`) and prints the verdict, the three witness tuples, and the §6 self-validation outcome — this is also what README.md's own "checking your own schema" section points readers at, since no CLI exists yet (§9, still future work).
+
+- **Backed, not just asserted.** New `test/worked-example.test.ts` loads the same two fixture files `examples/run.ts` does and pins the exact verdict, 3-edge witness shape, and `confirmed` self-validation outcome README.md quotes verbatim — if the schema, the engine, or the search itself ever drifts, this fails in CI, not just on a human rerun.
+
+- **A real drift caught along the way.** `vitest.config.ts`'s own comment (written for D-120's Gap 2) still claimed `.github/workflows/schema-verifier.yml`'s nightly job "runs it directly by path" — that workflow file was deliberately never shipped (D-120), and the comment was never updated to match. Fixed here to point at the real reproduction command instead.
+
+- **Fresh-clone reproduction — §11's own exit criterion, done literally.** `git clone --branch verifier --single-branch` into a scratch path never previously used, `npm install`, then the README's own two Quickstart commands verbatim (`npx tsx tools/schema-verifier/examples/run.ts`, then `cd tools/schema-verifier && npx vitest run`) — both reproduced exactly, no undocumented step needed.
+
+**Verification:** `npx vitest run` (12 files, 88 tests, up from 11/87), `npx eslint .`, `npx tsc --noEmit -p tsconfig.json`, `npx prettier --check .` all clean, plus the fresh-clone reproduction above and an independent re-run of the nightly differential config (246s, 1/1 green). Full rationale: `docs/DECISIONS.md` D-121.
+
+This closes only the README portion of §11 — the rest (an explicit small-model-property writeup, the SMT sketch, backward-vs-forward search rationale, why the verifier imports the parser) is substantially already covered across D-115–D-118 and D-120 but hasn't been swept as a dedicated §11 pass. Left for future continuation, not silently claimed done here.
