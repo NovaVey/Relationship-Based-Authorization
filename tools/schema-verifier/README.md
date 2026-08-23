@@ -220,12 +220,14 @@ author.
 `.github/workflows/schema-verifier.yml` runs `verify-schema` against
 `schema/example.invariant` (this repo's own real, live demo schema,
 `schema/example.authz` — not a testing fixture) on every PR and push to
-`main` — build spec §9's own exit criterion, closed. It has now run green
-on three real PRs (#83, #84, #85) and is designated a required status
-check in `docs/github-governance.md` Step 2 — applying that designation in
-GitHub's own branch-protection settings is a manual, one-time admin step
-outside what any tool available to this project can do (see that doc's own
-closing note). See `docs/DECISIONS.md` D-123 for the full account of the
+`main` — build spec §9's own exit criterion, closed. It ran green on three
+real PRs (#83, #84, #85), is designated a required status check in
+`docs/github-governance.md` Step 2, and that designation is now live in
+GitHub's own branch-protection settings for `main` (applied by the repo
+owner directly, since no tool available to this project can flip that
+setting itself — see that doc's own closing note). Build spec §12's own
+"required PR check proving this repo's own tenant isolation" line item is
+satisfied. See `docs/DECISIONS.md` D-123 for the full account of the
 workflow itself, including why that invariant's own goal is non-monotone (an
 exclusion) and genuinely reports `HOLDS up to k = 1`, never an
 unconditional proof — and why the job still gates on that as a pass, not

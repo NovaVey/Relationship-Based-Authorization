@@ -1890,3 +1890,30 @@ One entry (`openfga-github`, carried from before this segment) still has a genui
 **This closes build spec §11.** All three deliverables — the five `DECISIONS.md` asks (this entry plus D-115–D-120), `docs/INVARIANTS.md`'s cross-referencing (already correct), and the README worked example with fresh-clone reproduction (D-121, re-confirmed here) — are done.
 
 **Revisit if:** DST lands its own dynamic-invariants section in `docs/INVARIANTS.md` — at that point, check whether this project's static section still cross-references cleanly against whatever ID scheme DST actually chose, rather than assuming the stub's own aspirational phrasing matched what shipped.
+
+## D-126 — §12 closed: `schema-verifier` promoted to a required status check on `main`, and every line of the build spec's own definition-of-done is now true
+
+**Date:** 2026-08-23 · **Phase:** schema verifier, §12 · **Status:** settled
+
+**What happened.** D-123 deliberately held off marking `.github/workflows/schema-verifier.yml` as a required status check until it had run green on a real PR — by this entry it had run green on three (#83, #84, #85). Asked explicitly whether to flip it, the answer was yes. `docs/github-governance.md` Step 2 and `tools/schema-verifier/README.md`'s own CI section were updated first (PR #86) to designate `schema-verifier` as required alongside the three existing checks (`lint-and-typecheck`, `test (22)`, `build`) — but the setting itself lives in GitHub's branch-protection configuration, not in any file this repo's own tooling can write: no branch-protection or ruleset endpoint exists among the GitHub tools available to this project, and raw GitHub API calls are outside this project's own tooling setup. That's a genuine capability boundary, stated plainly rather than worked around with an unauthorized API call. The repo owner applied the setting directly in GitHub's UI; confirmed by them directly, since no tool available to this project can read branch-protection configuration back to verify it independently either.
+
+**Build spec §12's own checklist, gone through explicitly, not assumed:**
+
+- [x] Schema DSL frozen; random generator on `main`; both branches rebased — D-114
+- [x] IR honors type restrictions and handles cyclic schemas — D-115
+- [x] Three fixture invariants; positive control returns `VIOLATED` — D-115/D-116
+- [x] Every `VIOLATED` verdict self-validated against the real engine before it's reported — D-117
+- [x] Fragment detection; bounded verdicts always state their bound; `UNKNOWN` never reported as `HOLDS` — D-118
+- [x] Eight schema mutations caught; nightly differential agrees with brute force — D-119/D-120
+- [x] Required PR check proving this repo's own tenant isolation — D-123 (the workflow), this entry (the required-status-check designation, now actually live)
+- [x] Ten-plus third-party schemas analyzed, findings published — D-124 (twelve)
+- [x] `DECISIONS.md` small-model-property entry written — D-125
+- [x] Fresh-clone reproduction of the worked example — D-121, re-confirmed in D-125
+
+All ten. §13's own list (no parser/engine/storage edits, no consistency tokens, no SMT solver in v1, no performance work, no web UI) was never violated at any point across §1–§12 — confirmed by construction, not by a late audit: every phase imported the real compiler and engine rather than modifying either, and no phase reached for a dependency beyond what was already in the repo.
+
+**This closes the schema verifier project as scoped by its own build spec, §1 through §12, in full.** Nothing remains open against that spec. Any further work (the SMT solver §7 explicitly deferred to v2, a fourth constraint kind for the invariant language, additional third-party schemas beyond the twelve already published) is new scope, not a gap in what was asked for here.
+
+**Local verification:** `npx prettier --check .`, `npx eslint .`, `npx tsc --noEmit -p tsconfig.json` all clean on `main` with this entry applied. Root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite (13 files, 115 tests) both green.
+
+**Revisit if:** a future PR's required-status-check list needs to change (a workflow renamed, a new one added) — that's a fresh, explicit governance decision against `docs/github-governance.md` Step 2, not an assumption that this entry's snapshot of the required list stays accurate indefinitely.
