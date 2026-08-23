@@ -175,6 +175,31 @@ needs the schema graph itself to offer no path at all from the goal
 subject's type to the goal permission — type-level unreachability, not a
 constraint argument.
 
+### Self-validation (§6) — no verdict is trusted on the search's word alone
+
+`tools/schema-verifier/src/validate/checkAndValidate(graph, schema,
+invariant)` wraps §5's search with automatic replay against the real,
+unmodified check engine, on a fresh in-memory scratch store (the DST
+fake, `src/store/dst/` — the same real storage seam `productionCheck`
+and `writeTuple` already run against throughout DST, never a second,
+separate proof that the fake behaves like the real thing). `VIOLATED`
+gets its witness written tuple by tuple and the real engine's own
+verdict checked: `allow` confirms it (a real counterexample — tuples,
+check, and the engine's own resolution path, all reproducible by anyone
+in seconds); a denial, or any tuple the real schema itself rejects, is a
+`mismatch` — the static model and the runtime engine disagree, reported
+loudly, never silently downgraded. `HOLDS` gets the complementary,
+empirical check: N random type-valid tuple sets thrown at the same goal,
+none may ever produce `allow`.
+
+This is also where a real bug in the tool's own witness-to-tuple
+conversion was caught, immediately, by exactly the discipline this phase
+exists to enforce — a witness reading perfectly sensibly on paper
+(`document:o#tenant@organization:orgB`) turned out to be unusable the
+moment it met the real tuple store, since `orgB` (a valid variable name)
+isn't a valid tuple id (lowercase only). Full account: `docs/DECISIONS.md`
+D-117.
+
 ## Dynamic invariants (DST)
 
 Not yet written here — this section is DST's own to add, in its own
