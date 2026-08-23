@@ -2221,3 +2221,15 @@ D-121 (above) shipped only the README worked example and explicitly flagged the 
 **Verification:** documentation-only change. Root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite both clean; lint/typecheck/format all clean. Full account: `docs/DECISIONS.md` D-125.
 
 This closes build spec §11 in full. Per §0's own rule, holding here — only §12 (the definition-of-done checklist) remains, and one item on it (flipping the schema-verifier CI check to "required" in branch protection) is a real open decision, not a formality.
+
+## Schema verifier — §12 closed: `schema-verifier` is a required status check, definition-of-done fully satisfied (D-126)
+
+**Owner:** the main agent, directly, on `main`.
+
+Asked explicitly whether to promote `schema-verifier` to required now that it had run green on three real PRs (#83, #84, #85) — the answer was yes. `docs/github-governance.md` Step 2 and the schema-verifier README's own CI section were updated to designate it (PR #86), but applying the setting itself is GitHub branch-protection configuration this project's own tooling has no endpoint to write — no tool available here exposes branch protection or rulesets, and raw API calls are out of scope for this project's GitHub access. The repo owner applied it directly in GitHub's UI and confirmed it.
+
+Went through build spec §12's own ten-item checklist explicitly rather than assuming it was already satisfied — all ten are true, each pointing at the entry that closed it (D-114 through D-126). §13's own out-of-scope list was never violated across any phase, confirmed by construction (every phase imported the real compiler/engine rather than modifying either).
+
+**Verification:** documentation-only. Root suite (47 files, 578 tests) and `tools/schema-verifier`'s own suite (13 files, 115 tests) both clean; lint/typecheck/format all clean. Full account: `docs/DECISIONS.md` D-126.
+
+**This closes the schema verifier project as scoped by its own build spec, §1 through §12, in full.** Every checkpoint has been reported and confirmed. Nothing remains open against the original spec.
