@@ -1,0 +1,18 @@
+// Same cross-organization isolation question as spicedb-entitlements —
+// checked here against OpenFGA's independently-authored equivalent
+// schema, to see whether the same escape shows up regardless of which
+// ecosystem's naming/authoring style produced the model.
+invariant feature_access_requires_subscription_in_associated_org {
+  u: user
+  o1: organization
+  o2: organization
+  p: plan
+  f: feature
+
+  member(o1) = u
+  subscriber(p) = o2
+  associated_plan(f) = p
+  distinct(o1, o2)
+
+  goal: can_access(u, f)
+}

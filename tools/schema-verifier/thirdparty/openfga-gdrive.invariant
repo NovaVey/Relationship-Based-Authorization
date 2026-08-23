@@ -1,0 +1,15 @@
+// A user who only has folder-level access to a sibling folder (f2,
+// distinct from d's actual parent f1) should never be able to read a
+// document filed under f1.
+invariant sibling_folder_viewer_cannot_read_document {
+  u: user
+  f1: folder
+  f2: folder
+  d: doc
+
+  parent(d) = f1
+  viewer_direct(f2) = u
+  distinct(f1, f2)
+
+  goal: can_read(u, d)
+}

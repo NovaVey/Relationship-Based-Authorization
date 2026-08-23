@@ -1,0 +1,14 @@
+// A plain organization member (not an owner) should never automatically
+// get repository admin just by belonging to the org that owns the repo
+// — admin requires an actual repository-level role or org ownership,
+// neither of which plain membership grants.
+invariant org_member_never_gets_repo_admin_without_role {
+  u: user
+  o: organization
+  r: repository
+
+  member(o) = u
+  organization(r) = o
+
+  goal: admin(u, r)
+}

@@ -1,0 +1,32 @@
+// §10 third-party schema survey — OpenFGA's "Slack" sample store.
+// Source (fetched verbatim): https://raw.githubusercontent.com/openfga/sample-stores/main/stores/slack/model.fga
+//
+// See thirdparty/README.md for the OpenFGA relation/permission split
+// rule. `channels_admin` and `member` both have direct-grant terms plus
+// rewrite terms, so each splits into a `_direct` relation + wrapper
+// permission. `workspace#member` (nested-userset, referenced from
+// `channel.writer`/`channel.commenter`) targets the computed `member`
+// permission in the source, which this compiler's `#` syntax can't
+// reference directly (must name a genuine relation) — narrowed to
+// `workspace#member_direct` only, a disclosed under-approximation:
+// dropping the `legacy_admin`/`channels_admin` routes into workspace
+// membership at the channel-role boundary, consistent with the
+// openfga-github entry's precedent for the same restriction.
+
+namespace workspace {
+  relation legacy_admin: user
+  relation channels_admin_direct: user
+  relation guest: user
+  relation member_direct: user
+
+  permission channels_admin = channels_admin_direct | legacy_admin
+  permission member = member_direct | legacy_admin | channels_admin
+}
+
+namespace channel {
+  relation parent_workspace: workspace
+  relation writer: user | workspace#member_direct
+  relation commenter_direct: user | workspace#member_direct
+
+  permission commenter = commenter_direct | writer
+}

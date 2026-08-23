@@ -1,0 +1,14 @@
+// An employee can never approve their own report. The README's own
+// expected outcomes state this directly: "Daniel cannot approve the
+// report for Daniel's chair" — approval requires being a manager
+// (transitively) of the report's submitter, and an employee is never
+// their own manager. Pin the report's submitter to the same employee
+// being asked about, and ask whether approver is still reachable.
+invariant employee_never_approves_own_report {
+  e: employee
+  r: report
+
+  submitter(r) = e
+
+  goal: approver(e, r)
+}

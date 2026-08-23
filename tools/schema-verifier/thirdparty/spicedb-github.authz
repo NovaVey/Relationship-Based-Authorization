@@ -1,0 +1,60 @@
+// §10 third-party schema survey — SpiceDB's own "GitHub" example
+// (repositories, teams, organizations — a distinct model from OpenFGA's
+// own github.authz entry, useful for direct cross-ecosystem comparison
+// on a shared domain). Source (fetched verbatim):
+// https://raw.githubusercontent.com/authzed/examples/main/schemas/github/schema-and-data.yaml
+// README (fetched verbatim, same directory): "Models an app with
+// repositories, teams and organizations."
+//
+// Disclosed restructuring, not a semantic gap: `repository`'s role
+// relations (`reader`/`triager`/`writer`/`maintainer`/`admin`) are typed
+// `user | team#member` in the source, nesting into team's *computed*
+// `member` permission (`maintainer + direct_member`). This compiler's
+// `#` syntax can only name a genuine relation, so each is instead typed
+// `user | team#maintainer | team#direct_member` — listing both of
+// member's underlying relations directly. Since `member` has no other
+// term, this is exactly equivalent, not an approximation.
+
+namespace team {
+  relation parent: organization | team
+  relation maintainer: user
+  relation direct_member: user
+
+  permission member = maintainer | direct_member
+  permission change_team_name = maintainer | parent->change_team_name
+}
+
+namespace organization {
+  relation own: user
+  relation member: user
+  relation billing_manager: user
+  relation team_maintainer: user
+
+  permission owner = own
+  permission create_repository = owner | member
+  permission manage_billing = owner | billing_manager
+  permission user_seat = owner | member | team_maintainer
+  permission change_team_name = team_maintainer | owner
+}
+
+namespace repository {
+  relation organization: organization
+
+  relation reader: user | team#maintainer | team#direct_member
+  relation triager: user | team#maintainer | team#direct_member
+  relation writer: user | team#maintainer | team#direct_member
+  relation maintainer: user | team#maintainer | team#direct_member
+  relation admin: user | team#maintainer | team#direct_member
+
+  permission push = writer | maintainer | admin | organization->owner
+  permission clone = reader | triager | push
+  permission read = reader | triager | writer | maintainer | admin | organization->owner
+  permission delete = admin | organization->owner
+  permission create_issue = read
+  permission close_issue = triager | writer | maintainer | admin | organization->owner
+  permission create_pull_request = read
+  permission merge_pull_request = maintainer | organization->owner
+  permission close_pull_request = triager | writer | maintainer | admin | organization->owner
+  permission manage_setting = maintainer | admin | organization->owner
+  permission manage_sensitive_setting = admin | organization->owner
+}

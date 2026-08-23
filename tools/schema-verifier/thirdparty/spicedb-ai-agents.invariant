@@ -1,0 +1,15 @@
+// An AI agent can never independently edit a document — the source
+// schema's own README states this directly: agents inherit view access
+// (via `reader->delegates`/`writer->delegates`) but `edit = writer` has
+// no delegation term at all, and `writer: user` never accepts an
+// `ai_agent` subject. Proven by the source's own assertFalse block
+// (`document:firstdoc#edit@ai_agent:assistant_tom`). No constraints
+// needed — this is pure type-level unreachability, the same shape as
+// this tool's own no-public-path-to-private-document fixture: expected
+// exact monotone HOLDS.
+invariant ai_agent_never_edits_document {
+  a: ai_agent
+  d: document
+
+  goal: edit(a, d)
+}

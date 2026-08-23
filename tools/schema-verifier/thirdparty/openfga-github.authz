@@ -1,0 +1,46 @@
+// §10 third-party schema survey — OpenFGA's "GitHub" sample store.
+// Source (fetched verbatim): https://raw.githubusercontent.com/openfga/sample-stores/main/stores/github/model.fga
+// See thirdparty/README.md for the general OpenFGA relation/permission
+// translation rule this file follows.
+//
+// Disclosed simplification: OpenFGA's `organization.member` is itself
+// `[user] or owner` — direct grant OR computed via `owner` — and
+// `organization.repo_admin`/`repo_reader`/`repo_writer` each list
+// `organization#member` as a nested-userset subject type. This DSL's own
+// `type#relation` syntax must name a storable relation, never a computed
+// permission (confirmed directly against src/schema/dsl/compiler.ts's own
+// validation) — so those three nested-userset references below point at
+// `organization#member_direct` (the storable half of membership) rather
+// than the full `member` permission, meaning an org owner who was never
+// separately written as a direct member tuple is not picked up by that
+// specific nested-userset path here. The invariant this file actually
+// checks does not depend on that gap — see openfga-github.invariant.
+
+namespace team {
+  relation member: user | team#member
+}
+
+namespace organization {
+  relation owner: user
+  relation member_direct: user
+  permission member = member_direct | owner
+
+  relation repo_admin: user | organization#member_direct
+  relation repo_reader: user | organization#member_direct
+  relation repo_writer: user | organization#member_direct
+}
+
+namespace repo {
+  relation admin_direct: user | team#member
+  relation maintainer_direct: user | team#member
+  relation owner: organization
+  relation reader_direct: user | team#member
+  relation triager_direct: user | team#member
+  relation writer_direct: user | team#member
+
+  permission admin = admin_direct | owner->repo_admin
+  permission maintainer = maintainer_direct | admin
+  permission writer = writer_direct | maintainer | owner->repo_writer
+  permission triager = triager_direct | writer
+  permission reader = reader_direct | triager | owner->repo_reader
+}
