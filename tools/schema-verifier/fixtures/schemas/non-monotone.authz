@@ -1,0 +1,18 @@
+// A minimal, purpose-built schema for the schema verifier's own §7
+// worked examples — deliberately just two relations per permission, kept
+// small on purpose: the bounded search's own candidate-tuple count grows
+// with (reachable relations × k²), and this project's own default bound
+// (k = 1, see docs/DECISIONS.md D-118) needs a schema this narrow to
+// stay comfortably under the tool's MAX_BOUNDED_CANDIDATES ceiling.
+
+namespace document {
+  relation editor: user
+  relation reviewer: user
+  relation blocked: user
+
+  // Intersection: both grants are required at once — a real approval
+  // workflow's own shape, not a contrived one.
+  permission approve = editor & reviewer
+  // Exclusion: an editor may publish unless explicitly blocked.
+  permission publish = editor - blocked
+}

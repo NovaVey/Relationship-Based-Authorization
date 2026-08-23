@@ -1,0 +1,8 @@
+// A deliberately empty invariants file — no `invariant { ... }` block at
+// all. `src/invariants/parser.ts`'s own informal grammar comment reads
+// `file := invariant+` (one or more), but `parseInvariants` on a file
+// like this genuinely returns `{ ok: true, invariants: [] }`, confirmed
+// directly — not a parse error. `runVerify` (`src/cli/verify.ts`) guards
+// this case explicitly (exit 3, "declares no invariants") rather than
+// silently reporting a clean pass with nothing actually checked. See
+// `test/cli.test.ts`'s own test for this file.

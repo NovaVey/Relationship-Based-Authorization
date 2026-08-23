@@ -1,0 +1,19 @@
+// §8c's pathological fixture: "a self-referencing folder hierarchy."
+// self-referential-folder.authz's own `folder.parent: folder` makes
+// `permission view = viewer | parent->view` genuinely self-referential
+// at the schema-graph level — the search's own union-branch computation
+// recurses into `folder#view` a second time (via `parent->view`) before
+// the simpler `viewer` branch wins, so this exercises the cycle-safety
+// code path directly, not just its absence. Deliberately a positive
+// control, not a constraint problem: proves §1's own theorem holds for
+// a genuinely self-referential schema, not just a linear chain — "cycles
+// can always be unrolled zero times," confirmed here by a real search
+// run finding the minimal one-tuple witness (a direct `viewer` grant),
+// never needing to traverse `parent->view` at all, self-validated
+// against the real engine in under 5ms. Expected verdict: VIOLATED.
+invariant folder_view_reachable {
+  s: user
+  o: folder
+
+  goal: view(s, o)
+}

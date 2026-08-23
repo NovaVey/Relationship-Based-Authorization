@@ -1,0 +1,21 @@
+{
+  // Deliberately its own config, not a root `tsconfig.json` edit — the
+  // schema-verifier build spec's own branch discipline (§0 rule 3) scopes
+  // this branch to `tools/schema-verifier/` plus two docs files; touching
+  // the root project's tsconfig is out of that scope. `extends` pulls in
+  // the same strict compiler options every other file in this repo is
+  // held to, and this file's own `include` fully replaces the base
+  // config's (TypeScript's own `extends` semantics — `include`/`exclude`/
+  // `files` are not merged, only inherited-if-absent), scoping typecheck
+  // to this directory alone.
+  // No `rootDir`/`outDir` override: this module imports across the tool
+  // boundary into `src/schema/dsl/` (deliberately — see this branch's own
+  // "import the parser, don't reimplement it" rule), so tsc's own common-
+  // ancestor inference needs the repo root, not this directory alone.
+  // `--noEmit`-only for now (no `npm run build`-equivalent yet), so no
+  // output-layout concern the root project's own `tsconfig.build.json`
+  // comment warns about applies here.
+  "extends": "../../tsconfig.json",
+  "include": ["src/**/*.ts", "test/**/*.ts", "examples/**/*.ts"],
+  "exclude": ["dist", "node_modules"]
+}

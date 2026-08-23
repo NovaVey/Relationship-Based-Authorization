@@ -1,0 +1,44 @@
+// Build spec §4's own worked example, verbatim in shape: a user in one
+// organization must never get `view` on a document belonging to another.
+// `distinct(orgA, orgB)` is the entire reason this needs to be a
+// constraint problem rather than plain reachability — "cross-tenant"
+// means precisely that these two variables must bind to different
+// objects, and a reachability answer that quietly let them collapse onto
+// the same node would be a false negative no amount of testing catches.
+//
+// `tenant` is not a first-class schema concept anywhere in this project —
+// it's an ordinary relation from a subject/object to the `organization`
+// that scopes it, same as any other relation. This invariant says that
+// without the invariant language itself needing to know what a "tenant"
+// is; §5 resolves `tenant` against whatever real schema it's checked
+// against.
+//
+// Expected verdict once §5 exists, against
+// tools/schema-verifier/fixtures/schemas/tenancy.authz: VIOLATED, not
+// HOLDS — and that's the real, useful finding, not a fixture bug. That
+// schema's `user.tenant` relation and `document.view = tenant->member`
+// are two independent relations; `tenant(s) = orgA` pins s's *own*
+// declared tenant, but `document.view`'s actual permission logic never
+// once consults `user.tenant` — it only asks whether s is a `member` of
+// whatever org `o`'s own `tenant` tuple names. Nothing stops a witness
+// from giving s a *separate*, unconstrained `organization:orgB#member`
+// tuple alongside its `tenant(s) = orgA` fact — the two are unrelated
+// claims about s, and the search finds exactly that witness. This is the
+// verifier doing its job: a schema author who wrote `tenant(s) = orgA`
+// expecting it to gate `document.view` would be wrong, and this is the
+// proof. See docs/DECISIONS.md D-116 for the general principle (a
+// relation-equality constraint can prove a leak real; it essentially
+// never proves one impossible) and why HOLDS instead needs type-level
+// unreachability — see no-public-path-to-private-document.invariant.
+invariant tenant_isolation {
+  s: user
+  o: document
+  orgA: organization
+  orgB: organization
+
+  distinct(orgA, orgB)
+  tenant(s) = orgA
+  tenant(o) = orgB
+
+  goal: view(s, o)
+}

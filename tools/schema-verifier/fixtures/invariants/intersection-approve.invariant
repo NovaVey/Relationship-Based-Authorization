@@ -1,0 +1,16 @@
+// §7's own worked example for the non-monotone fragment: intersection.
+// `approve = editor & reviewer` (tools/schema-verifier/fixtures/schemas/
+// non-monotone.authz) requires both relations to hold for the same
+// subject at once — a real approval-workflow shape, not a contrived one.
+// No constraints: this simply asks whether *any* user can ever be both
+// editor and reviewer of the same document at the same time, which
+// nothing in the schema forbids. Expected verdict: VIOLATED, up to
+// k = 1 — the bounded search's own exhaustive enumeration tries the
+// candidate subset {editor(o) = s, reviewer(o) = s} among others, and the
+// real engine allows it.
+invariant approve_reachable_via_intersection {
+  s: user
+  o: document
+
+  goal: approve(s, o)
+}

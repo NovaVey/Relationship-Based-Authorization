@@ -1,0 +1,15 @@
+// The invariant this worked example checks — "no user should ever reach
+// `view` on a `private_document`." See three-hop-leak.authz's own header
+// comment for the schema this runs against, and README.md for the full
+// walkthrough. Same shape as
+// fixtures/invariants/no-public-path-to-private-document.invariant (no
+// constraints needed — the claim is purely about schema-graph
+// reachability), given its own name and file here so this example is
+// self-contained and doesn't depend on a fixture from a different
+// directory whose own comments describe a different schema.
+invariant no_user_can_view_a_private_document {
+  s: user
+  o: private_document
+
+  goal: view(s, o)
+}

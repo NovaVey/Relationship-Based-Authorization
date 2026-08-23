@@ -1,0 +1,28 @@
+// §8c's own pathological fixture: "a self-referencing folder hierarchy" —
+// build spec's exact phrase. A minimal, purpose-built schema (matching
+// tenancy.authz/non-monotone.authz's own convention) with a genuine
+// schema-level self-reference: `folder.parent: folder`, and `view`'s own
+// rewrite rule recurses into `folder#view` again via `parent->view` — the
+// same node the search is already walking, not a copy of it. This is the
+// shape §1's own small-model-property theorem names directly: "folder
+// parent folder is normal... cycles can always be unrolled zero times"
+// (for the monotone fragment). This fixture exists to prove that claim
+// against a real, compiled schema and a real search run, not just cite
+// the theorem's own prose.
+
+namespace user {
+  // Placeholder relation only — every namespace needs at least one
+  // member; nothing in this fixture ever writes a tuple against it.
+  relation self: user
+}
+
+namespace folder {
+  relation parent: folder
+  relation viewer: user
+
+  // A folder is viewable by its own direct viewers, or by anyone who can
+  // view its parent — the standard Zanzibar folder-hierarchy pattern,
+  // and genuinely self-referential at the schema level: `parent`'s own
+  // target type is `folder` itself.
+  permission view = viewer | parent->view
+}

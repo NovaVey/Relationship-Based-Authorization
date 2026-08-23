@@ -1,0 +1,17 @@
+// §7's own worked example for the non-monotone fragment: exclusion.
+// `publish = editor - blocked` (tools/schema-verifier/fixtures/schemas/
+// non-monotone.authz): an editor may publish unless explicitly blocked.
+// `blocked(o) = s` is *given* — held fixed and true in every candidate
+// subset the bounded search tries (candidates.ts's generateGivenTuples),
+// never left to the enumeration to include or omit — so no candidate
+// tuple the search could add on top can ever make s able to publish:
+// exclusion means a blocked subject stays blocked regardless of what else
+// becomes true. Expected verdict: HOLDS up to k = 1.
+invariant blocked_user_cannot_publish {
+  s: user
+  o: document
+
+  blocked(o) = s
+
+  goal: publish(s, o)
+}

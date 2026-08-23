@@ -1,0 +1,59 @@
+// The verifier's own worked example — build spec §11: "a schema with a
+// three-hop leak, the invariant, the counterexample tuples, the engine
+// confirming them." See README.md for the walkthrough this file backs;
+// see examples/run.ts for the runnable reproduction.
+//
+// This is `fixtures/schemas/tenancy.authz` with `private_document`
+// replaced by exactly the block `test/schema-mutations.test.ts` calls
+// "add a tuple-to-userset edge across a boundary into document (leaks
+// only at depth 3)" — mutation #3 in that file's own `MUTATIONS` array,
+// one of the two mutations §8a requires to be "subtle." That test already
+// proves this exact schema shape flips `no_public_path_to_private_document`
+// from HOLDS to VIOLATED with a 3-edge witness, self-validated against the
+// real engine (§6). This file exists so a reader can see the leak as an
+// ordinary schema, not as a runtime string-splice — and `test/worked-
+// example.test.ts` pins the same verdict/witness against this actual
+// file, so the claims below fail loudly if this file, or the engine's
+// behavior, ever drifts.
+//
+// The leak: `private_document.view` no longer only accepts `owner`
+// (a `service_account`, never a `user`). It also accepts anyone who can
+// `view` a `document` this record happens to be `linked_doc`-linked to —
+// and a plain organization member can view any `document` scoped to their
+// own org's `tenant`. Three hops, none of them individually suspicious:
+//
+//   private_document.linked_doc -> document.tenant -> organization.member -> user
+
+namespace organization {
+  relation member: user | group#member
+}
+
+namespace group {
+  relation member: user | group#member
+}
+
+namespace user {
+  // Exists purely so `tenant(s) = orgA`-style invariant constraints
+  // type-check against a real relation — unused by this example.
+  relation tenant: organization
+}
+
+namespace document {
+  relation tenant: organization
+
+  permission view = tenant->member
+}
+
+namespace service_account {
+  // Placeholder relation only — this DSL requires every namespace to
+  // declare at least one member; nothing in this fixture ever writes a
+  // tuple against it.
+  relation member: service_account
+}
+
+namespace private_document {
+  relation owner: service_account
+  relation linked_doc: document
+
+  permission view = owner | linked_doc->view
+}
