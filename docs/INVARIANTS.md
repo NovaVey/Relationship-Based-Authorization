@@ -15,9 +15,9 @@ argument this file exists to support:
   data ever gets written.
 - **DST (dynamic safety)** — no unsafe path is observable at runtime,
   under any interleaving or failure. See
-  [`docs/DST-PROPOSAL.md`](DST-PROPOSAL.md) for that project's own design;
-  its dynamic invariants belong in a section of this file too, added by
-  that branch, not retrofitted here.
+  [`docs/DST-PROPOSAL.md`](DST-PROPOSAL.md) for that project's own design,
+  and "Dynamic invariants (DST)" below for the five properties it's
+  actually shipped and proven.
 - **Consistency layer (temporal safety, later)** — no unsafe path is
   observable after a revoking write is acknowledged. Not started; see
   [`docs/CONSISTENCY.md`](CONSISTENCY.md) for the one property already
@@ -326,12 +326,72 @@ DECISIONS.md` D-120.
 
 ## Dynamic invariants (DST)
 
-Not yet written here — this section is DST's own to add, in its own
-vocabulary, cross-referenced by ID against the static invariants above
-where the same underlying property is being claimed at a different layer
-(e.g., a future dynamic counterpart to tenant isolation, checked under
-concurrent writes rather than statically). See
-[`docs/DST-PROPOSAL.md`](DST-PROPOSAL.md) for what DST has actually
-proven so far (D0–D5, `docs/DECISIONS.md` D-095/D-097–D-102) — real,
-shipped results that simply haven't yet been restated in this file's
-shared vocabulary.
+DST (deterministic simulation testing, `docs/DST-PROPOSAL.md`) proves a
+different kind of claim than the static invariants above: not "no unsafe
+tuple set exists for this schema," but "no unsafe _observation_ exists for
+this data, under any interleaving or crash this project's own fault-
+injection scheduler can drive." Five properties are shipped, tested, and
+CI-wired (`.github/workflows/dst.yml`, `dst-pr`/`dst-nightly`), each with
+its own `docs/DECISIONS.md` entry and a live fail-check (the mechanism
+deliberately broken, the relevant test confirmed red, then restored):
+
+- **Write atomicity under crash** (D0, `docs/DECISIONS.md` D-097). A
+  crash injected between the tuple insert and the write-log insert — the
+  two statements a single write's transaction runs — leaves neither row
+  behind, and a fresh, uncrashed retry still succeeds.
+  `test/unit/store/dst/tuple-store.dst.test.ts`, the
+  `a-crash-injected-between-the-tuple-insert-and-the-write-log-insert-...`
+  test. This underlies every static invariant's own precondition: a
+  static proof reasons about a schema's tuple _shape_, which presumes
+  writes either fully happen or fully don't — a torn write would be a
+  tuple set no static invariant was ever reasoning about.
+- **Advisory-lock correctness under crash** (D1, D-098). A session-scoped
+  advisory lock genuinely auto-releases the instant its holding connection
+  dies, letting a blocked waiter through rather than deadlocking forever.
+  `test/unit/store/dst/advisory-lock.dst.test.ts`, the
+  `a-session-lock-genuinely-auto-releases-when-its-holding-connection-crashes-...`
+  test.
+- **No phantom witness under concurrency** (D2, D-099, generalizing the
+  real bug D-092 found and fixed). A check's own internal sequence of
+  reads never stitches together two facts that never coexisted at any
+  single real point in the database's history — reproduced through the
+  fake store and generalized across many seeded pause points, not just
+  the one hand-picked repro that originally found it.
+  `test/unit/store/dst/production-check.dst.test.ts`, describe block
+  `"the D-092 phantom-witness regression, reproduced through the fake and
+generalized across seeds (D-099)"`. **Not a dynamic counterpart to any
+  static invariant above** — it's a narrower, lower-level property (one
+  check's own reads are internally consistent with each other) than what
+  the "new enemy problem" would require (a check's reads are consistent
+  with an _acknowledged revoking write_ that landed before it) — the
+  latter is the temporal-safety claim `docs/INVARIANTS.md`'s own opening
+  section and `docs/CONSISTENCY.md` both already mark as **not started**,
+  and this property does not, by itself, close that gap.
+- **Recursive frontier BFS matches real Postgres exactly** (D3, D-100).
+  A 12-level, 3-way-branching, reconvergent-diamond graph resolves to
+  exactly the right node count with no combinatorial blowup, in-memory —
+  the identical fix (deduplication inside the recursive step) that closed
+  a real exponential-blowup bug in the production SQL's own `WITH
+RECURSIVE` query, proven equivalent by a separate large seeded
+  differential run against real Postgres (`test/unit/resolve/production/
+frontier-equivalence.integration.test.ts`, 300 random graphs).
+  `test/unit/store/dst/frontier.dst.test.ts`, the
+  `the-12-level-branching-3-reconvergent-diamond-chain-reaches-exactly-1-plus-36-nodes-with-no-blowup`
+  test. This is what makes every other DST claim trustworthy as a
+  statement about the _real_ system: the fake store's own graph-walk
+  logic is independently proven to agree with production's real SQL, not
+  merely assumed to.
+- **A shared, reusable fault-injection scheduler** (D4, D-101) generalizes
+  D0–D3's own ad hoc crash points and interleavings into one seeded,
+  reusable mechanism (`src/store/dst/scheduler.ts`) — infrastructure, not
+  a claim of its own, but the reason a future dynamic invariant (a real
+  "new enemy" reproduction, once the consistency layer above is actually
+  built) has a tested harness to run on rather than needing one invented
+  from scratch.
+
+**What this section deliberately does not claim.** Every property above
+is about _this data, under fault injection_ — none of them is a temporal-
+safety claim ("no unsafe path is observable after a revoking write is
+acknowledged"). That gap is real, disclosed, and unchanged by anything
+above: see this file's own opening "Consistency layer (temporal safety,
+later)" bullet, still marked **Not started**.
