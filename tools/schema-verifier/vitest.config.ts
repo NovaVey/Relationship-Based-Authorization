@@ -16,5 +16,13 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
+    // §8b's own nightly differential job (k = 3, "up to 3 objects per
+    // type," build spec's own wording) is deliberately excluded from the
+    // default (PR-speed) run — matching this repo's own root
+    // vitest.config.ts precedent for `*.integration.test.ts` — since it's
+    // explicitly meant to be slow ("this is slow and that's fine; run it
+    // nightly, not on PRs"). `.github/workflows/schema-verifier.yml`'s own
+    // `schema-verifier-nightly` job runs it directly by path instead.
+    exclude: ['**/*.nightly.test.ts'],
   },
 });

@@ -298,6 +298,32 @@ scattered mechanism-specific assertions elsewhere; this is the one place
 a reader sees every answer this project has ever committed to as
 correct, at a glance.
 
+**Closing the gap between the paraphrase above and §8's own literal
+text.** The three subsections above were built from a paraphrase of the
+build spec, not its literal words — the real text asks for schema-level
+mutation (not source-code mutation), a nightly run at a genuinely larger
+bound ("up to 3 objects per type," explicitly not PR-blocking), and
+three specifically-named pathological fixtures. All three gaps are
+closed, alongside what's described above rather than replacing it:
+`test/schema-mutations.test.ts` (eight schema-text mutations, two
+subtle, against a genuinely-`HOLDS` fixture); `test/differential.
+nightly.test.ts` (`k = 3` over 150 schemas, verified locally, twice,
+deterministically — the actual scheduled-workflow wiring that would run
+it nightly in CI is deliberately deferred to §9, "CLI and CI," where the
+real spec text actually puts it, and stays outside this branch's own
+file-touch discipline in the meantime); and three new pathological
+fixtures — a genuinely self-
+referential folder hierarchy, a schema whose only witness exceeds the
+real engine's own `CHECK_MAX_DEPTH` (caught correctly as a self-
+validation `mismatch`, a real static/runtime disagreement rather than a
+bug), and a real mutual-cycle schema demonstrating that the real
+engine's own cycle guard makes a cycle _never_ load-bearing for a grant
+— a broader, disclosed observation about why this project's small-model
+property seems to hold even outside the monotone fragment §1's own
+theorem formally covers. Full account, including why a `boundedSearch`
+`k`-based framing turned out not to fit the cycle case at all: `docs/
+DECISIONS.md` D-120.
+
 ## Dynamic invariants (DST)
 
 Not yet written here — this section is DST's own to add, in its own

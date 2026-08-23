@@ -1,0 +1,38 @@
+// §8c's hardest pathological fixture: "a schema where the leak requires
+// unrolling a cycle exactly once." Per §1's own theorem, the small-
+// model property ("cycles can always be unrolled zero times") is scoped
+// explicitly to the MONOTONE fragment -- exclusion breaks it, since
+// adding a tuple can now remove an allow. Deliberately non-monotone
+// (`- block_next`) and deliberately cyclic: `node.next: node` lets two
+// (or more) node instances form a genuine mutual reference at the
+// tuple-data level.
+//
+// `block_next` is scoped locally on purpose -- it excludes only what a
+// node passes ALONG from its own `next` (never its own direct `grant`),
+// the same "a node can't be stopped from directly vouching for someone,
+// only from relaying someone else's vouching" shape a real access-
+// control system would want. That local scoping is exactly what makes a
+// real, mutual 2-cycle meaningful here: with `node1.next = node2` and
+// `node2.next = node1`, `node1` can directly grant a subject that
+// `node2` is explicitly blocking from inheriting THROUGH node1 -- and
+// resolving node2's own answer genuinely requires the real engine to
+// traverse the cycle once (node2 -> node1 -> [node2 again, denied by
+// the resolver's own cycle guard]) before it can correctly conclude the
+// subject is excluded. See `test/pathological-cycle-unroll.test.ts` for
+// what this is used to prove, and `docs/DECISIONS.md`'s own entry for
+// why a bounded-search "k must reach 2" framing doesn't actually apply
+// to this schema shape (a direct, unconditional `grant` candidate
+// always dominates before a bounded search would ever need to consider
+// the cycle at all).
+
+namespace node {
+  relation next: node
+  relation grant: user
+  relation block_next: user
+
+  // A node's own view is its own direct grant, plus whatever the next
+  // node in the chain grants -- EXCEPT anyone this node explicitly
+  // blocks from inheriting through it. `block_next` never touches this
+  // node's own `grant` -- only the `next->view` term.
+  permission view = grant | (next->view - block_next)
+}

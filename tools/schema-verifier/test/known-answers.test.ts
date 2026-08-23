@@ -99,6 +99,13 @@ const CORPUS: readonly KnownAnswer[] = [
     bound: 1,
     why: 'D-118: publish = editor - blocked, blocked(o) = s given and held fixed — exclusion means a blocked subject stays blocked regardless of any other candidate tuple.',
   },
+  {
+    schema: 'self-referential-folder.authz',
+    invariant: 'folder-view-reachable.invariant',
+    verdict: 'VIOLATED',
+    fragment: 'monotone',
+    why: '§8c pathological fixture: a genuinely self-referential schema (folder.parent: folder, view = viewer | parent->view) — proves §1\'s small-model-property theorem ("cycles can always be unrolled zero times") against a real self-loop, not just a linear chain.',
+  },
 ];
 
 describe('the known-answer corpus — every fixture this project ships, swept against its exact committed answer', () => {

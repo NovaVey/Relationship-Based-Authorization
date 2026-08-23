@@ -43,7 +43,11 @@ export default tseslint.config(
         projectService: {
           // Also relative to this directory — matches this file's own
           // bare name, not a `tools/schema-verifier/`-prefixed one.
-          allowDefaultProject: ['vitest.config.ts', 'eslint.config.mjs'],
+          allowDefaultProject: [
+            'vitest.config.ts',
+            'vitest.nightly.config.ts',
+            'eslint.config.mjs',
+          ],
         },
         // No explicit `project` here: `projectService` (above) already
         // auto-discovers the nearest real tsconfig.json per linted file
