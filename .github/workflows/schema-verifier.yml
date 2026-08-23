@@ -1,0 +1,83 @@
+name: Schema Verifier
+
+# Build spec §9's own exit criterion, closed for real: "Wire it as a
+# required PR check on this repo's own schemas: the repo now proves its
+# own tenant isolation invariant on every commit. That's a green check
+# that means something, and it's the strongest possible demonstration of
+# the tool — it's guarding real code, not a demo fixture."
+#
+# Checks `schema/example.invariant` against `schema/example.authz` — this
+# repo's own real, live demo schema, not a `tools/schema-verifier/`
+# testing fixture — via `verify-schema` (§9's CLI, `tools/schema-verifier/
+# src/cli/index.ts`, `docs/DECISIONS.md` D-122). No build step needed;
+# `verify-schema` runs straight off TypeScript source via `tsx`, the same
+# way every local invocation in this project's own history has.
+#
+# NOT yet added to `main`'s required status checks (`docs/
+# github-governance.md` Step 2) — that's a separate, explicit decision,
+# deliberately deferred until this workflow has run green at least once
+# on a real PR (see `docs/DECISIONS.md` D-123's own "Revisit if").
+#
+# Exit-code gating: `0` (an exact, unconditional `HOLDS`) and `2`
+# (`HOLDS up to k = N`, or `UNKNOWN`) both pass this job — both mean "no
+# violation found," differing only in whether the proof is unconditional.
+# `1` (a real, confirmed `VIOLATED`) and `3` (a tool error, including a
+# self-validation mismatch — the verifier's own claim couldn't be
+# substantiated) both fail it. This mirrors `exitCodes.ts`'s own severity
+# ordering exactly (`3 > 1 > 2 > 0` — `1` and `3` are "something is
+# actually wrong," `0` and `2` are "nothing was found wrong yet").
+# `schema/example.invariant`'s own goal (`org#view = member - banned`, an
+# exclusion) puts it in the non-monotone fragment (build spec §7) — it
+# genuinely reports `HOLDS up to k = 1`, never an unconditional proof, and
+# that's this schema's honest, correct answer, not a defect this gate
+# papers over. See that file's own header comment for why no monotone-
+# fragment analog of this claim exists to check instead.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  schema-verifier:
+    name: schema-verifier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Check schema/example.authz against schema/example.invariant
+        id: verify
+        run: |
+          set +e
+          npx tsx tools/schema-verifier/src/cli/index.ts schema/example.authz --invariants schema/example.invariant > verify-output.txt 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Summary
+        run: |
+          {
+            echo "### Schema verifier — schema/example.authz"
+            echo
+            echo '```'
+            cat verify-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Runs *after* the summary above, deliberately — same reasoning as
+      # dst.yml/soundness.yml's own identical final step: the output
+      # above must be visible regardless of verdict, and only once it is
+      # does this step make the job's own pass/fail state match the real
+      # result.
+      - name: Fail the job on a real violation or tool error (exit 1 or 3) — 0 and 2 both pass
+        if: steps.verify.outputs.exit_code == '1' || steps.verify.outputs.exit_code == '3'
+        run: |
+          echo "verify-schema exited ${{ steps.verify.outputs.exit_code }} — see the job summary above for the full output."
+          exit 1

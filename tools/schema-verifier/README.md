@@ -211,19 +211,24 @@ verdict is a modeling question for whoever owns the schema, not
 automatically a vulnerability — see `docs/FINDINGS.md` (§10, not yet
 written) for that distinction applied to schemas this tool didn't author.
 
+## CI
+
+`.github/workflows/schema-verifier.yml` runs `verify-schema` against
+`schema/example.invariant` (this repo's own real, live demo schema,
+`schema/example.authz` — not a testing fixture) on every PR and push to
+`main` — build spec §9's own exit criterion, closed. It is **not yet** a
+required status check (`docs/github-governance.md` Step 2) — that's a
+separate, deliberate decision left for once the workflow has run green at
+least once on a real PR. See `docs/DECISIONS.md` D-123 for the full
+account, including why that invariant's own goal is non-monotone (an
+exclusion) and genuinely reports `HOLDS up to k = 1`, never an
+unconditional proof — and why the job still gates on that as a pass, not
+a failure (that file's own "Exit-code gating" section).
+
 ## What's not built yet
 
 Tracked, explicit future work — not silently missing:
 
-- **CI wiring** — `verify-schema` (above) exists and is tested end to end,
-  but nothing runs it automatically yet. Build spec §9's own exit
-  criterion is "wire it as a required PR check on this repo's own
-  schemas: the repo now proves its own tenant isolation invariant on
-  every commit" — that requires a `.github/workflows/` file and this
-  module actually landing on `main`, both of which sit outside this
-  branch's own file-touch discipline (`tools/schema-verifier/` plus two
-  docs files). Tracked as real, disclosed follow-up, not silently
-  skipped.
 - **Third-party schema survey** (`docs/FINDINGS.md`, analyzing schemas
   this project didn't write) — build spec §10, `CHECKPOINT 6`.
 - Explicitly out of scope for this tool entirely (build spec §13): no
@@ -233,8 +238,9 @@ Tracked, explicit future work — not silently missing:
 The nightly differential test (`test/differential.nightly.test.ts`, §8b —
 brute-force agreement at `k = 3`, deliberately excluded from the default
 `vitest run` because it's slow) is fully built and independently
-verified, but not yet wired into a scheduled CI job — same CI-wiring gap
-as above, not shipped early. Run it directly:
+verified, but not yet wired into its own scheduled CI job — a separate,
+smaller gap from the CI wiring above, not shipped as part of it. Run it
+directly:
 
 ```
 npx vitest run --config tools/schema-verifier/vitest.nightly.config.ts

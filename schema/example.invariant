@@ -1,0 +1,35 @@
+// A real invariant against this repo's own live demo schema
+// (schema/example.authz) — not a tools/schema-verifier test fixture.
+// This is what §9's own CI wiring checks on every PR: "the repo now
+// proves its own tenant isolation invariant on every commit."
+//
+// docs/RELATIONS.md's own exclusion walkthrough: "user:mallory is a real
+// member of org:acme in the seeded demo — and also banned. `member -
+// banned` is what actually decides she can't view org content; `member`
+// alone would get the wrong answer." This invariant states that claim
+// structurally, not just for mallory's own seeded tuples: pin any user
+// `s` as banned from any org `o` (`banned(s) = o`), and ask whether some
+// *other* tuple set — however constructed, including one that also
+// grants `s` membership — could still let `s` view `o`.
+//
+// `org#view`'s rewrite rule (`member - banned`) is an exclusion, which
+// puts this invariant, as reachable from the goal, in the non-monotone
+// fragment (build spec §7) — the verifier's own bounded search reports
+// this as "HOLDS up to k = N," not an unconditional proof (see
+// docs/INVARIANTS.md's own §7 section, and docs/DECISIONS.md D-118 for
+// why that distinction is real and load-bearing, not pedantry). This
+// schema has no monotone-fragment analog of this claim worth stating —
+// every other permission in it (`document`/`folder`/`group` view/edit)
+// is a plain positive-grant hierarchy that legitimately *should* be
+// reachable by a direct grant, so there is no "no path exists at all"
+// claim to make about them; the exclusion above is the one place this
+// schema encodes a real "and not" safety rule, which is exactly why it's
+// the one worth checking on every commit.
+invariant banned_member_never_views_org {
+  s: user
+  o: org
+
+  banned(o) = s
+
+  goal: view(s, o)
+}
