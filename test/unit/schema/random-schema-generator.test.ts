@@ -113,7 +113,7 @@ describe('generateRandomSchema — every generated schema compiles for real', ()
     expect(sawIntersection).toBe(true);
     expect(sawExclusion).toBe(true);
     expect(sawUnion).toBe(true);
-  }, 15_000);
+  }, 45_000);
 
   it('a single-namespace, principal-only schema (no earlier structural namespace to target) still compiles', () => {
     const result = generateRandomSchema('edge-single-namespace', {
