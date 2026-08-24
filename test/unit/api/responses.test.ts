@@ -20,6 +20,8 @@ import { describe, expect, it } from 'vitest';
 import {
   checkResponse,
   expandResponse,
+  listObjectsResponse,
+  listUsersResponse,
   tupleWriteResponse,
   tupleDeleteResponse,
   schemaCompileResponse,
@@ -40,6 +42,7 @@ import {
 import type { PerformCheckResult } from '../../../src/audit/checks.js';
 import type { ResolutionStep } from '../../../src/resolve/production/resolver.js';
 import type { ExpandNode } from '../../../src/audit/expand.js';
+import type { ListObjectsResult, ListUsersResult } from '../../../src/audit/list.js';
 import type { WriteTupleResult, DeleteTupleResult, TupleError } from '../../../src/store/tuples.js';
 import type { SchemaCompileResult } from '../../../src/schema/dsl/errors.js';
 import type { SchemaError } from '../../../src/schema/dsl/errors.js';
@@ -225,6 +228,143 @@ describe('expandResponse — tree is passed through verbatim (deep-equal, not ju
     };
 
     expect(expandResponse(object, 'view', tree).body.tree).toEqual(tree);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. listObjectsResponse / listUsersResponse (post-audit improvement —
+//     src/audit/list.ts's bulk reverse-lookup operations).
+// ---------------------------------------------------------------------------
+
+describe('listObjectsResponse — status is always 200', () => {
+  it('listobjectsresponse-status-is-200', () => {
+    const result: ListObjectsResult = { objects: [], truncated: false };
+    expect(listObjectsResponse(subject, 'view', 'document', result).status).toBe(200);
+  });
+});
+
+describe('listObjectsResponse — subject, relation, objectNs are echoed verbatim', () => {
+  it('listobjectsresponse-echoes-subject-relation-and-objectns-verbatim', () => {
+    const result: ListObjectsResult = { objects: [], truncated: false };
+    const response = listObjectsResponse(subject, 'view', 'document', result);
+    expect(response.body.subject).toEqual(subject);
+    expect(response.body.relation).toBe('view');
+    expect(response.body.objectNs).toBe('document');
+  });
+});
+
+describe('listObjectsResponse — objects passes through verbatim, and an empty result renders an empty array, never omitted or null', () => {
+  it('listobjectsresponse-objects-equals-result-objects-verbatim-for-a-nonempty-result', () => {
+    const objects: ApiEntityRef[] = [
+      { ns: 'document', id: 'readme' },
+      { ns: 'document', id: 'other' },
+    ];
+    const result: ListObjectsResult = { objects, truncated: false };
+    expect(listObjectsResponse(subject, 'view', 'document', result).body.objects).toEqual(objects);
+  });
+
+  it('listobjectsresponse-objects-is-an-empty-array-not-omitted-or-null-when-the-result-has-zero-objects', () => {
+    const result: ListObjectsResult = { objects: [], truncated: false };
+    const response = listObjectsResponse(subject, 'view', 'document', result);
+    expect(Object.prototype.hasOwnProperty.call(response.body, 'objects')).toBe(true);
+    expect(response.body.objects).not.toBeNull();
+    expect(Array.isArray(response.body.objects)).toBe(true);
+    expect(response.body.objects).toEqual([]);
+  });
+});
+
+describe('listObjectsResponse — truncated passes through verbatim', () => {
+  it('listobjectsresponse-truncated-is-true-when-result-truncated-is-true', () => {
+    const result: ListObjectsResult = { objects: [], truncated: true };
+    expect(listObjectsResponse(subject, 'view', 'document', result).body.truncated).toBe(true);
+  });
+
+  it('listobjectsresponse-truncated-is-false-when-result-truncated-is-false', () => {
+    const result: ListObjectsResult = { objects: [], truncated: false };
+    expect(listObjectsResponse(subject, 'view', 'document', result).body.truncated).toBe(false);
+  });
+});
+
+describe('listObjectsResponse — atToken is present, opaque-encoded, and decodes back to the caller-supplied value, if and only if a token was passed (mirrors checkResponse)', () => {
+  it('listobjectsresponse-includes-an-attoken-key-that-decodes-back-to-the-supplied-token-when-a-token-was-passed', () => {
+    const result: ListObjectsResult = { objects: [], truncated: false };
+    const response = listObjectsResponse(subject, 'view', 'document', result, 55);
+    expect(response.body.atToken).toBe(encodeToken(55));
+    expect(decodeToken(response.body.atToken as string)).toBe(55);
+    expect(Object.prototype.hasOwnProperty.call(response.body, 'atToken')).toBe(true);
+  });
+
+  it('listobjectsresponse-omits-the-attoken-key-entirely-when-no-token-was-passed-not-a-present-but-undefined-key', () => {
+    const result: ListObjectsResult = { objects: [], truncated: false };
+    const response = listObjectsResponse(subject, 'view', 'document', result);
+    expect(response.body.atToken).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(response.body, 'atToken')).toBe(false);
+  });
+
+  it('listobjectsresponse-includes-attoken-0-when-the-caller-explicitly-passes-token-0-not-treating-it-as-absent', () => {
+    // Same landmine checkResponse's own equivalent test guards against: an
+    // `atToken !== undefined` check (correct) vs. a falsy check (a bug)
+    // only diverge at exactly this value.
+    const result: ListObjectsResult = { objects: [], truncated: false };
+    const response = listObjectsResponse(subject, 'view', 'document', result, 0);
+    expect(response.body.atToken).toBe(encodeToken(0));
+    expect(Object.prototype.hasOwnProperty.call(response.body, 'atToken')).toBe(true);
+  });
+});
+
+describe('listUsersResponse — status is always 200', () => {
+  it('listusersresponse-status-is-200', () => {
+    const result: ListUsersResult = { subjects: [] };
+    expect(listUsersResponse(object, 'view', result).status).toBe(200);
+  });
+});
+
+describe('listUsersResponse — object and relation are echoed verbatim', () => {
+  it('listusersresponse-echoes-object-and-relation-verbatim', () => {
+    const result: ListUsersResult = { subjects: [] };
+    const response = listUsersResponse(object, 'view', result);
+    expect(response.body.object).toEqual(object);
+    expect(response.body.relation).toBe('view');
+  });
+});
+
+describe('listUsersResponse — subjects passes through verbatim, and an empty result renders an empty array, never omitted or null', () => {
+  it('listusersresponse-subjects-equals-result-subjects-verbatim-for-a-nonempty-result', () => {
+    const subjects: ApiEntityRef[] = [
+      { ns: 'user', id: 'alice' },
+      { ns: 'user', id: 'bob' },
+    ];
+    const result: ListUsersResult = { subjects };
+    expect(listUsersResponse(object, 'view', result).body.subjects).toEqual(subjects);
+  });
+
+  it('listusersresponse-subjects-is-an-empty-array-not-omitted-or-null-when-the-result-has-zero-subjects', () => {
+    const result: ListUsersResult = { subjects: [] };
+    const response = listUsersResponse(object, 'view', result);
+    expect(Object.prototype.hasOwnProperty.call(response.body, 'subjects')).toBe(true);
+    expect(response.body.subjects).not.toBeNull();
+    expect(Array.isArray(response.body.subjects)).toBe(true);
+    expect(response.body.subjects).toEqual([]);
+  });
+});
+
+describe('listUsersResponse — the response body never has an atToken field at all, not even as an explicit undefined key — listUsers has no such option to begin with', () => {
+  it('listusersresponse-body-has-no-attoken-own-property-under-any-inputs', () => {
+    const result: ListUsersResult = {
+      subjects: [
+        { ns: 'user', id: 'alice' },
+        { ns: 'user', id: 'bob' },
+      ],
+    };
+    const response = listUsersResponse(object, 'view', result);
+    expect(Object.prototype.hasOwnProperty.call(response.body, 'atToken')).toBe(false);
+    expect('atToken' in response.body).toBe(false);
+  });
+
+  it('listusersresponse-body-has-exactly-the-three-documented-keys-object-relation-subjects-nothing-else', () => {
+    const result: ListUsersResult = { subjects: [] };
+    const response = listUsersResponse(object, 'view', result);
+    expect(Object.keys(response.body).sort()).toEqual(['object', 'relation', 'subjects']);
   });
 });
 
