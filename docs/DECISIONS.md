@@ -1957,3 +1957,56 @@ Every test name and file path was verified directly against the real files befor
 **Local verification:** `npx vitest run` (47 files, 602 tests, up from 578 — 24 net new, all in `tokens.test.ts`/`responses.test.ts`/`server.test.ts`/`check.test.ts`/the real-Postgres `server.integration.test.ts`), `npx eslint .`, `npx tsc --noEmit -p tsconfig.json`, `npx prettier --check .`, `npm run build` all clean. `docs/CONSISTENCY.md`'s own worked example and `README.md`'s CLI usage line (`--at-token <n>` → `--at-token <token>`) updated to match; `--at-token`'s own malformed-input test suite (`test/unit/cli/check.test.ts`) reused almost entirely unchanged, since every existing "invalid" case (a bare number, `-1`, empty, whitespace) still fails to decode for the new reason (not a real envelope) as well as the old one (not a valid integer) — plus one new test proving a genuinely valid encoded token decodes successfully and the check proceeds past the guard, not just that every malformed case is rejected.
 
 **Revisit if:** a real integrity requirement ever surfaces (e.g. `at_exact_snapshot`-style semantics where a forged token could reconstruct historical state rather than merely gate a floor) — that's the point where a signature or MAC genuinely earns its complexity, not before.
+
+## D-129 — A confirmed false `HOLDS` in the monotone-fragment exact prover, closed: `search.ts`'s cycle guard now scopes a revisit per instance, not per node — with a disclosed exploration-budget ceiling and a matching `UnionFind` alias fix
+
+**Date:** 2026-08-24 · **Phase:** post-12, a soundness bug found while grounding a planned improvement (item 3 of the batch begun at D-127/D-128) against this repo's actual state · **Status:** settled
+
+**What happened.** While scoping the exact type-mismatch upgrade to the monotone prover (the next item in the agreed build order), an adversarial design-review workflow surfaced a claim I hadn't expected and didn't take on faith: that `attempt()`'s cycle guard (`tools/schema-verifier/src/reachability/search.ts`) — keyed purely on schema `NodeId` — could report a false `HOLDS` for a schema with no intersection or exclusion at all, squarely inside the fragment this project's own README, `tools/schema-verifier/README.md`, `docs/INVARIANTS.md`, and D-125 all describe as "exact — sound and complete."
+
+**Independently confirmed, not trusted from the review alone.** I built the exact repro by hand and ran it against the real, unmodified engine directly (the same DST-fake-store seam `replayWitness`/`fuzzHolds` already use, not simulated):
+
+```
+namespace org {
+  relation parent: org
+  relation top_admin: user
+  permission admin = top_admin | parent->admin
+}
+
+invariant admin_reachable_via_parent_chain {
+  s: user
+  x: user
+  o: org
+  distinct(s, x)
+  top_admin(o) = x
+  goal: admin(s, o)
+}
+```
+
+`checkInvariant` reported `{ verdict: 'HOLDS' }` — no witness can exist. I hand-wrote the witness tuples (`org:o#top_admin@user:x`, `org:o#parent@org:p`, `org:p#top_admin@user:s`) and ran them through `productionCheck` directly: `{ allowed: true, depth: 2 }`. A real counterexample exists that the exact prover claimed couldn't — the opposite of what a formal verifier is for.
+
+**Root cause, and why it's a theorem error, not just an implementation slip.** `attempt()` recurses into `org#admin` twice on one DFS path: once with the goal's own object (`o`, whose `top_admin` slot is pinned away from `s` by the invariant's `relationEquals` constraint), once via `parent->admin` with a fresh, completely unconstrained parent object. The guard's own comment reasoned "revisiting a node this search path has already tried offers no new path" — true for a _pure_, unconstrained reachability question (D-125's own small-model argument), false the moment a `relationEquals` constraint pins one concrete instance of a node away from the goal while a different, fresh instance of the exact same node stays free. D-125 states the theorem unconditionally ("cycles can always be unrolled zero times"); that entry is left as written, per this project's own append-only convention, but is superseded here for this specific claim — see the corrected statement in `docs/INVARIANTS.md`.
+
+**Fix, arrived at through two rounds of independent adversarial review before any of it shipped** (not just my own first-draft reasoning — see below):
+
+1. **`search.ts`'s `attempt()`** now keys its visited-set on `(NodeId, instanceKey)`, not `NodeId` alone. `instanceKey` is the object variable's own union-find representative when that representative is one of the invariant's own declared variables (a finite, small set); every engine-minted, unconstrained variable collapses to one shared `'$fresh'` key per node, since no constraint in this invariant language can ever reference a variable the search itself minted — any two are provably interchangeable, so trying only the first is complete, not lossy.
+2. **`MAX_ATTEMPT_CALLS = 100_000`**, the exact-search counterpart to `../bounded/search.ts`'s own `MAX_BOUNDED_CANDIDATES` (same reasoning, same order of magnitude): a hard, disclosed ceiling on total `attempt()` calls per `checkInvariant()` run, returning `UNKNOWN` (never a guess) once exhausted. Necessary because relaxing the guard removes the old, much stronger — but unsound — bound of "at most one visit to any node, ever." A first draft without this ceiling was adversarially reviewed and found to blow up combinatorially (not infinitely — it always terminated, but far too slowly to trust): an invariant with many named variables, each independently re-entering a schema cycle that also has ordinary branching, can make the _number_ of search steps grow with variable count, confirmed empirically by that review at 1.5M+ steps for 50 declared variables. Re-verified myself after adding the budget: a closed, fully-branching, adversarially-constructed cycle at 12 named variables still resolves exactly (`HOLDS`, fast); at 16 and 20, it now hits the budget and reports `UNKNOWN` with a named reason inside ~2 seconds — never a hang, never a wrong verdict.
+3. **`UnionFind.bindSlot`/`slotValue`** (`union-find.ts`) now resolve `objectVar` through `this.find(...)` before building a slot's storage key. The same review found a second, narrower gap: an invariant can legally write two `relationEquals` lines pinning the exact same slot to two different named variables (nothing in the grammar rejects this), which `bindSlot`'s own `union()` call silently unifies — but the slot storage itself was still keyed on the raw, pre-union variable name, so a query through the _other_ alias could miss an already-pinned slot entirely. This never flipped a confirmed verdict in the review's own adversarial effort, but could produce an internally inconsistent witness (a self-referential tuple, or one silently contradicting another constraint the same invariant places on the identical slot) even when the final answer happened to be right — closed at the root, in the shared data structure, not just at `search.ts`'s one new call site.
+
+**Two rounds of independent adversarial review, not one.** The first review (grounding the originally planned item 3) is what surfaced this bug in the first place, while critiquing an unrelated, still-pending proposal (an AND-infeasibility short-circuit for intersection). A second, dedicated workflow then adversarially attacked _this fix_ specifically — three independent reviewers targeting soundness/completeness, termination, and test/docs impact — before any of it was written into shipped code. That review found the combinatorial-blowup risk above (blocking, fixed by the budget) and the aliasing gap above (moderate, fixed in `union-find.ts`); it found no soundness or completeness counterexample to the core `(NodeId, instanceKey)` mechanism itself despite genuinely adversarial effort across cyclic, nested, multi-named-variable, and mixed-edge-kind constructions.
+
+**Every claim above independently re-verified against the real, shipped fix, not the review's own account of it:** the original repro now returns `VIOLATED` with the exact hand-built witness, `replayWitness`-confirmed against the real engine; the budget-exhaustion behavior was reproduced directly at the sizes named above; the alias fix was reproduced by re-running the same nested-alias schema the review used and confirming the internally-inconsistent witness no longer occurs (verdict stays `HOLDS`, no witness at all).
+
+**Fail-checked live, three independent breaks, each isolated to confirm it gates only what it should:**
+
+- Reverting `instanceKey` to the constant `'$fresh'` (undoing the core relaxation) flipped exactly the three tests that depend on it red (the original repro, a two-named-variables variant, and the budget-exhaustion test — the last because the old, stronger guard resolves the closed cycle to `HOLDS` before ever approaching the budget) — the other 18 new/existing tests stayed green.
+- Reverting `UnionFind.bindSlot`/`slotValue`'s `find()` resolution flipped exactly the two dedicated `UnionFind`-level alias tests red — nothing else, confirming (as the review itself found) that this gap is independent of, and narrower than, the cycle-guard fix. One of those two tests was initially too weak to catch this on its own (it bound the same value through both aliases, which happens to pass even under the bug) — caught by running the fail-check against it, strengthened to bind two _different_ values and assert they get unified, then reconfirmed to fail correctly before being shipped.
+- Both reverts were undone; the full suite reconfirmed green afterward.
+
+**Local verification:** `npx tsc --noEmit -p tsconfig.json`, `npx eslint .`, `npx prettier --check .` all clean. `tools/schema-verifier`'s own suite: 13 files, 124 tests (up from 115 — 9 net new, all in `test/reachability.test.ts`), all green. Manually re-verified beyond the automated suite: the original repro, the budget cap at three different closed-cycle sizes (12/16/20 named variables), and the alias-fix repro, all run directly against the real CLI/engine as described above.
+
+**Docs updated to match:** `docs/INVARIANTS.md`'s §5 section (the exact passage that stated the now-corrected cycle claim) and `tools/schema-verifier/README.md`'s "Fragments and guarantees" section (added a pointer to this entry; the core "exact — sound and complete" claim itself stays true, since that's exactly what this fix restores). `docs/DECISIONS.md` D-116, D-120, and D-125 are left as originally written, per this project's own append-only convention — this entry supersedes D-125's unconditional cycle-unrolling statement for the case described above, rather than editing it in place.
+
+**This closes the bug.** Item 3 of the batch begun at D-127/D-128 (the exact type-mismatch upgrade to the monotone prover) resumes next, now grounded on a cycle guard that's actually sound.
+
+**Revisit if:** a future change to the invariant grammar lets a constraint reference something other than the invariant's own finitely many declared variables (today's entire soundness argument for the `'$fresh'` collapse rests on that never being possible) — at that point, the "any two fresh variables are interchangeable" argument needs to be re-checked, not assumed to still hold.

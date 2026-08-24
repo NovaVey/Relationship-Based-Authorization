@@ -193,7 +193,12 @@ reachable from the invariant's own goal permission:
   states the full argument in one place — why it makes unbounded search
   tractable, and exactly where it stops applying — cross-referencing
   D-115 through D-118 and D-120, where the pieces were originally built
-  and verified. Counterexample self-validation (§6), which replays every
+  and verified; a later entry (search `docs/DECISIONS.md` for the one
+  documenting a confirmed false `HOLDS` in a recursive relation
+  constrained by `relationEquals`) corrects the small-model property's
+  own cycle-handling statement — a node's visited-set entry is scoped
+  per distinct object the search tries it with, not per node alone.
+  Counterexample self-validation (§6), which replays every
   `VIOLATED` witness against the real, unmodified production engine
   before it's ever reported, is D-117.
 - **Non-monotone** (the schema, as reachable from the goal, uses

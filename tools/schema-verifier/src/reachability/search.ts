@@ -53,12 +53,47 @@ interface AttemptUnknown {
 }
 type AttemptResult = AttemptSuccess | AttemptFail | AttemptUnknown;
 
+/**
+ * How many total `attempt()` calls one `checkInvariant()` run may make
+ * before giving up honestly (`UNKNOWN`) rather than continuing to search
+ * — the exact-search counterpart to `../bounded/search.ts`'s own
+ * `MAX_BOUNDED_CANDIDATES`, same order of magnitude and same reasoning:
+ * a hard, disclosed ceiling beats an unbounded hang. Exists specifically
+ * because the cycle-guard soundness fix below (`instanceKey`, allowing a
+ * node to be revisited once per distinct invariant-named variable, not
+ * just once ever) can no longer promise the OLD guard's much stronger,
+ * but unsound, bound of "at most one visit per node in the entire
+ * search" — an adversarial invariant with many named variables, each
+ * independently revisiting a node inside a schema cycle that also has
+ * ordinary branching (a union with multiple children), can make the
+ * *number* of `attempt()` calls grow combinatorially in the variable
+ * count, even though the guard genuinely never lets the recursion run
+ * forever (see `docs/DECISIONS.md` for the confirmed, measured blowup
+ * this ceiling closes). 100,000 was chosen the same way
+ * `MAX_BOUNDED_CANDIDATES` was: comfortably beyond anything build spec
+ * rule 0.5's own "tens of nodes" schemas could ever need, while still
+ * keeping worst-case latency on an adversarial invariant in the
+ * neighborhood of a second, not a hang.
+ */
+export const MAX_ATTEMPT_CALLS = 100_000;
+
 interface SearchContext {
   readonly graph: SchemaGraph;
   readonly schema: CompiledSchema;
   readonly goalSubjectVar: VarId;
   readonly varTypes: Map<VarId, string>;
   readonly fresh: { n: number };
+  /**
+   * Every variable name the invariant itself declares (`s`, `x`, `o`,
+   * ... — never an engine-minted `$freshN`) — see `attempt()`'s own
+   * `instanceKey` computation for why this needs to be known at every
+   * recursive call, not just at `materialize()` time (the only place
+   * `checkInvariant` used to need this distinction before the
+   * cycle-guard soundness fix below).
+   */
+  readonly namedVars: ReadonlySet<VarId>;
+  /** Mutable, shared across the whole search — see `MAX_ATTEMPT_CALLS`'s own doc comment. */
+  readonly budget: { remaining: number };
 }
 
 function freshVar(ctx: SearchContext, type: string): VarId {
@@ -87,19 +122,59 @@ function attempt(
   nodeId: NodeId,
   currentObjectVar: VarId,
   currentObjectType: string,
-  visited: ReadonlySet<NodeId>,
+  visited: ReadonlySet<string>,
   uf: UnionFind,
 ): AttemptResult {
-  if (visited.has(nodeId)) {
-    // Cycles are legal in the schema graph, but the monotone fragment's
-    // own small-model property (build spec §1) means a minimal witness
-    // never needs to unroll one — revisiting a node this search path has
-    // already tried offers no new path, so this branch is a dead end,
-    // not an error.
+  if (ctx.budget.remaining <= 0) {
+    // See MAX_ATTEMPT_CALLS's own doc comment — this is the honest,
+    // disclosed exit once the search has done as much work as it's
+    // allowed to, never a silent HOLDS/VIOLATED it can no longer back up.
+    return {
+      kind: 'unknown',
+      reason: `search exceeded its ${MAX_ATTEMPT_CALLS}-call exploration budget — cannot decide within a bounded number of steps`,
+    };
+  }
+  ctx.budget.remaining -= 1;
+
+  // Cycles are legal in the schema graph — but the monotone fragment's
+  // own small-model property (build spec §1) only promises that a
+  // *given, fixed* object never needs its node revisited: a node reached
+  // again with the SAME object (the same invariant-named variable, or a
+  // fresh, engine-minted one already tried as a fresh instance of this
+  // node) really is a dead end, since nothing new could be learned. It
+  // does NOT promise a node reached with a genuinely DIFFERENT object
+  // is redundant — found the hard way (docs/DECISIONS.md documents the
+  // confirmed false-HOLDS this produced before this fix): an invariant's
+  // own `relationEquals` constraint can pin one instance of a node's
+  // relation slot away from the goal subject while a later, freshly
+  // introduced instance of the exact same node stays completely
+  // unconstrained and free to succeed.
+  //
+  // `instanceKey` is what actually distinguishes those two cases: one of
+  // the invariant's own finitely many declared variables (resolved
+  // through `uf.find()` so two names the search has since unified —
+  // e.g. two `relationEquals` lines pinning the same slot to two
+  // different names — share one key, not two, matching `UnionFind`'s
+  // own `bindSlot`/`slotValue` fix, see that file) gets its own key;
+  // every engine-minted, unconstrained variable collapses to the single
+  // shared `'$fresh'` key, since any two are provably interchangeable —
+  // nothing in this invariant language's constraint grammar can ever
+  // reference a variable *search.ts* itself minted, only the invariant's
+  // own declared names, so no fresh variable is ever distinguishable
+  // from any other at the point it's introduced. `MAX_ATTEMPT_CALLS`
+  // above is this relaxation's own necessary companion: allowing more
+  // than one visit per node, per named variable, means the old
+  // guarantee of "at most one visit to any node, ever, in this search"
+  // no longer holds, so total work is bounded by an explicit budget
+  // instead.
+  const representative = uf.find(currentObjectVar);
+  const instanceKey = ctx.namedVars.has(representative) ? representative : '$fresh';
+  const visitKey = `${nodeId}::${instanceKey}`;
+  if (visited.has(visitKey)) {
     return { kind: 'fail' };
   }
   const nextVisited = new Set(visited);
-  nextVisited.add(nodeId);
+  nextVisited.add(visitKey);
 
   const edges = ctx.graph.edgesFrom.get(nodeId) ?? [];
   if (edges.length === 0) return { kind: 'fail' };
@@ -307,6 +382,8 @@ export function checkInvariant(
     goalSubjectVar: invariant.goal.subject,
     varTypes,
     fresh: { n: 0 },
+    namedVars,
+    budget: { remaining: MAX_ATTEMPT_CALLS },
   };
   const result = attempt(ctx, goalNodeId, invariant.goal.object, goalObjectType, new Set(), uf);
 

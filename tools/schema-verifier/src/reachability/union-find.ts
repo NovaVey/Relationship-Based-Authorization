@@ -136,9 +136,25 @@ export class UnionFind {
    * an earlier step of this same search) if it's already bound, or
    * binding it fresh if not. Returns `false` if that merge would
    * conflict with a `distinct` group.
+   *
+   * Keyed on `this.find(objectVar)`, not the raw `objectVar` string —
+   * found and fixed alongside `search.ts`'s own cycle-guard soundness
+   * fix (`docs/DECISIONS.md`, the entry documenting that fix): an
+   * invariant can legally write two `relationEquals` lines pinning the
+   * exact same `(subject, relation)` slot to two different named
+   * variables (nothing in `invariants/parser.ts`'s grammar rejects a
+   * repeated slot), which `bindSlot`'s own `union()` call below silently
+   * unifies — `objectVar` and whatever it was unified with become the
+   * same object, but were, until this fix, still two different raw
+   * `VarId` strings. Keying this slot's own storage on the raw string
+   * meant a *different* alias of that same now-unified object would
+   * silently miss the pin entirely and treat the slot as unbound —
+   * resolving through `find()` first means every alias of one object
+   * shares one slot, matching what `union()` already made true about
+   * their identity.
    */
   bindSlot(objectVar: VarId, relationName: string, value: VarId): boolean {
-    const key = `${objectVar}#${relationName}`;
+    const key = `${this.find(objectVar)}#${relationName}`;
     const existing = this.slots.get(key);
     if (existing === undefined) {
       this.slots.set(key, value);
@@ -148,8 +164,8 @@ export class UnionFind {
     return this.union(existing, value);
   }
 
-  /** The variable already bound to `(objectVar, relationName)`, if any — checked before introducing a fresh variable for a tuple-to-userset hop, so a constraint that already pinned this exact slot is reused rather than shadowed. */
+  /** The variable already bound to `(objectVar, relationName)`, if any — checked before introducing a fresh variable for a tuple-to-userset hop, so a constraint that already pinned this exact slot is reused rather than shadowed. Resolves `objectVar` through `find()` first, for the same reason `bindSlot` does — see that method's own doc comment. */
   slotValue(objectVar: VarId, relationName: string): VarId | undefined {
-    return this.slots.get(`${objectVar}#${relationName}`);
+    return this.slots.get(`${this.find(objectVar)}#${relationName}`);
   }
 }

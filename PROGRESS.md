@@ -2253,3 +2253,17 @@ Explicitly not a security fix — no signature, no integrity check, stated plain
 **Verification:** `npx vitest run` (47 files, 602 tests, up from 578), `npx eslint .`, `npx tsc --noEmit`, `npx prettier --check .`, `npm run build` all clean. Full account: `docs/DECISIONS.md` D-128.
 
 Second of the small batch of improvements identified while reviewing a proposed consistency-layer plan against this repo's actual state (first: `docs/INVARIANTS.md`'s dynamic-invariants section, D-127).
+
+## A confirmed false HOLDS in the monotone-fragment exact prover, closed (D-129)
+
+**Owner:** the main agent, directly, on `main`.
+
+Found while grounding item 3 of the same batch (the exact type-mismatch upgrade to the monotone prover): an adversarial design-review workflow surfaced a claim that `checkInvariant`'s cycle guard could report a false `HOLDS` for a schema with no intersection or exclusion at all — squarely inside the fragment this project's own docs call "exact — sound and complete." Independently confirmed by hand: built the exact repro (a recursive `org.admin` relation, an invariant pinning the goal object's own `top_admin` away from the goal subject via `relationEquals`) and ran the witness through the real, unmodified `productionCheck` engine directly — `allowed: true` — while `checkInvariant` claimed `HOLDS`, no witness possible.
+
+Root cause: the cycle guard keyed its visited-set on the schema node alone, unable to tell "truly redundant revisit" from "a different, freely-choosable object at the same node." Fixed by scoping a revisit per instance (the invariant's own named variable, or a shared key for any engine-minted fresh variable) instead of per node — plus a disclosed `MAX_ATTEMPT_CALLS` exploration-budget ceiling (a second, independent adversarial review found the first-draft fix could blow up combinatorially with named-variable count, though it always terminated) and a matching `UnionFind` fix so two aliased variables share one binding, not two.
+
+Two full rounds of independent adversarial review before any of it shipped, plus three isolated live fail-checks (each confirmed to flip exactly the tests it should, nothing else) and direct re-verification of every claim against the real, shipped code — not taken on the reviews' word alone.
+
+**Verification:** `tools/schema-verifier`'s own suite — 13 files, 124 tests (up from 115) — plus `npx eslint .`/`npx tsc --noEmit`/`npx prettier --check .` all clean. Full account, including the exact repro and both reviews' findings: `docs/DECISIONS.md` D-129.
+
+This closes the bug; item 3 (the type-mismatch upgrade) resumes next on top of a cycle guard that's actually sound.
