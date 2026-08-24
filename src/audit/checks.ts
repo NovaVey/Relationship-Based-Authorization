@@ -31,6 +31,32 @@
  * matches `productionCheck`'s own established contract (a genuinely
  * unreachable database is an infrastructure failure — exit 3 in the CLI
  * — never smoothed over into an ordinary answer). See `docs/DECISIONS.md`.
+ *
+ * **The optional `cache` parameter (post-audit improvement, closes D-028;
+ * `src/resolve/production/cache.ts`).** Defaults to `undefined`, preserving
+ * today's exact behavior byte-for-byte for every one of this function's
+ * existing callers (tests, the CLI, and every place that constructs
+ * `PerformCheckOptions` without also passing a cache) — nothing has to
+ * change at a call site that doesn't opt in. `src/api/server.ts`'s `/check`
+ * route is, as of this change, the only real caller that ever passes one,
+ * and only when `env.CHECK_CACHE_TTL_MS > 0` (`createCheckCache` returns
+ * `undefined` otherwise — see that function's own doc comment).
+ *
+ * Logging stays unconditional on a hit exactly as on a miss: a hit skips
+ * `productionCheck`'s own graph walk, never the `checks` insert. The insert
+ * on a **miss** now runs *before* `cache.trySet(...)`, not after (a real
+ * bug an adversarial review workflow found before this shipped, not a
+ * stylistic choice): if the insert throws, `performCheck` still throws and
+ * discards the result exactly as it always has, and — because `trySet`
+ * never ran — that discarded result can never live on in the cache and be
+ * served to some *other* caller under a checks-table row that misrepresents
+ * when/how it was actually computed. `cache.beginMiss()` is called before
+ * `productionCheck` even starts, and the epoch it captures is checked again
+ * by `trySet` after the insert completes — fencing the *entire* window (the
+ * graph walk and the audit insert both) during which a concurrent write
+ * could have called `cache.clear()` and made this result stale before it
+ * would otherwise be cached. See `cache.ts`'s own top-of-file doc comment,
+ * "The epoch fence," for the full race this closes.
  */
 import type { Pool } from 'pg';
 
@@ -40,22 +66,22 @@ import {
   type ProductionCheckOptions,
   type ProductionCheckResult,
 } from '../resolve/production/resolver.js';
+import { buildCacheKey, type CheckCache } from '../resolve/production/cache.js';
 
 export type PerformCheckOptions = ProductionCheckOptions;
 
 export type PerformCheckResult = ProductionCheckResult;
 
-export async function performCheck(
+/** The one `checks` row every call inserts, hit or miss — factored out so both paths write it identically. */
+async function insertCheckRow(
   pool: Pool,
   subject: EntityRef,
   object: EntityRef,
   relationOrPermission: string,
-  options: PerformCheckOptions = {},
-): Promise<PerformCheckResult> {
-  const start = performance.now();
-  const result = await productionCheck(pool, subject, object, relationOrPermission, options);
-  const durationMs = Math.round(performance.now() - start);
-
+  options: PerformCheckOptions,
+  result: PerformCheckResult,
+  durationMs: number,
+): Promise<void> {
   await pool.query(
     `insert into checks
        (subject_ns, subject_id, relation, object_ns, object_id, allowed,
@@ -74,6 +100,54 @@ export async function performCheck(
       durationMs,
     ],
   );
+}
+
+export async function performCheck(
+  pool: Pool,
+  subject: EntityRef,
+  object: EntityRef,
+  relationOrPermission: string,
+  options: PerformCheckOptions = {},
+  cache?: CheckCache,
+): Promise<PerformCheckResult> {
+  const cacheKey = cache
+    ? buildCacheKey(subject, relationOrPermission, object, options)
+    : undefined;
+
+  if (cache && cacheKey !== undefined) {
+    const hitStart = performance.now();
+    const hit = cache.get(cacheKey);
+    if (hit !== undefined) {
+      const hitDurationMs = Math.round(performance.now() - hitStart);
+      await insertCheckRow(
+        pool,
+        subject,
+        object,
+        relationOrPermission,
+        options,
+        hit,
+        hitDurationMs,
+      );
+      return hit;
+    }
+  }
+
+  // Captured before `productionCheck` even starts, per this function's own
+  // doc comment — fences the whole miss (graph walk + audit insert) against
+  // a concurrent `cache.clear()`, not just the graph walk alone.
+  const missEpoch = cache?.beginMiss();
+
+  const start = performance.now();
+  const result = await productionCheck(pool, subject, object, relationOrPermission, options);
+  const durationMs = Math.round(performance.now() - start);
+
+  await insertCheckRow(pool, subject, object, relationOrPermission, options, result, durationMs);
+
+  // Only after the audit insert has succeeded — see this function's own doc
+  // comment for why a cache write must never precede it on the miss path.
+  if (cache && cacheKey !== undefined && missEpoch !== undefined) {
+    cache.trySet(missEpoch, cacheKey, result);
+  }
 
   return result;
 }

@@ -126,6 +126,40 @@ export const EnvSchema = z.object({
     32,
     'ADMIN_API_KEY must be at least 32 characters — a short key is easy to guess or brute-force',
   ),
+
+  // A second, narrower credential tier (post-audit improvement, D-064's own
+  // "Revisit if" clause: "A deployment genuinely needs a caller class that
+  // can check/expand without holding the full admin key... that's a real
+  // reason to add a second, narrower credential tier"). Authorizes only the
+  // read/oracle routes (`/check`, `/expand`, `/list-objects`, `/list-users`)
+  // — never `/tuples` or `/schema/publish`, which stay `ADMIN_API_KEY`-only.
+  // Same `.min(32)` treatment as `ADMIN_API_KEY` for the same reason (finding
+  // #10, MEDIUM, third audit). Optional and unset by default: an unset
+  // `READONLY_API_KEY` changes nothing — the read routes still accept
+  // `ADMIN_API_KEY` exactly as before D-064's own "Revisit if" fires; see
+  // `src/api/auth.ts`'s `checkReadAuth`.
+  READONLY_API_KEY: optionalString(
+    32,
+    'READONLY_API_KEY must be at least 32 characters — a short key is easy to guess or brute-force',
+  ),
+
+  // Opt-in, unset by default (post-audit improvement — horizontal-scaling
+  // readiness). When set, a real `ioredis` client is constructed from this
+  // URL and handed to `@fastify/rate-limit`'s own bundled `redis` option
+  // (replacing its default in-process `LocalStore`) and to this project's own
+  // hand-rolled `authFloodGuard` counter — see `src/api/server.ts` — so every
+  // rate/flood budget is shared across however many replicas of this process
+  // are running behind the same reverse proxy, instead of each replica
+  // silently keeping its own independent, smaller-than-configured budget (the
+  // multi-replica gap `CHECK_CACHE_TTL_MS`'s own single-process cache and
+  // `authFloodState`'s own in-memory `LruMap` both still have — see that
+  // variable's own doc comment, and `docs/DECISIONS.md`). Left unset (the
+  // default), this changes nothing: every rate-limit/flood-guard mechanism
+  // keeps its exact pre-existing in-process behavior, byte-for-byte, and this
+  // codebase's own single-instance deployment (Railway, one `authz-api`
+  // service, per `docs/DECISIONS.md` D-104) never constructs a Redis client
+  // at all.
+  REDIS_URL: optionalString(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

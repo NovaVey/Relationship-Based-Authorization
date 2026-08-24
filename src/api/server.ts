@@ -55,22 +55,31 @@ import Fastify, {
   type FastifyServerOptions,
 } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
-import { LruMap } from 'toad-cache';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 
 import { env } from '../config/env.js';
 import { performCheck } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
+import { listObjects, listUsers } from '../audit/list.js';
 import { writeTuple, deleteTuple, type TupleKey } from '../store/tuples.js';
 import { decodeToken } from '../store/tokens.js';
 import { compileSchema } from '../schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
 import { publishSchema, listLatestNamespaceVersions } from '../schema/publish.js';
-import { checkAdminAuth } from './auth.js';
+import { createCheckCache, type CheckCache } from '../resolve/production/cache.js';
+import { checkAdminAuth, checkReadAuth } from './auth.js';
+import {
+  createRedisClient,
+  InMemoryFloodStore,
+  RedisFloodStore,
+  type FloodStore,
+} from './redis-store.js';
 import {
   checkResponse,
   expandResponse,
+  listObjectsResponse,
+  listUsersResponse,
   tupleWriteResponse,
   tupleDeleteResponse,
   schemaCompileResponse,
@@ -152,6 +161,29 @@ const checkBodySchema = z
   .strict();
 
 const expandBodySchema = z
+  .object({
+    object: entityRefSchema,
+    relation: identifierField(),
+  })
+  .strict();
+
+// `listObjects`/`listUsers` (post-audit improvement, `src/audit/list.ts`) —
+// bodies mirror `checkBodySchema`/`expandBodySchema` exactly, field for
+// field, for the two fields each shares with its single-object sibling.
+const listObjectsBodySchema = z
+  .object({
+    subject: entityRefSchema,
+    relation: identifierField(),
+    objectNs: identifierField(),
+    // Same opaque, encoded consistency token as `checkBodySchema.atToken` —
+    // see that field's own comment. `listUsers` has no equivalent field:
+    // `listUsers` has no `atToken` support at all (`src/audit/list.ts`'s own
+    // top-of-file doc comment explains why).
+    atToken: z.string().optional(),
+  })
+  .strict();
+
+const listUsersBodySchema = z
   .object({
     object: entityRefSchema,
     relation: identifierField(),
@@ -423,6 +455,20 @@ export async function buildServer(
     bodyLimit: 262_144,
   });
 
+  // Opt-in horizontal-scaling readiness (post-audit improvement, unset by
+  // default — see `env.REDIS_URL`'s own doc comment and
+  // `src/api/redis-store.ts`'s top-of-file doc comment for the full
+  // reasoning). `env.REDIS_URL` unset (the default) means `redisClient` is
+  // `undefined` here and every rate/flood mechanism below keeps its exact
+  // pre-existing in-process behavior — nothing else in this function
+  // changes shape depending on which branch this took.
+  const redisClient = env.REDIS_URL ? createRedisClient(env.REDIS_URL, app.log) : undefined;
+  if (redisClient) {
+    app.addHook('onClose', async () => {
+      await redisClient.quit();
+    });
+  }
+
   // Framework-level errors (malformed JSON body, etc.), the rate-limit
   // plugin's own thrown rejection (see the `retryAfterSeconds` marker below
   // — `@fastify/rate-limit` communicates a limit hit by *throwing* from its
@@ -493,6 +539,17 @@ export async function buildServer(
   await app.register(rateLimit, {
     max: 100,
     timeWindow: '1 minute',
+    // `@fastify/rate-limit` switches its own internal store from the
+    // default in-process `LocalStore` to its bundled `RedisStore`
+    // automatically once handed a truthy `redis` option (confirmed by
+    // reading that plugin's own `index.js` — `settings.redis` truthy is the
+    // entire condition) — nothing else about this registration, or any
+    // individual route's own `config.rateLimit`, needs to change for every
+    // rate-limit check in this file to share one real, cross-replica budget
+    // instead of one per process. Omitted entirely (not even `redis:
+    // undefined`) when `redisClient` is unset, matching this option's own
+    // "falsy means default in-process store" contract.
+    ...(redisClient ? { redis: redisClient } : {}),
     errorResponseBuilder: (_request, context) => {
       const retryAfterSeconds = Math.max(1, Math.ceil(context.ttl / 1000));
       const err = new Error(
@@ -576,6 +633,27 @@ export async function buildServer(
   }
 
   /**
+   * The scoped, read-only credential tier's own gate (post-audit
+   * improvement, D-064's own "Revisit if" — `src/api/auth.ts`'s
+   * `checkReadAuth`). Gates `/check`, `/expand`, `/list-objects`, and
+   * `/list-users` — every route that only ever answers a question about the
+   * tuple graph, never one that changes it. Mirrors `requireAdminAuth`'s
+   * own shape exactly (same "stop the preHandler chain on rejection" Fastify
+   * mechanism, same `sendApiError`), differing only in which check function
+   * it calls and how it phrases an unconfigured-credential rejection.
+   */
+  async function requireReadAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const result = checkReadAuth(request.headers.authorization);
+    if (!result.authorized) {
+      const detail =
+        result.reason === 'no_read_credential_configured'
+          ? 'neither READONLY_API_KEY nor ADMIN_API_KEY is configured for this deployment — reads are disabled'
+          : 'missing or invalid API key';
+      await sendApiError(reply, unauthorizedError(detail));
+    }
+  }
+
+  /**
    * A second, independent, much coarser limiter on every request to a
    * gated route, positioned FIRST in that route's own `preHandler` array —
    * before `requireAdminAuth`, unlike `writeRateLimit`/`gatedReadRateLimit`
@@ -654,24 +732,20 @@ export async function buildServer(
   const AUTH_FLOOD_MAX = 1000;
   const AUTH_FLOOD_WINDOW_MS = 60_000;
   const AUTH_FLOOD_STATE_MAX_ENTRIES = 50_000;
-  const authFloodState = new LruMap<{ count: number; windowStart: number }>(
-    options.authFloodStateMaxEntries ?? AUTH_FLOOD_STATE_MAX_ENTRIES,
-  );
+
+  // Backed by Redis (shared, cross-replica) when `env.REDIS_URL` is set,
+  // the same pre-existing in-process `LruMap` counting otherwise — see
+  // `src/api/redis-store.ts`'s own top-of-file doc comment. `FloodStore`
+  // itself is the one thing that changed here; `authFloodGuard`'s own logic
+  // below is otherwise unchanged from before this abstraction existed.
+  const floodStore: FloodStore = redisClient
+    ? new RedisFloodStore(redisClient)
+    : new InMemoryFloodStore(options.authFloodStateMaxEntries ?? AUTH_FLOOD_STATE_MAX_ENTRIES);
 
   async function authFloodGuard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const key = request.ip;
-    const now = Date.now();
-    const existing = authFloodState.get(key);
-    if (existing === undefined || now - existing.windowStart >= AUTH_FLOOD_WINDOW_MS) {
-      authFloodState.set(key, { count: 1, windowStart: now });
-      return;
-    }
-    existing.count += 1;
-    if (existing.count > AUTH_FLOOD_MAX) {
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((existing.windowStart + AUTH_FLOOD_WINDOW_MS - now) / 1000),
-      );
+    const { count, msUntilReset } = await floodStore.increment(request.ip, AUTH_FLOOD_WINDOW_MS);
+    if (count > AUTH_FLOOD_MAX) {
+      const retryAfterSeconds = Math.max(1, Math.ceil(msUntilReset / 1000));
       await sendApiError(reply, rateLimitedError(retryAfterSeconds));
     }
   }
@@ -712,6 +786,17 @@ export async function buildServer(
     return [authFloodGuard, requireAdminAuth];
   }
 
+  /**
+   * The read-only-credential-tier counterpart of `gatedPreHandlers` above —
+   * identical reasoning (a fresh array per call site, `authFloodGuard`
+   * first), differing only in which auth check runs second. Used by
+   * `/check`, `/expand`, `/list-objects`, and `/list-users` — every route
+   * `requireReadAuth` itself is scoped to.
+   */
+  function gatedReadPreHandlers(): [typeof authFloodGuard, typeof requireReadAuth] {
+    return [authFloodGuard, requireReadAuth];
+  }
+
   // A stricter budget than the global default (D-056): defense-in-depth
   // against ADMIN_API_KEY-guessing and write-flooding, even from a caller
   // who does hold a valid key. `hook: 'preHandler'` (D-065) — see
@@ -730,9 +815,26 @@ export async function buildServer(
     config: { rateLimit: { max: 200, timeWindow: '1 minute', hook: 'preHandler' as const } },
   };
 
+  // The check-result cache (post-audit improvement, closes D-028 —
+  // `src/resolve/production/cache.ts`). `createCheckCache` returns
+  // `undefined` — never constructing anything — for `env.CHECK_CACHE_TTL_MS`'s
+  // own documented default of `0`, so a default deployment allocates nothing
+  // new here and `performCheck` below runs exactly as it always has (see
+  // that function's own doc comment: an `undefined` cache argument preserves
+  // today's behavior byte-for-byte). `CHECK_CACHE_MAX_ENTRIES` is a plain
+  // LRU bound on this cache's own memory use, independent of
+  // `CHECK_CACHE_TTL_MS` — mirroring this file's own `AUTH_FLOOD_STATE_MAX_ENTRIES`
+  // precedent (D-105): a cap large enough that eviction only engages under
+  // genuinely heavy real traffic, never during ordinary use.
+  const CHECK_CACHE_MAX_ENTRIES = 10_000;
+  const checkCache: CheckCache | undefined = createCheckCache(
+    CHECK_CACHE_MAX_ENTRIES,
+    env.CHECK_CACHE_TTL_MS,
+  );
+
   app.post(
     '/check',
-    { preHandler: gatedPreHandlers(), ...gatedReadRateLimit },
+    { preHandler: gatedReadPreHandlers(), ...gatedReadRateLimit },
     async (request, reply) => {
       const parsed = checkBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -750,7 +852,14 @@ export async function buildServer(
         }
       }
       const result = await runOrInfrastructureError(reply, () =>
-        performCheck(pool, subject, object, relation, atToken !== undefined ? { atToken } : {}),
+        performCheck(
+          pool,
+          subject,
+          object,
+          relation,
+          atToken !== undefined ? { atToken } : {},
+          checkCache,
+        ),
       );
       if (result === undefined) return;
       const resp = checkResponse(subject, relation, object, result, atToken);
@@ -760,7 +869,7 @@ export async function buildServer(
 
   app.post(
     '/expand',
-    { preHandler: gatedPreHandlers(), ...gatedReadRateLimit },
+    { preHandler: gatedReadPreHandlers(), ...gatedReadRateLimit },
     async (request, reply) => {
       const parsed = expandBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -771,6 +880,58 @@ export async function buildServer(
       const tree = await runOrInfrastructureError(reply, () => expand(pool, object, relation));
       if (tree === undefined) return;
       const resp = expandResponse(object, relation, tree);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
+
+  // Bulk reverse-lookup operations (post-audit improvement — `src/audit/
+  // list.ts`). Gated by `requireReadAuth` and rate-limited exactly like
+  // `/check`/`/expand` — each is, in spirit, the same "read/oracle" access
+  // as a check, just answering the reverse question. Neither ever calls
+  // `performCheck`, so neither is logged to the `checks` audit table — see
+  // `list.ts`'s own top-of-file doc comment for why that's a deliberate,
+  // disclosed gap, not an oversight.
+  app.post(
+    '/list-objects',
+    { preHandler: gatedReadPreHandlers(), ...gatedReadRateLimit },
+    async (request, reply) => {
+      const parsed = listObjectsBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const { subject, relation, objectNs, atToken: opaqueAtToken } = parsed.data;
+      let atToken: number | undefined;
+      if (opaqueAtToken !== undefined) {
+        try {
+          atToken = decodeToken(opaqueAtToken);
+        } catch (err) {
+          await sendApiError(reply, invalidRequestError((err as Error).message));
+          return;
+        }
+      }
+      const result = await runOrInfrastructureError(reply, () =>
+        listObjects(pool, subject, relation, objectNs, atToken !== undefined ? { atToken } : {}),
+      );
+      if (result === undefined) return;
+      const resp = listObjectsResponse(subject, relation, objectNs, result, atToken);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
+
+  app.post(
+    '/list-users',
+    { preHandler: gatedReadPreHandlers(), ...gatedReadRateLimit },
+    async (request, reply) => {
+      const parsed = listUsersBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const { object, relation } = parsed.data;
+      const result = await runOrInfrastructureError(reply, () => listUsers(pool, object, relation));
+      if (result === undefined) return;
+      const resp = listUsersResponse(object, relation, result);
       await reply.code(resp.status).send(resp.body);
     },
   );
@@ -787,6 +948,13 @@ export async function buildServer(
       const tuple = toTupleKey(parsed.data);
       const result = await runOrInfrastructureError(reply, () => writeTuple(pool, tuple));
       if (result === undefined) return;
+      // Every successful write can change a cached check's answer — see
+      // `cache.ts`'s own top-of-file doc comment for why this is a
+      // deliberately coarse, whole-cache invalidation, called before this
+      // route's own response is sent (synchronously, in-process). Never
+      // called on the `ok: false` (validation failure) branch — nothing
+      // was actually written, so nothing could have gone stale.
+      if (result.ok) checkCache?.clear();
       const resp = tupleWriteResponse(result);
       await reply.code(resp.status).send(resp.body);
     },
@@ -804,6 +972,8 @@ export async function buildServer(
       const tuple = toTupleKey(parsed.data);
       const result = await runOrInfrastructureError(reply, () => deleteTuple(pool, tuple));
       if (result === undefined) return;
+      // See the identical comment on `POST /tuples` above.
+      if (result.ok) checkCache?.clear();
       const resp = tupleDeleteResponse(result);
       await reply.code(resp.status).send(resp.body);
     },
@@ -833,6 +1003,11 @@ export async function buildServer(
         publishSchema(pool, parsed.data.source),
       );
       if (result === undefined) return;
+      // A republished namespace can change a cached check's answer even
+      // with zero tuple writes (a changed rewrite rule) — see `cache.ts`'s
+      // own top-of-file doc comment. Same reasoning as the two tuple routes
+      // above, applied to schema publishes.
+      if (result.ok) checkCache?.clear();
       const resp = schemaPublishResponse(result);
       await reply.code(resp.status).send(resp.body);
     },

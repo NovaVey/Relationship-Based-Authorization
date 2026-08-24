@@ -32,16 +32,45 @@ name: Schema Verifier
 # that's this schema's honest, correct answer, not a defect this gate
 # papers over. See that file's own header comment for why no monotone-
 # fragment analog of this claim exists to check instead.
+#
+# `schema-verifier-nightly` (post-audit improvement, `docs/DECISIONS.md`):
+# `tools/schema-verifier/test/differential.nightly.test.ts` — §8b's
+# k = 3, 150-schema brute-force cross-check of `checkInvariant`'s `HOLDS`
+# verdicts, deliberately unaffordable inside a PR-blocking budget (that
+# test file's own doc comment: "run nightly, not on PRs") — was fully
+# built and independently verified (`tools/schema-verifier/
+# vitest.nightly.config.ts` exists specifically to run it) but was never
+# actually wired into a scheduled job; this repo's own README disclosed
+# that gap explicitly rather than silently leaving it unbuilt. Mirrors
+# `dst.yml`'s own `dst-pr`/`dst-nightly` split exactly: the existing
+# per-PR job keeps its current trigger and behavior unchanged, gated
+# explicitly to `pull_request`/`push` so it doesn't also fire (redundant,
+# and duplicating the checkout `schema-verifier` job) on the new
+# `schedule` trigger; a new, simpler nightly job (no PR comment to post,
+# nothing downstream needs a soft `set +e` exit) runs the real nightly
+# test suite and fails outright on a red run — the same "surfaces as a
+# red run in the Actions tab" precedent `dst-nightly`/`codeql.yml` both
+# already establish for a scheduled failure with no PR to report against.
 
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    # Daily, independent of any push — distinct from dst.yml's own
+    # `0 5 * * *` and codeql.yml's/scorecard.yml's own weekly slots, so
+    # none compete for the same runner-minute window.
+    - cron: '30 5 * * *'
+
+concurrency:
+  group: schema-verifier-${{ github.event.pull_request.number || 'nightly' }}
+  cancel-in-progress: true
 
 jobs:
   schema-verifier:
     name: schema-verifier
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -81,3 +110,24 @@ jobs:
         run: |
           echo "verify-schema exited ${{ steps.verify.outputs.exit_code }} — see the job summary above for the full output."
           exit 1
+
+  schema-verifier-nightly:
+    name: schema-verifier-nightly
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # No `set +e`/soft-exit here, unlike the per-PR job above — there is
+      # no PR to attach a summary to on a scheduled run, so nothing
+      # downstream needs this step to keep exiting 0 on a real failure. A
+      # failing schema/goal here fails this job outright.
+      - name: Run the k=3, 150-schema nightly differential test
+        run: npx vitest run --config tools/schema-verifier/vitest.nightly.config.ts

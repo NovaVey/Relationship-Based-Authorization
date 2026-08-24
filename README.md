@@ -6,6 +6,8 @@ the check engine never grants a permission no real path supports.
 
 [![CI](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/ci.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/ci.yml)
 [![Soundness](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/soundness.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/soundness.yml)
+[![Schema Verifier](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/schema-verifier.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/schema-verifier.yml)
+[![DST](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/dst.yml/badge.svg)](https://github.com/NovaVey/Relationship-Based-Authorization/actions/workflows/dst.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 **Live:** [`authz-api-production.up.railway.app`](https://authz-api-production.up.railway.app/health) —
@@ -17,6 +19,22 @@ real database connectivity, and all four namespaces at their real versions.
 not a public sandbox, so read access is deliberately not open to anyone who
 finds the URL. `POST /schema/compile` (no write, no gate) is open if you want
 to try the DSL compiler itself against your own source.
+
+## Contents
+
+- [The failure this exists to stop](#the-failure-this-exists-to-stop)
+- [What an `allow` actually looks like here](#what-an-allow-actually-looks-like-here)
+- [The soundness result](#the-soundness-result)
+- [Also proven: the write path survives a crash mid-transaction, and every advisory lock actually blocks](#also-proven-the-write-path-survives-a-crash-mid-transaction-and-every-advisory-lock-actually-blocks)
+- [A third proof: the static schema verifier](#a-third-proof-the-static-schema-verifier)
+- [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
+- [How it works](#how-it-works)
+- [Latency](#latency)
+- [What this is not](#what-this-is-not)
+- [Stack](#stack)
+- [API and CLI](#api-and-cli)
+- [Repository layout](#repository-layout)
+- [Building this out further / contributing](#building-this-out-further--contributing)
 
 ## The failure this exists to stop
 
@@ -77,24 +95,25 @@ Fuzzed against an independent reference resolver across 5,000 random
 `(schema, tuple graph, query)` triples:
 
 ```
-SOUND — 0 false_grant, 0 false_deny, across 5000 queries
+## SOUND — 0 false_grant, 0 false_deny, across 5000 queries (seed <run's own seed>)
 ```
 
-That's a real run's output (`authz soundness run`), not a projected or
-aspirational number — every PR to this repository re-runs it and posts
-the result as a comment (see the Soundness badge above). A system stating
-its own false-grant rate under adversarial random testing, and reporting
-it even when it isn't zero, is a claim almost nothing in this space states
-this plainly — and it's the entire reason this project exists: proving
-the check engine never says yes when no path exists is worth more than
-any feature the engine itself has. `docs/RELATIONS.md`'s "every `allow`
-can show its work" section and `.claude/commands/build-authz-service.md`
-§6.2/§6.5 cover the mechanism — a deliberately naive, deliberately slow,
-independently-written oracle (no shared code with the production engine)
-checked against the real engine on every random query, with a **false
-grant always failing the run outright**, regardless of how rare it was,
-and a false deny reported but never blocking on its own — the asymmetry
-is deliberate, because the two failure modes are not equally dangerous.
+That's the real headline `authz soundness run` produces (`--format
+markdown`, the exact shape posted as a PR comment on every pull request to
+this repository — see the Soundness badge above), not a projected or
+aspirational number. A system stating its own false-grant rate under
+adversarial random testing, and reporting it even when it isn't zero, is a
+claim almost nothing in this space states this plainly — and it's the
+entire reason this project exists: proving the check engine never says yes
+when no path exists is worth more than any feature the engine itself has.
+`docs/RELATIONS.md`'s "every `allow` can show its work" section and
+`.claude/commands/build-authz-service.md` §6.2/§6.5 cover the mechanism —
+a deliberately naive, deliberately slow, independently-written oracle (no
+shared code with the production engine) checked against the real engine on
+every random query, with a **false grant always failing the run
+outright**, regardless of how rare it was, and a false deny reported but
+never blocking on its own — the asymmetry is deliberate, because the two
+failure modes are not equally dangerous.
 
 ## Also proven: the write path survives a crash mid-transaction, and every advisory lock actually blocks
 
@@ -214,22 +233,36 @@ It's wired into this repo's own CI as a required status check
 `org#view = member - banned` still holds against `schema/example.authz`,
 this repo's own real, live schema, not a demo fixture. And it's been run
 against twelve real, published schemas this project didn't write (six
-OpenFGA `sample-stores`, six SpiceDB `authzed/examples`) — nine came back
-`VIOLATED`, three `HOLDS`, and the survey's own biggest result is a
-finding about the invariant language itself, not any one schema: eight of
-those nine violations share one root cause — the language has no way to
-state a _negative_ precondition, so any goal reachable via a directly-
-grantable relation is trivially escapable. Full table and reasoning:
-[`docs/FINDINGS.md`](docs/FINDINGS.md).
+OpenFGA `sample-stores`, six SpiceDB `authzed/examples`): **originally**
+nine came back `VIOLATED` and three `HOLDS`, with eight of those nine
+sharing one root cause — the invariant language had no way to state a
+_negative_ precondition, so any goal reachable via a directly-grantable
+relation was trivially escapable. Closing that gap for two of the nine (a
+new `notRelationEquals` primitive, D-131) moved the real, current count to
+**7 `VIOLATED`, 5 `HOLDS`** — six of the seven remaining violations still
+share the original root cause; the seventh (`openfga-expenses`) is a
+distinct self-referential-manager-loop case. The survey's own biggest
+result was never any one schema — it's this finding about the invariant
+language itself, and the fact that closing part of it is now a real,
+tracked, in-progress story rather than a static snapshot. Full table and
+reasoning: [`docs/FINDINGS.md`](docs/FINDINGS.md).
 
-`docs/DECISIONS.md` D-114 through D-126 has the complete build history —
+`docs/DECISIONS.md` D-114 through D-131 has the complete build history —
 the small-model property and exactly where it stops applying, the SMT
 encoding sketch for the general case, why the verifier imports this
-repo's own parser and engine rather than reimplementing either, and the
+repo's own parser and engine rather than reimplementing either, the
 ten-item definition-of-done checklist confirmed against the real, shipped
-result rather than assumed. Tag `schema-verifier-v1-complete` marks the
-commit where all of it closed. Track real, current status in
-[`PROGRESS.md`](PROGRESS.md).
+result rather than assumed (D-114–D-126), and three further real fixes
+that landed after that checklist first closed: a confirmed false `HOLDS`
+in the monotone-fragment exact prover (D-129), exact decisions for some
+intersection/exclusion cases (D-130), and the `notRelationEquals`
+primitive above (D-131). Tag `schema-verifier-v1-complete` marks the
+commit where the original ten-item checklist closed; the verifier's own
+soundness and expressiveness kept improving past that tag, disclosed here
+rather than left for the tag to imply otherwise. The nightly k=3
+differential test the verifier's own test suite always had was only
+actually wired into a scheduled CI job later (D-134). Track real, current
+status in [`PROGRESS.md`](PROGRESS.md).
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
@@ -322,13 +355,20 @@ permission-chain depth, measured against real Postgres, 50 runs per depth:
 | 10    | 17.4ms | 21.5ms |
 
 Cost grows with depth — expected, since each hop is a real recursive step,
-not memoized (§6.1: no cached, precomputed permission anywhere). No cache
-is enabled by default (`CHECK_CACHE_TTL_MS=0` — see `docs/CONSISTENCY.md`'s
-own section on why, and what it would take to turn one on safely). Numbers
-are this repo's own, not a vendor claim — reproduce them yourself against
-your own database and hardware with `npm run benchmark`
-(`scripts/benchmark-check-depth.ts`), the same script that produced this
-table.
+not memoized (§6.1: no cached, precomputed permission anywhere) — these
+numbers reflect the uncached path, which is still what every correctness
+claim in this project is proven against. An opt-in check-result cache now
+exists (`src/resolve/production/cache.ts`, D-028/D-135 in
+[`docs/DECISIONS.md`](docs/DECISIONS.md)) — still off by default
+(`CHECK_CACHE_TTL_MS=0`) — with write-triggered invalidation designed,
+adversarially reviewed, and proven correct (including a real
+concurrent-request race the first design draft missed and a fully
+deterministic regression test proving it's closed) before it shipped; see
+`docs/CONSISTENCY.md`'s own section on the one non-negotiable rule it has to
+hold. Numbers are this repo's own, not a vendor claim, and will vary by
+machine — reproduce them yourself against your own database and hardware
+with `npm run benchmark` (`scripts/benchmark-check-depth.ts`), the same
+script that produced this table.
 
 ## What this is not
 
@@ -363,31 +403,50 @@ migrations, no ORM — the recursive graph walk is the part of this project
 that must be exactly right and auditable, and a query builder is the
 wrong place to hide that), Fastify for the API, `commander` for the CLI,
 Vitest + `fast-check` for testing and property-based fuzzing, GitHub
-Actions for CI. No LLM API, no third-party auth provider — Postgres is
-the only paid dependency this project has.
+Actions for CI. An optional `ioredis` client, gated entirely behind
+`REDIS_URL` and unset by default, backs cross-replica rate-limit/flood-guard
+state for deployments that actually run more than one instance — see
+"API and CLI" below and D-137. No LLM API, no third-party auth provider —
+Postgres is the only paid dependency a default, single-instance deployment
+of this project has.
 
 ## API and CLI
 
-```
-authz doctor                                        confirm DATABASE_URL is reachable, apply migrations, report status
-authz schema compile <file>                         parse + compile a namespace DSL file
-authz schema publish <file>                         compile and publish a new namespace_configs version
-authz tuple write <object> <relation> <subject>     write a tuple, prints the returned consistency token
-authz tuple delete <object> <relation> <subject>
-authz check <subject> <relation> <object> [--at-token <token>] [--path]   --path: print the real resolution path (see "What an allow actually looks like here" above)
-authz expand <object> <relation>                    print the resolved subject tree
-authz soundness run [--queries N] [--seed S] [--format text|markdown|json] [--dry-run] [--progress N]   run the differential fuzz harness, print/store the report (--dry-run: leave nothing persisted; --progress: "checked X/Y queries" on stderr every N queries)
-authz serve                                         start the Fastify API server
-```
+| Command                                                                                | Does                                                                                                                               |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `authz doctor`                                                                         | Confirm `DATABASE_URL` is reachable, apply migrations, report status                                                               |
+| `authz schema compile <file>`                                                          | Parse + compile a namespace DSL file                                                                                               |
+| `authz schema publish <file>`                                                          | Compile and publish a new `namespace_configs` version                                                                              |
+| `authz tuple write <object> <relation> <subject>`                                      | Write a tuple, prints the returned consistency token                                                                               |
+| `authz tuple delete <object> <relation> <subject>`                                     | Delete a tuple, prints the returned consistency token                                                                              |
+| `authz check <subject> <relation> <object> [--at-token T] [--path]`                    | Is `subject` related to `object` via `relation`? `--path` prints the real resolution path (see "What an `allow`..." above)         |
+| `authz expand <object> <relation>`                                                     | Print the resolved subject tree for `object`#`relation`                                                                            |
+| `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]` | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr) |
+| `authz serve`                                                                          | Start the Fastify API server                                                                                                       |
 
-`authz serve` exposes the same five operations over HTTP
-(`POST /check`, `POST /expand`, `POST`/`DELETE /tuples`, `POST
-/schema/compile`, `POST /schema/publish`, plus `GET /health`) —
-`ADMIN_API_KEY`-gated except `/schema/compile` and `/health` (D-064 —
-`/check`/`/expand` are gated too, not just the writes), rate-limited,
-`/health` reporting database connectivity and every currently-published
-namespace's version. See `src/api/server.ts`'s own doc comments for the
-exact route shapes.
+`authz serve` exposes the same operations over HTTP, plus two bulk
+reverse-lookup operations with no CLI command of their own:
+
+| Method   | Route             | Auth                                  | Rate limit | Does                                                                    |
+| -------- | ----------------- | ------------------------------------- | ---------- | ----------------------------------------------------------------------- |
+| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                        |
+| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                           |
+| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                      |
+| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                    |
+| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple                                                  |
+| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                 |
+| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)       |
+| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                   |
+| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version |
+
+`READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
+the four read/list routes above without also granting write access.
+`ADMIN_API_KEY` alone still authorizes every route, exactly as before that
+credential existed. Every rate/flood-guard budget above can be backed by
+Redis instead of one process's own memory via the optional `REDIS_URL`
+(D-137) — unset by default, a single-instance deployment needs nothing
+new. See `src/api/server.ts`'s own doc comments for the exact route
+shapes.
 
 Static mockups of what a real UI over this would look like —
 Namespaces, Tuple browser, Check playground, Soundness runs, Expand
@@ -399,26 +458,28 @@ same real example data.
 ```
 src/
   config/    validated environment loading
-  schema/    the namespace DSL — parser, compiler, publish
-  store/     migrations, the tuple store, consistency tokens
+  schema/    the namespace DSL — publish.ts, plus dsl/ (parser, compiler, types, errors)
+  store/     migrations/ (the real .sql files), the tuple store, consistency tokens
     dst/     deterministic simulation testing — the in-memory fake storage seam (docs/DST-PROPOSAL.md)
   resolve/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
-    production/  the real, SQL-backed check engine
+    production/  the real, SQL-backed check engine, plus the opt-in check-result cache (cache.ts)
   soundness/ the differential-fuzz generator, classifier, runner
-  audit/     expand(), and the checks audit trail every real check is logged to
+  audit/     expand(), listObjects()/listUsers(), and the checks audit trail every real check is logged to
   report/    markdown/JSON soundness reporters, exit codes, PR-comment logic
-  api/       the Fastify server
-  cli/       the authz CLI
+  api/       the Fastify server, plus the opt-in Redis-backed rate-limit store (redis-store.ts)
+  cli/       the authz CLI — index.ts, plus commands/ (one file per subcommand)
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
 tools/schema-verifier/  the static schema verifier — see "A third proof" above
-docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, INVARIANTS.md, FINDINGS.md, DST-PROPOSAL.md, github-governance.md, screens/
+docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, INVARIANTS.md, FINDINGS.md,
+             DST-PROPOSAL.md, github-governance.md, dst-regression-corpus.json, screens/
 test/
   isolation/ the inherited, repurposed proof suite — see test/isolation/README.md
   unit/      per-module unit + integration tests, one file per real claim
 .claude/commands/  the build specification this whole project was built under
 .claude/agents/    the subagents that specification delegates specific phases to
+.claude/workflows/ the multi-agent audit workflow this project runs periodically against itself
 ```
 
 ## Building this out further / contributing
