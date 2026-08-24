@@ -18,15 +18,21 @@
  * — both real, both worth stating explicitly rather than leaving
  * implicit in a chain of `if`s:
  *
- * 1. A non-monotone `HOLDS` (`result.bound !== undefined`) is a bounded
- *    result, not a proof — `docs/INVARIANTS.md`'s own §7 section is
- *    explicit that this must always be reported as "HOLDS up to k = N,"
- *    never a bare `HOLDS` (§7's own wording). Exit `0` is reserved for a
- *    genuine, unconditional proof (the monotone fragment's small-model
- *    property), so a bounded `HOLDS` maps to `2` (`unknown / bound
- *    exceeded`) alongside a real `UNKNOWN` verdict — both mean "no
- *    violation was found, but this isn't a proof of safety," which is
- *    exactly what code `2` is for.
+ * 1. A `HOLDS` with `result.bound !== undefined` is a bounded result, not
+ *    a proof — `docs/INVARIANTS.md`'s own §7 section is explicit that
+ *    this must always be reported as "HOLDS up to k = N," never a bare
+ *    `HOLDS` (§7's own wording). Exit `0` is reserved for a genuine,
+ *    unconditional proof (`result.proof === 'exact'` — the monotone
+ *    fragment's small-model property, or, since docs/DECISIONS.md's
+ *    intersection/exclusion short-circuits, a `checkInvariant`-decided
+ *    verdict even on a structurally non-monotone schema), so a bounded
+ *    `HOLDS` maps to `2` (`unknown / bound exceeded`) alongside a real
+ *    `UNKNOWN` verdict — both mean "no violation was found, but this
+ *    isn't a proof of safety," which is exactly what code `2` is for.
+ *    The logic below keys off `bound`'s own presence/absence directly,
+ *    not `fragment` — deliberately: `fragment` describes the schema's
+ *    structure (does it contain intersection/exclusion at all), which
+ *    is now independent of whether *this* verdict was exact or bounded.
  * 2. Self-validation (§6) disagreeing with the static search — a
  *    `mismatch` (the real engine denied a witness the search claimed was
  *    a violation) or an `empirical-counterexample` (the real engine
@@ -57,7 +63,10 @@ export function invariantExitCode(
   }
   if (result.verdict === 'VIOLATED') return 1;
   if (result.verdict === 'UNKNOWN') return 2;
-  // HOLDS: exact (monotone, no bound) is 0; bounded (non-monotone) is 2.
+  // HOLDS: exact (bound undefined) is 0; bounded (bound set) is 2 —
+  // independent of fragment, since a structurally non-monotone schema
+  // can still get an exact proof via the intersection/exclusion
+  // short-circuits in checkInvariant (docs/DECISIONS.md).
   return result.bound !== undefined ? 2 : 0;
 }
 

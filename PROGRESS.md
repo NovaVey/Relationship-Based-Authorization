@@ -2267,3 +2267,17 @@ Two full rounds of independent adversarial review before any of it shipped, plus
 **Verification:** `tools/schema-verifier`'s own suite — 13 files, 124 tests (up from 115) — plus `npx eslint .`/`npx tsc --noEmit`/`npx prettier --check .` all clean. Full account, including the exact repro and both reviews' findings: `docs/DECISIONS.md` D-129.
 
 This closes the bug; item 3 (the type-mismatch upgrade) resumes next on top of a cycle guard that's actually sound.
+
+## Item 3 closed: `checkInvariant` can now decide some intersection/exclusion cases exactly, closing the disclosed `spicedb-googledocs-typecheck-bug` gap (D-130)
+
+**Owner:** the main agent, directly, on `main`.
+
+Two narrow, sound short-circuits added to `search.ts`'s `attempt()`: AND-infeasibility (an intersection with any structurally-impossible child is impossible as a whole) and exclusion reduction (`A - B` reduces exactly to `A` when `B` is structurally unreachable). `checkAndValidate` now always calls `checkInvariant` first, regardless of fragment, falling back to bounded search only when it genuinely can't decide on a structurally non-monotone schema. A new `proof: 'exact' | 'bounded'` field on `CheckResult`, decoupled from `fragment`, reports which.
+
+Directly re-verified against the real disclosed fixture: `spicedb-googledocs-typecheck-bug`'s `edit_always_unreachable_for_any_user` now reports an unconditional `HOLDS` (`fragment: non-monotone`, `proof: exact`), where it used to be `HOLDS up to k = 1`. `docs/FINDINGS.md` and D-124's tally updated to reflect the gap is closed (the _other_ previously-bounded entry, `spicedb-userdefined-roles`, is a genuinely different kind of gap and is unaffected).
+
+Grounded and adversarially reviewed via an 8-agent workflow before D-129 (that review is what surfaced D-129's cycle-guard bug in the first place) — implementation waited until that dependency was actually fixed, then re-verified directly against the real, shipped code. Fail-checked live: three isolated breaks (Rule A, Rule B, the routing change) each confirmed to flip exactly the tests they should, nothing else — proving the unit tests and the integration test catch genuinely different pieces of the change.
+
+**Verification:** `tools/schema-verifier`'s own suite — 14 files, 134 tests (up from 124) — plus `npx eslint .`/`npx tsc --noEmit`/`npx prettier --check .` all clean. Full account: `docs/DECISIONS.md` D-130.
+
+This closes the batch begun at D-127/D-128 (dynamic-invariants stub, token opacity, the cycle-guard fix, and this) plus the originally-planned item 3. Item 2 (the negative-constraint primitive) and the fourth full-repo audit remain, per the agreed build order.
