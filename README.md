@@ -383,9 +383,11 @@ authz serve                                         start the Fastify API server
 `authz serve` exposes the same five operations over HTTP
 (`POST /check`, `POST /expand`, `POST`/`DELETE /tuples`, `POST
 /schema/compile`, `POST /schema/publish`, plus `GET /health`) —
-`ADMIN_API_KEY`-gated writes, rate-limited, `/health` reporting database
-connectivity and every currently-published namespace's version. See
-`src/api/server.ts`'s own doc comments for the exact route shapes.
+`ADMIN_API_KEY`-gated except `/schema/compile` and `/health` (D-064 —
+`/check`/`/expand` are gated too, not just the writes), rate-limited,
+`/health` reporting database connectivity and every currently-published
+namespace's version. See `src/api/server.ts`'s own doc comments for the
+exact route shapes.
 
 Static mockups of what a real UI over this would look like —
 Namespaces, Tuple browser, Check playground, Soundness runs, Expand

@@ -299,16 +299,23 @@ describe('a tuple-to-userset target namespace absent from the compilation unit i
   });
 });
 
-describe('schema/malformed-example.authz — the fixture docs/RELATIONS.md and this file itself cite as "a worked example of a rejection" — is actually rejected, with a specific error', () => {
+describe("schema/malformed-example.authz — deliberately malformed for Phase 1's own exit criterion — is actually rejected, with a specific error", () => {
   // This fixture's own header comment (read from disk, never retyped here)
-  // and `docs/RELATIONS.md:46` both describe it as a worked example of the
-  // compiler rejecting a malformed schema — but nothing in the repo ever
-  // actually compiled it and checked. Reads the real file straight off
-  // disk (never a copy of its source retyped into this test, so a future
-  // edit to the fixture can't silently drift out of sync with what this
-  // test actually asserts) and pins both of its undeclared-relation errors
-  // by line, exactly as `errors.ts`'s own documented example ("line 4:
-  // `permission` `edit` references undeclared relation `admin`") expects.
+  // states its purpose directly: Phase 1's own exit criterion
+  // (`.claude/commands/build-authz-service.md` §9 Phase 1) that a
+  // malformed schema is rejected with an error naming the exact
+  // line/construct, never a generic "invalid schema" — but nothing in the
+  // repo ever actually compiled it and checked, until this test.
+  // (Previously this describe string also cited `docs/RELATIONS.md:46` for
+  // the same claim; that citation was correct when written but the line it
+  // pointed at was since rewritten — see `docs/DECISIONS.md`, the entry
+  // documenting this fix — so it's dropped here rather than left stale.)
+  // Reads the real file straight off disk (never a copy of its source
+  // retyped into this test, so a future edit to the fixture can't silently
+  // drift out of sync with what this test actually asserts) and pins both
+  // of its undeclared-relation errors by line, exactly as `errors.ts`'s
+  // own documented example ("line 4: `permission` `edit` references
+  // undeclared relation `admin`") expects.
   it('schema/malformed-example.authz is rejected with two located undeclared-relation errors, not a generic parse failure', () => {
     const source = readFileSync(MALFORMED_EXAMPLE_PATH, 'utf8');
     const result = compileSchema(source);

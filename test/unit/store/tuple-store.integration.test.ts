@@ -454,6 +454,128 @@ describe('a tuple write is validated against the latest published schema for its
   });
 });
 
+describe('a tuple-to-userset subject is also validated against the SUBJECT namespace — full-repo audit finding #2', () => {
+  // D-012's own "soft" cross-namespace check means a `document` namespace
+  // compiled and published entirely on its own — never in the same
+  // `compileSchema` call as `group` — can declare `group#admin_permission`
+  // or `group#totally_undeclared` as accepted subject types with nothing
+  // rejecting either at compile time. Every fixture below deliberately
+  // publishes `document` and `group` as two SEPARATE `publishSchema` calls,
+  // exactly reproducing that real, intended (see `schema/document.authz`'s
+  // own doc comment) multi-file authoring workflow — not a contrived setup.
+  function documentWithGroupEditorSchemaSource(ns: string): string {
+    return [
+      `namespace ${ns} {`,
+      '  relation editor: user | group#member | group#admin_permission | group#totally_undeclared',
+      '}',
+    ].join('\n');
+  }
+
+  function groupSchemaSource(ns: string): string {
+    return [
+      `namespace ${ns} {`,
+      '  relation member: user',
+      '  permission admin_permission = member',
+      '}',
+    ].join('\n');
+  }
+
+  async function publishNs(source: string): Promise<void> {
+    const result = await publishSchema(pool, source);
+    if (!result.ok) {
+      throw new Error(`fixture schema failed to publish: ${result.errors.join('; ')}`);
+    }
+  }
+
+  it('a-subjectRelation-naming-a-real-published-relation-on-the-subject-namespace-still-succeeds', async () => {
+    const docNs = uniqueName('doc');
+    const groupNs = uniqueName('group');
+    await publishNs(documentWithGroupEditorSchemaSource(docNs).replace(/group#/g, `${groupNs}#`));
+    await publishNs(groupSchemaSource(groupNs));
+
+    const result = await writeTuple(pool, {
+      objectNs: docNs,
+      objectId: uniqueName('obj'),
+      relation: 'editor',
+      subjectNs: groupNs,
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('a-subjectRelation-that-actually-names-a-PERMISSION-on-the-published-subject-namespace-is-rejected-not-silently-accepted', async () => {
+    // This is the exact gap the audit found: production's SQL-only
+    // membership walk has no notion of permissions and would silently
+    // dead-end on this tuple, false-denying access the reference resolver
+    // (which does walk a permission's rewrite tree) would correctly grant.
+    const docNs = uniqueName('doc');
+    const groupNs = uniqueName('group');
+    await publishNs(documentWithGroupEditorSchemaSource(docNs).replace(/group#/g, `${groupNs}#`));
+    await publishNs(groupSchemaSource(groupNs));
+
+    const result = await writeTuple(pool, {
+      objectNs: docNs,
+      objectId: uniqueName('obj'),
+      relation: 'editor',
+      subjectNs: groupNs,
+      subjectId: 'eng',
+      subjectRelation: 'admin_permission',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((e) => e.code === 'subject_relation_is_a_permission')).toBe(true);
+  });
+
+  it('a-subjectRelation-that-names-nothing-at-all-on-the-published-subject-namespace-is-rejected', async () => {
+    const docNs = uniqueName('doc');
+    const groupNs = uniqueName('group');
+    await publishNs(documentWithGroupEditorSchemaSource(docNs).replace(/group#/g, `${groupNs}#`));
+    await publishNs(groupSchemaSource(groupNs));
+
+    const result = await writeTuple(pool, {
+      objectNs: docNs,
+      objectId: uniqueName('obj'),
+      relation: 'editor',
+      subjectNs: groupNs,
+      subjectId: 'eng',
+      subjectRelation: 'totally_undeclared',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((e) => e.code === 'undeclared_subject_relation')).toBe(true);
+  });
+
+  it('a-subjectRelation-pointing-at-a-subject-namespace-with-no-published-schema-at-all-is-NOT-rejected-by-this-check — publish order must stay unconstrained', async () => {
+    // The subject namespace is deliberately never published in this test
+    // — `uniqueName` guarantees no prior test could have created a config
+    // for it either. This is the deliberately lenient half of the fix
+    // (see validateAgainstSchema's own doc comment): namespaces are
+    // legitimately published in varying order, and a `document` schema
+    // that references a not-yet-published `group` must keep working
+    // exactly as it always did, not gain a new failure mode.
+    const docNs = uniqueName('doc');
+    const neverPublishedGroupNs = uniqueName('never_published_group');
+    await publishNs(
+      documentWithGroupEditorSchemaSource(docNs).replace(/group#/g, `${neverPublishedGroupNs}#`),
+    );
+
+    const result = await writeTuple(pool, {
+      objectNs: docNs,
+      objectId: uniqueName('obj'),
+      relation: 'editor',
+      subjectNs: neverPublishedGroupNs,
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe('republishing a namespace with a new relation makes the write path (getLatestNamespaceConfig) pick it up immediately — full-repo audit finding #18', () => {
   // The sibling describe block above only ever publishes a namespace once
   // per test — none of it proves `getLatestNamespaceConfig` (the function
