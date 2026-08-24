@@ -8,7 +8,7 @@
  * both already follow.
  */
 import type { CompiledSchema } from '../../../../src/schema/dsl/types.js';
-import type { Invariant } from '../invariants/types.js';
+import type { Invariant, NotRelationEqualsConstraint } from '../invariants/types.js';
 import type { NodeId } from '../ir/types.js';
 import type { WitnessTuple } from '../reachability/types.js';
 
@@ -114,6 +114,19 @@ export function generateCandidateTuples(
   const pools = buildInstancePools(schema, reachableRelations, invariant, k);
   const seen = new Set<string>();
   const candidates: WitnessTuple[] = [];
+  // `notRelationEquals`'s bounded-search-side enforcement (docs/DECISIONS.md
+  // D-131): a candidate this enumeration would otherwise try is dropped
+  // when it's exactly the `(relation, subject, value)` triple an
+  // invariant's own `not <relation>(<var>) = <var>` constraint excludes.
+  // `c.subject`/`c.value` are invariant variable names, which only ever
+  // coincide with a candidate's `object`/`subject` label when that
+  // variable IS the goal subject or object (`buildInstancePools` never
+  // seeds any other declared variable's name into a pool) — for every
+  // other declared variable this filter is a harmless no-op, matching
+  // nothing, exactly like the exact search's own site-1-only scope.
+  const notRelationEquals: NotRelationEqualsConstraint[] = invariant.constraints.filter(
+    (c): c is NotRelationEqualsConstraint => c.kind === 'notRelationEquals',
+  );
 
   for (const relationNodeId of reachableRelations) {
     const { namespace, name } = splitNodeId(relationNodeId);
@@ -122,6 +135,19 @@ export function generateCandidateTuples(
     for (const objectId of pools.get(namespace) ?? []) {
       for (const st of relation.subjectTypes) {
         for (const subjectId of pools.get(st.namespace) ?? []) {
+          // Bare-principal only (`st.relation === undefined`) — a
+          // userset-subject candidate sharing the same object/relation/
+          // subject labels is a structurally different tuple
+          // (`NotRelationEqualsConstraint` has no userset-subject form
+          // to exclude) and must never be filtered here.
+          if (
+            st.relation === undefined &&
+            notRelationEquals.some(
+              (c) => c.relation === name && c.subject === objectId && c.value === subjectId,
+            )
+          ) {
+            continue;
+          }
           const tuple: WitnessTuple = {
             objectType: namespace,
             object: objectId,

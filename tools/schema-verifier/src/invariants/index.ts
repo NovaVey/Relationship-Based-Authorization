@@ -5,6 +5,7 @@ export type {
   Goal,
   Invariant,
   InvariantError,
+  NotRelationEqualsConstraint,
   ParseInvariantsResult,
   RelationEqualsConstraint,
   TypedVariable,

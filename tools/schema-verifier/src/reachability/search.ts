@@ -22,7 +22,7 @@
  */
 import type { CompiledSchema } from '../../../../src/schema/dsl/types.js';
 import type { GraphEdge, NodeId, SchemaGraph } from '../ir/types.js';
-import type { Invariant } from '../invariants/types.js';
+import type { Invariant, NotRelationEqualsConstraint } from '../invariants/types.js';
 import { UnionFind, type VarId } from './union-find.js';
 import type { CheckResult, WitnessTuple } from './types.js';
 
@@ -94,6 +94,17 @@ interface SearchContext {
   readonly namedVars: ReadonlySet<VarId>;
   /** Mutable, shared across the whole search — see `MAX_ATTEMPT_CALLS`'s own doc comment. */
   readonly budget: { remaining: number };
+  /**
+   * The invariant's own `not <relation>(<var>) = <var>` constraints,
+   * precomputed once (`docs/DECISIONS.md` D-131) rather than re-filtered
+   * out of `invariant.constraints` on every `attempt()` call. Enforced at
+   * exactly one dispatch site inside `attempt()` — the bare-principal
+   * direct edge — deliberately, not the sibling userset-subject branch or
+   * `tupleToUserset`'s own dispatch; see `NotRelationEqualsConstraint`'s
+   * own doc comment for why that scope is narrower than "this relation
+   * can never reach this value via any path."
+   */
+  readonly notRelationEquals: readonly NotRelationEqualsConstraint[];
 }
 
 function freshVar(ctx: SearchContext, type: string): VarId {
@@ -200,6 +211,26 @@ function attempt(
         const uf2 = uf.clone();
         if (!uf2.bindSlot(currentObjectVar, relationName, ctx.goalSubjectVar))
           return { kind: 'fail' };
+        // notRelationEquals exclusion (docs/DECISIONS.md D-131): reject
+        // this hop if it would bind exactly the triple an invariant's own
+        // `not <relation>(<var>) = <var>` constraint rules out. Checked
+        // against `uf2` — POST this hop's own `bindSlot` — not the
+        // pre-bind `uf`: `bindSlot`'s own `union()` side effect is what
+        // can turn an as-yet-unconstrained alias into the excluded value,
+        // so checking pre-bind could miss a collision `bindSlot` itself
+        // just created. Deliberately scoped to this bare-principal branch
+        // only — see `NotRelationEqualsConstraint`'s own doc comment for
+        // why the sibling userset-subject branch below, and
+        // `tupleToUserset`'s own dispatch, are not covered.
+        for (const c of ctx.notRelationEquals) {
+          if (
+            c.relation === relationName &&
+            uf2.same(c.subject, currentObjectVar) &&
+            uf2.slotEquals(c.subject, c.relation, c.value)
+          ) {
+            return { kind: 'fail' };
+          }
+        }
         const tuple: PathTuple = {
           objectVar: currentObjectVar,
           objectType: currentObjectType,
@@ -424,6 +455,27 @@ export function checkInvariant(
       }
     }
   }
+  const notRelationEquals: NotRelationEqualsConstraint[] = [];
+  for (const c of invariant.constraints) {
+    if (c.kind === 'notRelationEquals') {
+      notRelationEquals.push(c);
+      // Upfront contradiction check (docs/DECISIONS.md D-131): if a
+      // `relationEquals` constraint (already bound into `uf` above) has
+      // already pinned this exact `(relation, subject)` slot to the very
+      // value this `not ...` constraint excludes, the invariant asks for
+      // two things that can never both be true — self-contradictory,
+      // same treatment `markDistinct`'s own self-contradiction check
+      // above gets, and for the same reason: an honest `UNKNOWN`, not a
+      // silently-wrong verdict produced by a search that never even
+      // notices the conflict.
+      if (uf.slotEquals(c.subject, c.relation, c.value)) {
+        return {
+          verdict: 'UNKNOWN',
+          reason: `not ${c.relation}(${c.subject}) = ${c.value} conflicts with a relationEquals(...) constraint that already pins ${c.relation}(${c.subject}) to ${c.value}`,
+        };
+      }
+    }
+  }
 
   const goalObjectType = varTypes.get(invariant.goal.object);
   const goalSubjectType = varTypes.get(invariant.goal.subject);
@@ -443,6 +495,7 @@ export function checkInvariant(
     fresh: { n: 0 },
     namedVars,
     budget: { remaining: MAX_ATTEMPT_CALLS },
+    notRelationEquals,
   };
   const result = attempt(ctx, goalNodeId, invariant.goal.object, goalObjectType, new Set(), uf);
 

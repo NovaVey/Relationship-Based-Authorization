@@ -41,9 +41,10 @@ organization`. Each names a role a witness (a concrete object, once the
    resolved against a real compiled schema only when an invariant and a
    schema graph are walked together (build spec §5) — parsing an
    invariant on its own never requires a schema to exist yet.
-2. **Constraints** between those variables. Two kinds exist today,
-   deliberately the minimum needed to state the two worked properties
-   below:
+2. **Constraints** between those variables. Three kinds exist today:
+   the first two are the minimum needed to state the two worked
+   properties below; the third (`docs/DECISIONS.md` D-131) is a later,
+   deliberately narrow addition — see its own subsection further down.
    - `distinct(orgA, orgB)` — every listed variable must bind to a
      different object. This is the entire reason the invariant language
      is a constraint problem and not plain reachability: "cross-tenant"
@@ -55,6 +56,9 @@ organization`. Each names a role a witness (a concrete object, once the
      points to" without needing a first-class notion of what that
      relation means — `tenant` here is not a keyword, it's an ordinary
      relation name the real schema defines, resolved in §5, not here.
+   - `not tenant(s) = orgA` — the negation of the line above: no witness
+     may ever assume a tuple where applying `tenant` to `s` equals
+     `orgA`. Deliberately narrow — see "Negative constraints" below.
 3. A **goal** — `goal: view(s, o)` — the permission call the verifier
    searches for a witness to. The verifier's answer is three-valued:
    `HOLDS` (no such witness exists, within whatever fragment/bound the
@@ -71,6 +75,7 @@ invariant <name> {
   ...
   distinct(<var>, <var>, ...)
   <relation>(<var>) = <var>
+  not <relation>(<var>) = <var>
   ...
   goal: <permission>(<var>, <var>)
 }
@@ -79,8 +84,8 @@ invariant <name> {
 One statement per line; `//` starts a line or trailing comment; blank
 lines are ignored. Variables must all be declared before any constraint
 or the goal line. Exactly one `goal:` line per invariant, and it must
-come last. `invariant`, `distinct`, and `goal` are reserved words. A
-file may declare more than one `invariant { ... }` block.
+come last. `invariant`, `distinct`, `goal`, and `not` are reserved words.
+A file may declare more than one `invariant { ... }` block.
 
 Two identifier vocabularies, deliberately not one: an invariant's own
 name and every relation/permission/type name (anything meant to resolve
@@ -200,6 +205,48 @@ provable `HOLDS`, with only the two constraint kinds §4 ships today,
 needs the schema graph itself to offer no path at all from the goal
 subject's type to the goal permission — type-level unreachability, not a
 constraint argument.
+
+### Negative constraints (D-131) — a deliberately narrow third kind
+
+`not tenant(s) = orgA` — the negation of `relationEquals`: no witness may
+ever assume a tuple where applying `tenant` to `s` equals `orgA`. This is
+the one place `relationEquals`'s own "essentially powerless to prove
+[a leak is] impossible" limitation, above, has a real (if narrow)
+exception: ruling out one specific, already-known `(relation, subject,
+value)` triple can turn a `VIOLATED` into a proven `HOLDS`, when that
+triple was the search's only way in.
+
+The scope is deliberately narrow, matching `relationEquals`'s own shape
+exactly: `subject` and `value` must both already be declared invariant
+variables — there is no way to introduce a fresh one, and no
+existential form ("no tuple of this relation exists, for any object,
+anywhere"). `value` is always a bare principal, never a userset-subject
+(`orgA`, never `group:g#member`). This is "rule out this one fact I
+already know how to name," not "this relation can never be satisfied" —
+the latter would need a fundamentally different, schema-level primitive,
+not attempted here.
+
+Enforced at exactly two sites: `checkInvariant`'s own bare-principal
+direct-edge dispatch (the sibling userset-subject branch, and every
+`tupleToUserset` hop, are untouched — a negative constraint there is
+simply never consulted), and `boundedSearch`'s own candidate generation
+(dropping a matching bare-principal candidate before it's ever tried).
+`checkInvariant` also checks, upfront, whether a `relationEquals`
+constraint already pins the exact slot a `notRelationEquals` constraint
+excludes — an invariant asking for both at once is self-contradictory,
+reported as `UNKNOWN`, not silently searched anyway.
+
+**Real-world value, honestly stated:** `docs/FINDINGS.md`'s third-party
+survey disclosed nine `VIOLATED` entries sharing the "no negative
+constraints" shape. This primitive closes exactly **two** of them
+(`spicedb-entitlements`, `openfga-entitlements`) — both a single
+tupleToUserset chain with no alternate escape route. The other six each
+have a second, structurally different escape (a userset-subject or
+recursive path) this narrow primitive was never designed to reach, and
+stay `VIOLATED`. See `docs/DECISIONS.md` D-131 for the full account,
+including the empirical, entry-by-entry check that replaced an original,
+more optimistic "closes most of them" estimate with this narrower,
+verified one.
 
 ### Self-validation (§6) — no verdict is trusted on the search's word alone
 

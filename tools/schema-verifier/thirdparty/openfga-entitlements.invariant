@@ -13,6 +13,7 @@ invariant feature_access_requires_subscription_in_associated_org {
   subscriber(p) = o2
   associated_plan(f) = p
   distinct(o1, o2)
+  not member(o2) = u
 
   goal: can_access(u, f)
 }

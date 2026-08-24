@@ -39,7 +39,28 @@ export interface RelationEqualsConstraint {
   readonly value: string;
 }
 
-export type Constraint = DistinctConstraint | RelationEqualsConstraint;
+/**
+ * `not tenant(s) = orgA` — the negation of `RelationEqualsConstraint`: no
+ * witness may ever assume a tuple where applying `relation` to `subject`
+ * equals `value`. Deliberately narrow (build spec §4 extension, see
+ * `docs/DECISIONS.md` D-131): `subject` and `value` must both already be
+ * declared invariant variables — there is no way to introduce a fresh one
+ * here, and no userset-subject form (`value` is always a bare principal,
+ * matching `RelationEqualsConstraint`'s own scope exactly). This closes
+ * "assuming this specific, already-known fact is false, does the goal
+ * still hold" — not "this relation can never be satisfied via any object,
+ * anywhere," which would need a fundamentally different, schema-level
+ * primitive this entry deliberately does not attempt.
+ */
+export interface NotRelationEqualsConstraint {
+  readonly kind: 'notRelationEquals';
+  readonly relation: string;
+  readonly subject: string;
+  readonly value: string;
+}
+
+export type Constraint =
+  DistinctConstraint | RelationEqualsConstraint | NotRelationEqualsConstraint;
 
 /** `goal: view(s, o)` — the permission call the verifier searches for a witness to. */
 export interface Goal {

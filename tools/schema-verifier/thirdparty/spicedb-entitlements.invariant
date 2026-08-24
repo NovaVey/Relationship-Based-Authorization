@@ -13,6 +13,7 @@ invariant feature_access_requires_membership_in_entitled_org {
   org(e) = o2
   associated_entitlement(f) = e
   distinct(o1, o2)
+  not member(o2) = u
 
   goal: access(u, f)
 }
