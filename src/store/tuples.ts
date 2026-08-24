@@ -31,7 +31,9 @@ export interface TupleError {
     | 'no_published_schema'
     | 'undeclared_relation'
     | 'relation_is_a_permission'
-    | 'subject_type_not_allowed';
+    | 'subject_type_not_allowed'
+    | 'subject_relation_is_a_permission'
+    | 'undeclared_subject_relation';
   message: string;
 }
 
@@ -103,6 +105,28 @@ export function validateIdentifiers(tuple: TupleKey): TupleError[] {
  * `(namespace, relation?)` pair must match one of that relation's declared
  * `subjectTypes` exactly.
  *
+ * When `subjectRelation` is set (a tuple-to-userset write, e.g.
+ * `document:o#editor@group:eng#member`), also independently verifies
+ * `subjectRelation` names a real `relation` on the *subject* namespace's
+ * own latest published config — closing a real gap, found by a full-repo
+ * audit (`docs/DECISIONS.md`, the entry documenting this fix): the
+ * compiler's own `compileRelations` check is deliberately "soft" (D-012)
+ * — a subject type in a namespace compiled separately from its target is
+ * left entirely unchecked — so nothing before this fix ever verified
+ * `subjectRelation` wasn't actually a *permission* on that namespace.
+ * Production's SQL-only membership walk (`src/resolve/production/
+ * resolver.ts`) has no notion of permissions and silently dead-ends on
+ * one, producing a false-deny the reference resolver (which does walk a
+ * permission's rewrite tree) would not — a genuine cross-resolver
+ * divergence with no detection anywhere in the pipeline before this.
+ * Deliberately lenient when the *subject* namespace has no published
+ * config at all (rather than rejecting): namespaces are legitimately
+ * published in varying order (see `schema/document.authz`'s own doc
+ * comment on compiling standalone against an as-yet-unpublished `group`
+ * namespace), so "not yet published" must stay exactly as permissive as
+ * it always was — only a *published* config that resolves the name to a
+ * permission, or to nothing at all, is a new rejection.
+ *
  * Deliberately not applied to deletes (see `deleteTuple`) — a relation
  * removed from a newer schema version must still be revocable for tuples
  * written under an older one; see `docs/DECISIONS.md`.
@@ -150,6 +174,31 @@ async function validateAgainstSchema(pool: QueryExecutor, tuple: TupleKey): Prom
         message: `relation '${tuple.relation}' on namespace '${tuple.objectNs}' does not accept subject type '${attempted}'`,
       },
     ];
+  }
+
+  if (tuple.subjectRelation !== undefined) {
+    const subjectConfig = await getLatestNamespaceConfig(pool, tuple.subjectNs);
+    // No published config for the subject namespace yet is deliberately
+    // NOT an error here — see this function's own doc comment on why
+    // "not yet published" must stay exactly as permissive as it always
+    // was. Only a *published* subject config that resolves the name to
+    // something other than a relation is a new rejection.
+    if (subjectConfig && !subjectConfig.relations[tuple.subjectRelation]) {
+      if (subjectConfig.permissions[tuple.subjectRelation]) {
+        return [
+          {
+            code: 'subject_relation_is_a_permission',
+            message: `'${tuple.subjectRelation}' on namespace '${tuple.subjectNs}' is a permission, not a relation — a tuple-to-userset subject must name a relation the tuple store can actually walk`,
+          },
+        ];
+      }
+      return [
+        {
+          code: 'undeclared_subject_relation',
+          message: `namespace '${tuple.subjectNs}' declares no relation named '${tuple.subjectRelation}'`,
+        },
+      ];
+    }
   }
 
   return [];

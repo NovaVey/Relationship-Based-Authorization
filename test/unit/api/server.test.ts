@@ -239,6 +239,199 @@ describe('a well-formed but grammar-invalid identifier is rejected with 400 inva
 });
 
 // ---------------------------------------------------------------------------
+// 1c. Full-repo audit finding #4 (MEDIUM, fourth audit): an unrecognized
+//     key in an otherwise-valid body is rejected with 400 invalid_request,
+//     not silently dropped — `.strict()` on every body schema
+//     (`src/api/server.ts`). Before this fix, a caller who mistyped
+//     `subjectRelation` (e.g. `subjectRelaton`) got a normal 200 with the
+//     write silently downgraded to a plain-entity subject, and a caller
+//     who mistyped `atToken` got a normal 200 with the check silently run
+//     unpinned instead of at their intended consistency floor — both with
+//     zero signal anything was wrong. Each case below adds exactly one
+//     bogus key to an otherwise structurally valid body.
+// ---------------------------------------------------------------------------
+
+describe('an unrecognized key in an otherwise-valid request body is rejected with 400 invalid_request, not silently dropped (finding #4)', () => {
+  it('a-check-body-with-an-unrecognized-top-level-key-is-rejected-and-performCheck-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(checksModule, 'performCheck');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: { ...validCheckBody, atTokan: 'typo-of-atToken' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a-check-body-with-an-unrecognized-key-nested-inside-subject-is-rejected', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(checksModule, 'performCheck');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: { ...validCheckBody, subject: { ns: 'user', id: 'alice', extra: 'nope' } },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('an-expand-body-with-an-unrecognized-top-level-key-is-rejected-and-expand-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(expandModule, 'expand');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/expand',
+      payload: { ...validExpandBody, extra: 'nope' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a-tuple-write-body-with-a-misspelled-subjectRelation-is-rejected-not-silently-downgraded-to-a-plain-entity-write', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(tuplesModule, 'writeTuple');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: { ...validTupleBody, subjectRelaton: 'member' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a-tuple-delete-body-with-an-unrecognized-key-is-rejected-and-deleteTuple-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(tuplesModule, 'deleteTuple');
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/tuples',
+      payload: { ...validTupleBody, extra: 'nope' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a-schema-compile-body-with-an-unrecognized-key-is-rejected-and-compileSchema-is-never-called', async () => {
+    const spy = vi.spyOn(compilerModule, 'compileSchema');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/schema/compile',
+      payload: { ...validSchemaSourceBody, extra: 'nope' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a-schema-publish-body-with-an-unrecognized-key-is-rejected-and-publishSchema-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(publishModule, 'publishSchema');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/schema/publish',
+      payload: { ...validSchemaSourceBody, extra: 'nope' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1d. Full-repo audit finding #7 (MEDIUM, fourth audit): POST /check's
+//     malformed-atToken decode-failure branch (server.ts's own `try {
+//     atToken = decodeToken(opaqueAtToken) } catch`) had zero test
+//     coverage — the direct HTTP counterpart of the CLI's already
+//     well-tested `--at-token` guard.
+// ---------------------------------------------------------------------------
+
+describe('a malformed atToken on /check is rejected with 400 invalid_request, never silently run unpinned (finding #7)', () => {
+  it('a-garbage-atToken-string-is-rejected-with-400-invalid-request-and-performCheck-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(checksModule, 'performCheck');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: { ...validCheckBody, atToken: 'not-a-real-token' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1e. Full-repo audit finding #10 (LOW, fourth audit): no test anywhere
+//     sent `subjectRelation` through the HTTP tuples routes — the
+//     tuple-to-userset subject shape had zero coverage at this layer.
+// ---------------------------------------------------------------------------
+
+describe('subjectRelation is passed through /tuples verbatim to writeTuple/deleteTuple (finding #10)', () => {
+  it('a-tuple-write-with-subjectRelation-set-passes-it-through-to-writeTuple-unmodified', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi
+      .spyOn(tuplesModule, 'writeTuple')
+      .mockResolvedValue({ ok: true, token: 1, created: true } satisfies WriteTupleResult);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: {
+        objectNs: 'document',
+        objectId: 'readme',
+        relation: 'editor',
+        subjectNs: 'group',
+        subjectId: 'eng',
+        subjectRelation: 'member',
+      },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ subjectRelation: 'member' }),
+    );
+  });
+
+  it('a-tuple-delete-with-subjectRelation-set-passes-it-through-to-deleteTuple-unmodified', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi
+      .spyOn(tuplesModule, 'deleteTuple')
+      .mockResolvedValue({ ok: true, token: 1, deleted: true } satisfies DeleteTupleResult);
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/tuples',
+      payload: {
+        objectNs: 'document',
+        objectId: 'readme',
+        relation: 'editor',
+        subjectNs: 'group',
+        subjectId: 'eng',
+        subjectRelation: 'member',
+      },
+      headers: authHeaders(CORRECT_KEY),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ subjectRelation: 'member' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. The core exit-criterion claim: the auth gate short-circuits BEFORE the
 //    domain call, not just before the response.
 // ---------------------------------------------------------------------------

@@ -2322,4 +2322,26 @@ Fixed by extending the accumulated array in place (a loop, not a spread-into-pus
 
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npx vitest run` (47 files, 605 tests, up from 602) all clean; `tools/schema-verifier`'s own suite (151 tests) reconfirmed unaffected. Full account: `docs/DECISIONS.md` D-132.
 
-Medium and low findings continue next, per the agreed order.
+## Fourth full-repo audit closed in full: the remaining 13 findings (7 medium, 6 low), all in one PR per explicit direction (D-133)
+
+**Owner:** the main agent, directly, on `main`.
+
+Closed all 13 remaining findings from the fourth full-repo audit's 14-item report:
+
+- **#2 (medium):** closed the D-012 "revisit if" gap for real — `validateAgainstSchema` now verifies a tuple-to-userset subject's `subjectRelation` actually names a relation, not a permission, on the subject namespace's own published config, closing a genuine cross-resolver false-deny. Deliberately lenient when the subject namespace isn't published yet (publish order must stay unconstrained).
+- **#3 (medium):** `copy-migrations.mjs` now mirrors `dist/store/migrations/` (removes stale files first) instead of merely merging into it.
+- **#4 (medium):** every API request body schema now uses `.strict()` — a misspelled `atToken`/`subjectRelation` is a 400, not a silent, undetectable semantics change.
+- **#5 (medium):** `expand()`'s multi-parent tuple-to-userset branch (`children.length > 1`) now has real test coverage.
+- **#6/#9 (medium/low):** `serve.ts` gained its first test file (4 tests) and its `buildServer()` call is now guarded by the same try/catch every sibling CLI command already uses.
+- **#7/#10 (medium/low):** `POST /check`'s malformed-`atToken` rejection and `subjectRelation` passthrough on the HTTP tuples routes are now tested.
+- **#8 (medium):** a doc screen's `/health` example updated to the real, current response shape.
+- **#11/#12/#13 (low):** three doc-drift fixes — a stale test citation, a README table implying two routes are unauthenticated when they're not, and an `env.ts` comment understating what an unset `ADMIN_API_KEY` disables.
+- **#14 (low):** `NODE_ENV`'s informational-only status now disclosed explicitly, matching `CHECK_CACHE_TTL_MS`'s own D-028 precedent.
+
+Two findings (#2, #5) have a real-Postgres integration-test half this sandbox couldn't run locally — no working Docker daemon here (confirmed live: `Could not find a working container runtime strategy`, not assumed) — so those were verified instead by direct code/compiler inspection plus a DB-free counterpart test proving the same logic against the DST fake store. Reported honestly in `docs/DECISIONS.md` D-133 rather than claimed as locally-verified; CI's own `test-integration` job (Docker preinstalled) runs the real versions.
+
+Fail-checked live everywhere a real bug existed to revert: the D-012 gap (DST fake, 2/4 tests correctly flip), the migrations mirror fix (a real stale-file injection, both directions), `.strict()` (7 tests flip, each to a 503 instead of 400 — itself confirming the domain function really was being called without the fix), and the `serve.ts` `buildServer` guard (1 test flips, error propagates uncaught as predicted).
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npx vitest run` (48 files, 623 tests, up from 605) all clean; `tools/schema-verifier`'s own suite (151 tests) reconfirmed unaffected; `npm run build` clean. Full account: `docs/DECISIONS.md` D-133.
+
+This closes the fourth full-repo audit in full — all 14 findings addressed (1 critical via D-132, 13 medium/low via this entry).

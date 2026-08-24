@@ -372,3 +372,128 @@ describe('DST D0 — the storage seam is genuinely wireable: real writeTuple/del
     expect(state.writeLog).toHaveLength(0);
   });
 });
+
+describe("a tuple-to-userset subject is also validated against the SUBJECT namespace's own published config — full-repo audit finding #2, DB-free counterpart of the real-Postgres suite", () => {
+  // D-012's own "soft" cross-namespace check means `group` compiled and
+  // published entirely separately from `document` (two independent
+  // compileSchema calls below, never joined) can be referenced from
+  // `document`'s own subjectTypes with nothing rejecting it at compile
+  // time — exactly the multi-file authoring workflow this repo's own
+  // schema/document.authz already uses for real.
+  function compiledNamespace(source: string, name: string) {
+    const compiled = compileSchema(source);
+    if (!compiled.ok) {
+      throw new Error(`fixture schema failed to compile: ${JSON.stringify(compiled.errors)}`);
+    }
+    const namespace = compiled.schema.namespaces[name];
+    if (!namespace) throw new Error(`fixture schema did not produce a ${name} namespace`);
+    return namespace;
+  }
+
+  function documentWithGroupEditor() {
+    return compiledNamespace(
+      [
+        'namespace document {',
+        '  relation editor: user | group#member | group#admin_permission | group#totally_undeclared',
+        '}',
+      ].join('\n'),
+      'document',
+    );
+  }
+
+  function groupWithMemberAndPermission() {
+    return compiledNamespace(
+      [
+        'namespace group {',
+        '  relation member: user',
+        '  permission admin_permission = member',
+        '}',
+      ].join('\n'),
+      'group',
+    );
+  }
+
+  it('subjectRelation-naming-a-real-relation-on-the-published-subject-namespace-succeeds', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, documentWithGroupEditor());
+    seedNamespaceConfig(state, groupWithMemberAndPermission());
+    const source = createFakeConnectionSource(state);
+
+    const result = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'editor',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+
+    expect(result).toEqual({ ok: true, token: 1, created: true });
+  });
+
+  it('subjectRelation-naming-a-PERMISSION-on-the-published-subject-namespace-is-rejected', async () => {
+    // The exact gap the audit found: production's SQL-only membership walk
+    // has no notion of permissions and would silently dead-end on this
+    // tuple, false-denying access the reference resolver would grant.
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, documentWithGroupEditor());
+    seedNamespaceConfig(state, groupWithMemberAndPermission());
+    const source = createFakeConnectionSource(state);
+
+    const result = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'editor',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'admin_permission',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.code).toBe('subject_relation_is_a_permission');
+    expect(state.relationTuples).toHaveLength(0);
+  });
+
+  it('subjectRelation-naming-nothing-at-all-on-the-published-subject-namespace-is-rejected', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, documentWithGroupEditor());
+    seedNamespaceConfig(state, groupWithMemberAndPermission());
+    const source = createFakeConnectionSource(state);
+
+    const result = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'editor',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'totally_undeclared',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors[0]?.code).toBe('undeclared_subject_relation');
+  });
+
+  it('subjectRelation-pointing-at-a-subject-namespace-with-NO-seeded-config-at-all-is-not-rejected-by-this-check', async () => {
+    // `group` is deliberately never seeded here — publish order must stay
+    // unconstrained (see validateAgainstSchema's own doc comment): a
+    // `document` schema referencing a not-yet-published `group` must keep
+    // working exactly as it always did.
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, documentWithGroupEditor());
+    const source = createFakeConnectionSource(state);
+
+    const result = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'editor',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+
+    expect(result).toEqual({ ok: true, token: 1, created: true });
+  });
+});

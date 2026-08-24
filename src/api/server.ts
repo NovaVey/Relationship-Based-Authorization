@@ -117,36 +117,57 @@ function identifierField(): z.ZodString {
     .regex(IDENTIFIER_PATTERN, `must match ${IDENTIFIER_PATTERN.source}`);
 }
 
-const entityRefSchema = z.object({ ns: identifierField(), id: identifierField() });
+// `.strict()` on every body schema below (full-repo audit finding #4,
+// MEDIUM, fourth audit, docs/DECISIONS.md): Zod's default object behavior
+// silently *drops* an unrecognized key instead of rejecting it — for a
+// misspelled `atToken`/`subjectRelation` (both `.optional()`, so a typo'd
+// name simply reads as "absent," never a validation error) that silently
+// changes request semantics with zero signal to the caller: a mistyped
+// `subjectRelation` on a tuple write silently downgrades a userset-subject
+// write to a plain-entity one, and a mistyped `atToken` on a check
+// silently drops the caller's intended consistency floor and runs the
+// check unpinned instead. `.strict()` makes any unrecognized key a normal
+// `invalid_request` 400 (via `describeZodError`, unchanged — Zod's own
+// `unrecognized_keys` issue already carries a specific, readable message)
+// exactly like any other malformed-body case, rather than a silent,
+// undetectable behavior change.
+const entityRefSchema = z.object({ ns: identifierField(), id: identifierField() }).strict();
 
-const checkBodySchema = z.object({
-  subject: entityRefSchema,
-  relation: identifierField(),
-  object: entityRefSchema,
-  // An opaque, encoded consistency token (`src/store/tokens.ts`'s
-  // `encodeToken`/`decodeToken`) — the exact string a write/delete
-  // response's own `token` field returned, never a raw integer since this
-  // project stopped exposing one (see that file's own doc comment for
-  // why). Decoded, and rejected with a normal 400 on malformed input, by
-  // the `/check` route handler below rather than by this schema, so a bad
-  // token produces the same `invalidRequestError` shape every other
-  // malformed-body case here does, not a differently-worded Zod error.
-  atToken: z.string().optional(),
-});
+const checkBodySchema = z
+  .object({
+    subject: entityRefSchema,
+    relation: identifierField(),
+    object: entityRefSchema,
+    // An opaque, encoded consistency token (`src/store/tokens.ts`'s
+    // `encodeToken`/`decodeToken`) — the exact string a write/delete
+    // response's own `token` field returned, never a raw integer since
+    // this project stopped exposing one (see that file's own doc comment
+    // for why). Decoded, and rejected with a normal 400 on malformed
+    // input, by the `/check` route handler below rather than by this
+    // schema, so a bad token produces the same `invalidRequestError`
+    // shape every other malformed-body case here does, not a
+    // differently-worded Zod error.
+    atToken: z.string().optional(),
+  })
+  .strict();
 
-const expandBodySchema = z.object({
-  object: entityRefSchema,
-  relation: identifierField(),
-});
+const expandBodySchema = z
+  .object({
+    object: entityRefSchema,
+    relation: identifierField(),
+  })
+  .strict();
 
-const tupleBodySchema = z.object({
-  objectNs: z.string().min(1),
-  objectId: z.string().min(1),
-  relation: z.string().min(1),
-  subjectNs: z.string().min(1),
-  subjectId: z.string().min(1),
-  subjectRelation: z.string().min(1).optional(),
-});
+const tupleBodySchema = z
+  .object({
+    objectNs: z.string().min(1),
+    objectId: z.string().min(1),
+    relation: z.string().min(1),
+    subjectNs: z.string().min(1),
+    subjectId: z.string().min(1),
+    subjectRelation: z.string().min(1).optional(),
+  })
+  .strict();
 
 // `.max(65_536)` (64 KiB — D-067's own "defense in depth" recommendation,
 // docs/DECISIONS.md): a second, tighter ceiling than the server-wide
@@ -158,9 +179,11 @@ const tupleBodySchema = z.object({
 // specific, named Zod rejection (`invalidRequestError`, via
 // `describeZodError`) rather than relying solely on the blunter, whole-body
 // `bodyLimit` check upstream.
-const schemaSourceBodySchema = z.object({
-  source: z.string().min(1).max(65_536, 'schema source exceeds the 64 KiB limit'),
-});
+const schemaSourceBodySchema = z
+  .object({
+    source: z.string().min(1).max(65_536, 'schema source exceeds the 64 KiB limit'),
+  })
+  .strict();
 
 /** Flattens a Zod issue list into the short, specific `detail` string `invalidRequestError` expects — never just "validation failed". */
 function describeZodError(error: z.ZodError): string {

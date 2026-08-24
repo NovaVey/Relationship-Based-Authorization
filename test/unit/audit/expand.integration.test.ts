@@ -248,6 +248,82 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
     }
   });
 
+  it('a tupleToUserset node with TWO tuples on the same relation for one object returns TWO children, not one — full-repo audit finding #5', async () => {
+    // Every fixture above only ever writes one tuple on the relevant
+    // tuple-to-userset relation for the object under test, so
+    // `expandRewrite`'s own array-building path (`mapSequential` over
+    // every matching row, never short-circuiting after the first) has
+    // never actually been exercised against real Postgres — only its
+    // single-element case. This is the exact shape a document filed under
+    // two parent folders would produce, and it's this dimension's own
+    // stated exit criterion: "expand() returns ... including tuple-to-
+    // userset members," plural.
+    const folderNs = uniqueName('folder');
+    const docNs = uniqueName('document');
+    await publishOk(
+      [
+        `namespace ${folderNs} {`,
+        '  relation editor: user',
+        '',
+        '  permission view = editor',
+        '}',
+        '',
+        `namespace ${docNs} {`,
+        `  relation parent: ${folderNs}`,
+        '',
+        '  permission view = parent->view',
+        '}',
+      ].join('\n'),
+    );
+
+    await writeOk(tuple(folderNs, 'design', 'editor', 'user', 'alice'));
+    await writeOk(tuple(folderNs, 'specs', 'editor', 'user', 'bob'));
+    // TWO `parent` tuples on the SAME object — the case this test exists
+    // to cover.
+    await writeOk(tuple(docNs, 'readme', 'parent', folderNs, 'design'));
+    await writeOk(tuple(docNs, 'readme', 'parent', folderNs, 'specs'));
+
+    const tree = await expand(pool, ref(docNs, 'readme'), 'view');
+
+    expect(tree.kind).toBe('tupleToUserset');
+    if (tree.kind !== 'tupleToUserset') return;
+    expect(tree.relation).toBe('parent');
+    expect(tree.computedUserset).toBe('view');
+    expect(tree.children).toHaveLength(2);
+
+    // Each child's own `through` names a distinct folder, and each
+    // independently, correctly resolves to that folder's own — and only
+    // that folder's own — editor. A broken array-building path (e.g. one
+    // that only ever kept the first or last row) would either collapse
+    // this to one child or cross-wire which editor belongs to which
+    // folder; this fixture's own two disjoint editor sets makes either
+    // failure mode plainly visible.
+    const byFolder = new Map(tree.children.map((c) => [c.through.id, c]));
+    expect([...byFolder.keys()].sort()).toEqual(['design', 'specs']);
+
+    const designChild = byFolder.get('design');
+    expect(designChild?.through).toEqual({ ns: folderNs, id: 'design' });
+    expect(designChild?.expansion.kind).toBe('relation');
+    if (designChild?.expansion.kind === 'relation') {
+      expect(designChild.expansion.directSubjects.map((s) => s.id)).toEqual(['alice']);
+    }
+
+    const specsChild = byFolder.get('specs');
+    expect(specsChild?.through).toEqual({ ns: folderNs, id: 'specs' });
+    expect(specsChild?.expansion.kind).toBe('relation');
+    if (specsChild?.expansion.kind === 'relation') {
+      expect(specsChild.expansion.directSubjects.map((s) => s.id)).toEqual(['bob']);
+    }
+
+    // Order-independent: the full subject set is exactly both editors,
+    // each attributed to their own folder, not merged or duplicated.
+    expect(
+      collectDirectSubjects(tree)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(['alice', 'bob']);
+  });
+
   it('intersection and exclusion nodes mirror the real rewrite-rule structure, not just their resolved membership', async () => {
     const ns = uniqueName('doc');
     await publishOk(

@@ -86,6 +86,15 @@ export const EnvSchema = z.object({
   // of crashing before the CLI has even parsed its arguments.
   DATABASE_URL: optionalString(),
   PORT: optionalNumber(z.coerce.number().int().positive().default(3000)),
+  // Currently informational only — its only consumer anywhere in `src/`
+  // is `doctor.ts`'s own startup line, which just prints it back. Unlike
+  // `LOG_LEVEL` (which does drive real Fastify logger config), setting
+  // `NODE_ENV=production` today changes no logging format, error
+  // verbosity, or other runtime behavior — full-repo audit finding #14
+  // (LOW, fourth audit), disclosed explicitly here the same way
+  // `CHECK_CACHE_TTL_MS`'s own D-028 entry (`docs/DECISIONS.md`) discloses
+  // that variable's placeholder status, so a future reader doesn't assume
+  // this one already does something it doesn't.
   NODE_ENV: optionalEnum(z.enum(['development', 'test', 'production']).default('development')),
   LOG_LEVEL: optionalEnum(z.enum(['debug', 'info', 'warn', 'error']).default('info')),
 
@@ -105,8 +114,14 @@ export const EnvSchema = z.object({
   // with a trivially short admin key now fails fast with a clear message
   // rather than silently accepting one an attacker could plausibly guess or
   // brute-force. Still optional — an unset `ADMIN_API_KEY` is a deliberate,
-  // documented "writes are disabled" state (D-008, `src/api/auth.ts`), not
-  // an error.
+  // documented state (D-008, `src/api/auth.ts`), not an error: it disables
+  // not just the write routes (`POST`/`DELETE /tuples`, `POST
+  // /schema/publish`) but, since D-064, the read routes `/check` and
+  // `/expand` too (gating those the same way is what closed unauthenticated
+  // relationship-graph enumeration — full-repo audit finding, fourth
+  // audit, confirmed this comment itself understated that scope until
+  // then; `.env.example`'s own comment for this same variable already
+  // stated it correctly).
   ADMIN_API_KEY: optionalString(
     32,
     'ADMIN_API_KEY must be at least 32 characters — a short key is easy to guess or brute-force',

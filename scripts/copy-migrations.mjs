@@ -18,8 +18,20 @@
  * requires and on a Linux CI runner, chained into `npm run build` via `&&`
  * (supported by both POSIX shells and Windows `cmd.exe`, unlike an
  * OS-specific copy command).
+ *
+ * `dest` is removed before every copy — a full-repo audit finding
+ * (`docs/DECISIONS.md`, the entry documenting this fix): `cpSync` alone is
+ * a *merge*, not a mirror, and `npm run build` never cleans `dist/` first
+ * (it's gitignored, so it persists across incremental local builds). A
+ * migration deleted or renamed in `src/` would otherwise silently survive
+ * in a stale `dist/`, and `discoverMigrations` (`src/store/migrate.ts`)
+ * applies every `*.sql` file it finds there with no cross-check against
+ * `src/` — the built CLI could re-apply a migration nobody intends to run
+ * anymore. CI is unaffected either way (every job starts from a fresh
+ * checkout, so `dest` never pre-exists before this runs), but local
+ * incremental builds are exactly where this bites.
  */
-import { cpSync, existsSync } from 'node:fs';
+import { cpSync, existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -30,5 +42,6 @@ const dest = join(here, '..', 'dist', 'store', 'migrations');
 if (!existsSync(src)) {
   throw new Error(`copy-migrations: source directory not found: ${src}`);
 }
+rmSync(dest, { recursive: true, force: true });
 cpSync(src, dest, { recursive: true });
 console.log(`copied migrations: ${src} -> ${dest}`);

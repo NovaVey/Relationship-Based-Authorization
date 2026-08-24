@@ -23,7 +23,28 @@ export async function serve(): Promise<void> {
   }
 
   const pool = getPool();
-  const app = await buildServer(pool);
+  let app;
+  try {
+    app = await buildServer(pool);
+  } catch (err) {
+    // Mirrors this function's own `app.listen` catch below (full-repo
+    // audit finding #9, LOW, fourth audit) — every sibling CLI command
+    // (`doctor.ts`, `check.ts`, `tuple.ts`, `schema.ts`, `expand.ts`,
+    // `soundness.ts`) wraps its own DB/infra calls the same way, "never a
+    // bare stack trace" per `doctor.ts`'s own doc comment. Without this,
+    // a future rejection inside `buildServer` (e.g. a Fastify
+    // plugin-registration regression) would propagate uncaught into
+    // `index.ts`'s top-level handler — a raw stack trace and Node's
+    // default exit code 1, not this project's documented exit code 3 —
+    // and leave `pool` open, since `closePool()` is otherwise only
+    // reached via this catch, the `app.listen` catch below, or the
+    // SIGINT/SIGTERM path, none of which run if `buildServer` itself
+    // never returns an `app` to attach them to.
+    console.error(`Postgres/server: ${(err as Error).message}`);
+    process.exitCode = 3;
+    await closePool();
+    return;
+  }
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

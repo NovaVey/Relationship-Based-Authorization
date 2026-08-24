@@ -172,22 +172,22 @@ export function invalidRequestError(detail: string): ApiErrorResponse {
 /**
  * A rejected `tuple write` or `tuple delete` — `src/store/tuples.ts`'s
  * `WriteTupleResult`/`DeleteTupleResult` `{ ok: false; errors: TupleError[] }`
- * branch. Always 400, regardless of which of the five `TupleError['code']`
- * values fired — including `no_published_schema`, which reads like "the
- * namespace doesn't exist" and could plausibly be argued as 404. It stays
- * 400 here deliberately: this API has no `/namespaces/:ns` resource a
- * caller `GET`s (schema config isn't one of the five operations §9 Phase 8
- * names), so there is no *fetchable resource* whose absence 404
- * conventionally signals — `no_published_schema` is exactly as much "this
- * request, as constructed, can't be fulfilled right now" as
- * `undeclared_relation` or `invalid_identifier` are, and treating one
- * `TupleError` code as a different HTTP status class than its four siblings
- * would force every client to branch on status *and* code instead of code
- * alone. Every individual `TupleError`'s own `code` (and its already-
- * actionable `message` — see `src/store/tuples.ts`'s own
- * `no_published_schema` message, "... run `authz schema publish` before
- * writing tuples against it") is preserved verbatim in `details.errors`, so
- * nothing about the specific failure is lost by staying at one status.
+ * branch. Always 400, regardless of which `TupleError['code']` value fired
+ * — including `no_published_schema`, which reads like "the namespace
+ * doesn't exist" and could plausibly be argued as 404. It stays 400 here
+ * deliberately: this API has no `/namespaces/:ns` resource a caller `GET`s
+ * (schema config isn't one of the five operations §9 Phase 8 names), so
+ * there is no *fetchable resource* whose absence 404 conventionally
+ * signals — `no_published_schema` is exactly as much "this request, as
+ * constructed, can't be fulfilled right now" as `undeclared_relation` or
+ * `invalid_identifier` are, and treating one `TupleError` code as a
+ * different HTTP status class than its siblings would force every client
+ * to branch on status *and* code instead of code alone. Every individual
+ * `TupleError`'s own `code` (and its already-actionable `message` — see
+ * `src/store/tuples.ts`'s own `no_published_schema` message, "... run
+ * `authz schema publish` before writing tuples against it") is preserved
+ * verbatim in `details.errors`, so nothing about the specific failure is
+ * lost by staying at one status.
  */
 export function tupleValidationError(
   operation: 'write' | 'delete',
