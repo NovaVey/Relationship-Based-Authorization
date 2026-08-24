@@ -11,6 +11,12 @@
  * the one piece of this that's actually security-sensitive — is a small,
  * independently readable, independently testable unit.
  *
+ * `checkReadAuth` below (post-audit improvement, D-064's own "Revisit if")
+ * is this file's second export — the scoped, read-only credential tier that
+ * "Revisit if" clause names. `checkAdminAuth` itself needed no change for
+ * it: the two functions are independent, and every write route keeps using
+ * `checkAdminAuth` exclusively.
+ *
  * Scheme: `Authorization: Bearer <key>`, compared against `env.ADMIN_API_KEY`
  * with `node:crypto`'s `timingSafeEqual` rather than `===` — a key
  * comparison is exactly the kind of secret-equality check where a
@@ -75,4 +81,59 @@ export function checkAdminAuth(authorizationHeader: string | undefined): AdminAu
     return { authorized: false, reason: 'missing_or_invalid_key' };
   }
   return { authorized: true };
+}
+
+export type ReadAuthResult =
+  | { authorized: true }
+  | { authorized: false; reason: 'no_read_credential_configured' | 'missing_or_invalid_key' };
+
+/**
+ * The scoped, read-only credential tier `docs/DECISIONS.md` D-064's own
+ * "Revisit if" names: "A deployment genuinely needs a caller class that can
+ * check/expand without holding the full admin key... that's a real reason to
+ * add a second, narrower credential tier." Gates `/check`, `/expand`,
+ * `/list-objects`, and `/list-users` — every route that only ever *answers a
+ * question about* the tuple graph, never one that can change it. The three
+ * write routes (`/tuples` POST/DELETE, `/schema/publish`) stay
+ * `checkAdminAuth`-only; nothing about this function widens what a
+ * `READONLY_API_KEY` holder can do to write access.
+ *
+ * A caller is authorized if the supplied bearer token matches *either*
+ * `env.READONLY_API_KEY` *or* `env.ADMIN_API_KEY` — the full admin key must
+ * keep working on the read routes exactly as it did before this credential
+ * tier existed (D-064's own original behavior), never regress a deployment
+ * that has only ever configured `ADMIN_API_KEY` into having to mint a second
+ * key it never needed. Checks the (cheaper to reason about) dedicated
+ * `READONLY_API_KEY` first, falling through to `ADMIN_API_KEY` only if that
+ * one either isn't configured or didn't match — the order has no
+ * authorization-relevant effect (both branches, when reached, run the same
+ * `safeEqual` constant-time-content comparison this file's own top-of-file
+ * doc comment already establishes the reasoning for), it only affects which
+ * of the two configured secrets a non-matching key's comparison spends time
+ * against, which leaks nothing beyond what `checkAdminAuth` alone already
+ * discloses (length equality against whichever key it's compared to).
+ *
+ * `no_read_credential_configured` (distinct from `checkAdminAuth`'s
+ * `admin_api_key_not_configured`) fires only when *neither* key is set —
+ * matching `checkAdminAuth`'s own "no configured secret must never fail
+ * open" rule, applied here to two possible secrets instead of one: a
+ * deployment with truly nothing configured rejects every read exactly as it
+ * always has, never silently allowing unauthenticated access because a
+ * second, unrelated key variable happens to be the one someone checks for.
+ */
+export function checkReadAuth(authorizationHeader: string | undefined): ReadAuthResult {
+  if (!env.READONLY_API_KEY && !env.ADMIN_API_KEY) {
+    return { authorized: false, reason: 'no_read_credential_configured' };
+  }
+  const supplied = extractBearerToken(authorizationHeader);
+  if (supplied === undefined) {
+    return { authorized: false, reason: 'missing_or_invalid_key' };
+  }
+  if (env.READONLY_API_KEY && safeEqual(supplied, env.READONLY_API_KEY)) {
+    return { authorized: true };
+  }
+  if (env.ADMIN_API_KEY && safeEqual(supplied, env.ADMIN_API_KEY)) {
+    return { authorized: true };
+  }
+  return { authorized: false, reason: 'missing_or_invalid_key' };
 }

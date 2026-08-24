@@ -1,9 +1,13 @@
 /**
  * Pure, DB-free response shaping for the five operations §9 Phase 8 exposes
  * over HTTP: `check`, `expand`, `tuple write`/`delete`, `schema
- * compile`/`publish`, and `health`. Every function here takes an
- * already-computed domain result — the exact same result type its CLI
- * sibling in `src/cli/commands/*.ts` already prints — and returns
+ * compile`/`publish`, and `health` — plus two post-audit-improvement
+ * additions, `list-objects`/`list-users` (§2b below; `src/audit/list.ts`),
+ * the bulk reverse-lookup counterparts to `check`/`expand` — API-only, with
+ * no CLI command of their own (unlike every operation named in the previous
+ * sentence, each of which has a `src/cli/commands/*.ts` sibling this file's
+ * response shapes deliberately mirror). Every function here takes an
+ * already-computed domain result and returns
  * `{ status, body }` ready for a Fastify route handler to send verbatim
  * (`reply.code(result.status).send(result.body)`). Nothing in this file
  * touches `pg`, `fastify`, or `process.env`; no route registration, no
@@ -67,6 +71,7 @@
 import type { PerformCheckResult } from '../audit/checks.js';
 import type { ResolutionStep } from '../resolve/production/resolver.js';
 import type { ExpandNode } from '../audit/expand.js';
+import type { ListObjectsResult, ListUsersResult } from '../audit/list.js';
 import type { WriteTupleResult, DeleteTupleResult } from '../store/tuples.js';
 import { encodeToken } from '../store/tokens.js';
 import type { SchemaCompileResult } from '../schema/dsl/errors.js';
@@ -204,6 +209,80 @@ export function expandResponse(
   tree: ExpandNode,
 ): ExpandApiResponse {
   return { status: 200, body: { object, relation, tree } };
+}
+
+// ---------------------------------------------------------------------------
+// 2b. list-objects / list-users (post-audit improvement — bulk reverse
+// lookups; see `src/audit/list.ts`'s own top-of-file doc comment for why
+// neither of these is logged to the `checks` audit table, unlike `check`).
+// ---------------------------------------------------------------------------
+
+export interface ListObjectsResponseBody {
+  subject: ApiEntityRef;
+  relation: string;
+  objectNs: string;
+  /** Every object `listObjects` confirmed via a real, live check — never a cached or approximated answer. */
+  objects: ApiEntityRef[];
+  /** See `ListObjectsResult.truncated`'s own doc comment (`src/audit/list.ts`) — `true` means this is a possibly-incomplete answer, not "the real answer happens to be small." */
+  truncated: boolean;
+  atToken?: string;
+}
+
+export interface ListObjectsApiResponse {
+  status: 200;
+  body: ListObjectsResponseBody;
+}
+
+/**
+ * Same "never a 404" reasoning as `checkResponse`/`expandResponse` above —
+ * `listObjects` never throws for an ordinary "subject has access to nothing
+ * in this namespace" case (an empty `objects` array is a complete, honest
+ * answer, not an error), and an undeclared/unpublished `objectNs` simply
+ * yields zero candidate objects (`listObjects`'s own candidate scan finds no
+ * `relation_tuples` rows for a namespace nothing was ever written to), which
+ * is likewise a normal, empty, `200` answer — never a `404` for a namespace
+ * name this API has no resource model to say "not found" about (this file's
+ * own top-of-file doc comment).
+ */
+export function listObjectsResponse(
+  subject: ApiEntityRef,
+  relation: string,
+  objectNs: string,
+  result: ListObjectsResult,
+  atToken?: number,
+): ListObjectsApiResponse {
+  return {
+    status: 200,
+    body: {
+      subject,
+      relation,
+      objectNs,
+      objects: result.objects,
+      truncated: result.truncated,
+      ...(atToken !== undefined ? { atToken: encodeToken(atToken) } : {}),
+    },
+  };
+}
+
+export interface ListUsersResponseBody {
+  object: ApiEntityRef;
+  relation: string;
+  /** Every concrete subject `listUsers` resolved `object`'s real rewrite-rule formula down to — see `src/audit/list.ts`'s `evaluateExpandNode` for why this is not a naive tree-flatten. */
+  subjects: ApiEntityRef[];
+}
+
+export interface ListUsersApiResponse {
+  status: 200;
+  body: ListUsersResponseBody;
+}
+
+/** Same reasoning as `listObjectsResponse` above, applied to the reverse direction — no `atToken` field on this response at all (not merely omitted when absent): `listUsers` has no such option to begin with (`src/audit/list.ts`'s own top-of-file doc comment explains why), so there is nothing here to encode. */
+export function listUsersResponse(
+  object: ApiEntityRef,
+  relation: string,
+  result: ListUsersResult,
+): ListUsersApiResponse {
+  return { status: 200, body: { object, relation, subjects: result.subjects } };
 }
 
 // ---------------------------------------------------------------------------

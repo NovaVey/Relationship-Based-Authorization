@@ -322,11 +322,18 @@ permission-chain depth, measured against real Postgres, 50 runs per depth:
 | 10    | 17.4ms | 21.5ms |
 
 Cost grows with depth — expected, since each hop is a real recursive step,
-not memoized (§6.1: no cached, precomputed permission anywhere). No cache
-is enabled by default (`CHECK_CACHE_TTL_MS=0` — see `docs/CONSISTENCY.md`'s
-own section on why, and what it would take to turn one on safely). Numbers
-are this repo's own, not a vendor claim — reproduce them yourself against
-your own database and hardware with `npm run benchmark`
+not memoized (§6.1: no cached, precomputed permission anywhere) — these
+numbers reflect the uncached path, which is still what every correctness
+claim in this project is proven against. An opt-in check-result cache now
+exists (`src/resolve/production/cache.ts`, D-028/D-135 in
+[`docs/DECISIONS.md`](docs/DECISIONS.md)) — still off by default
+(`CHECK_CACHE_TTL_MS=0`) — with write-triggered invalidation designed,
+adversarially reviewed, and proven correct (including a real
+concurrent-request race the first design draft missed and a fully
+deterministic regression test proving it's closed) before it shipped; see
+`docs/CONSISTENCY.md`'s own section on the one non-negotiable rule it has to
+hold. Numbers are this repo's own, not a vendor claim — reproduce them
+yourself against your own database and hardware with `npm run benchmark`
 (`scripts/benchmark-check-depth.ts`), the same script that produced this
 table.
 
@@ -380,14 +387,21 @@ authz soundness run [--queries N] [--seed S] [--format text|markdown|json] [--dr
 authz serve                                         start the Fastify API server
 ```
 
-`authz serve` exposes the same five operations over HTTP
-(`POST /check`, `POST /expand`, `POST`/`DELETE /tuples`, `POST
-/schema/compile`, `POST /schema/publish`, plus `GET /health`) —
-`ADMIN_API_KEY`-gated except `/schema/compile` and `/health` (D-064 —
-`/check`/`/expand` are gated too, not just the writes), rate-limited,
-`/health` reporting database connectivity and every currently-published
-namespace's version. See `src/api/server.ts`'s own doc comments for the
-exact route shapes.
+`authz serve` exposes the same five operations over HTTP (`POST /check`,
+`POST /expand`, `POST`/`DELETE /tuples`, `POST /schema/compile`, `POST
+/schema/publish`, plus `GET /health`), plus two bulk reverse-lookup
+operations with no CLI command of their own (`POST /list-objects` — every
+object a subject has a permission on; `POST /list-users` — every subject
+with a permission on an object; D-136) — `ADMIN_API_KEY`-gated except
+`/schema/compile` and `/health` (D-064 — `/check`/`/expand`/`/list-objects`/
+`/list-users` are gated too, not just the writes; a second, narrower
+`READONLY_API_KEY` credential can authorize those four read routes without
+also granting write access, D-138), rate-limited, `/health` reporting
+database connectivity and every currently-published namespace's version.
+Every rate/flood-guard budget can be backed by Redis instead of one
+process's own memory via an optional `REDIS_URL` (unset by default — a
+single-instance deployment needs nothing new; D-137). See
+`src/api/server.ts`'s own doc comments for the exact route shapes.
 
 Static mockups of what a real UI over this would look like —
 Namespaces, Tuple browser, Check playground, Soundness runs, Expand
@@ -406,7 +420,7 @@ src/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
     production/  the real, SQL-backed check engine
   soundness/ the differential-fuzz generator, classifier, runner
-  audit/     expand(), and the checks audit trail every real check is logged to
+  audit/     expand(), listObjects()/listUsers(), and the checks audit trail every real check is logged to
   report/    markdown/JSON soundness reporters, exit codes, PR-comment logic
   api/       the Fastify server
   cli/       the authz CLI

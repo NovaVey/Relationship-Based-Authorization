@@ -143,7 +143,21 @@ invalidated by the specific writes it depends on, immediately, never left
 to expire on a timer alone. A permission revoked but still served from a
 stale cache entry for however many milliseconds `CHECK_CACHE_TTL_MS` allows
 is exactly the class of bug `test/isolation/` exists to catch — see its
-own `README.md` for that lineage. Until write-triggered invalidation is
-implemented and proven correct under the same fuzzing discipline as
-everything else here, the cache stays off by default, and turning it on
-without that proof is not a supported configuration.
+own `README.md` for that lineage.
+
+**This is now implemented** (`src/resolve/production/cache.ts`,
+`docs/DECISIONS.md` D-135) — still off by default (`CHECK_CACHE_TTL_MS=0`),
+still an opt-in optimization a deployment turns on deliberately. Every
+successful write/delete/schema-publish reachable through the same server
+process invalidates the whole cache immediately, and a monotonic epoch
+fence closes a real race an adversarial review found before this shipped:
+a check already in flight when a write lands and clears the cache could
+otherwise write its now-stale answer back in _after_ that clear — the fence
+guarantees it doesn't. One gap is disclosed, not closed: a single
+in-process cache structurally cannot observe a write issued through a
+_different_ process (the CLI, another replica behind the same reverse
+proxy) — that staleness is bounded only by `CHECK_CACHE_TTL_MS` itself,
+never by immediate invalidation, for exactly that class of write. A pinned
+(`atToken`) result is unaffected by any of this: it's valid for as long as
+it's cached, by construction — see `cache.ts`'s own top-of-file doc comment
+for the full argument.
