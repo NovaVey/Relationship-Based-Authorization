@@ -160,11 +160,27 @@ unify these" fact the union-find carries throughout.
 Reaching an intersection or exclusion edge yields `UNKNOWN` immediately
 from this function — §7, below, is where those are actually handled;
 `checkInvariant` itself never guesses. Cycles are handled with a
-per-search-path visited-node set, exactly as
-§3 anticipated: a revisited node is a dead end for that branch, not a
-hang and not an automatic pass, matching the monotone fragment's own
-small-model property that a minimal witness never needs to unroll a
-cycle.
+per-search-path visited set, exactly as §3 anticipated — but keyed on
+**which object is being asked about, not the node alone**: a node
+revisited with the invariant's own named variable it was already tried
+with (or a fresh, unconstrained variable already tried as a fresh
+instance of that node) is a genuine dead end; a node reached again with
+a _different_ named variable, or a fresh variable for the first time,
+is not, and gets its own visit. The earlier, simpler "any revisited node
+is a dead end, full stop" version of this guard was a real, shipped bug
+— see `docs/DECISIONS.md` (the entry documenting this fix) for a
+confirmed false `HOLDS` it produced: a `relationEquals` constraint can
+pin one instance of a recursive relation away from the goal subject
+while a later, freshly introduced instance of the exact same node stays
+completely unconstrained, so "cycles can always be unrolled zero times"
+is not the unconditional theorem it was once stated to be. A hard,
+disclosed cap on total search steps (`MAX_ATTEMPT_CALLS`) exists
+alongside this fix for exactly the reason the old, stronger guard no
+longer holds: an adversarial invariant with many named variables can now
+make the search explore combinatorially more than before, so total work
+is bounded by an explicit budget rather than trusted to stay small on
+its own — past that budget, the search reports `UNKNOWN`, honestly,
+never a guess.
 
 **The load-bearing lesson from building this** — see `docs/DECISIONS.md`
 D-116 for the full account — is that `relationEquals` constraints are
