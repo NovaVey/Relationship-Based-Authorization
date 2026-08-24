@@ -45,7 +45,15 @@ function formatValidationLine(validation: ValidationOutcome): string {
 export function formatInvariantHuman(v: InvariantVerification): string[] {
   const lines: string[] = [];
   const boundSuffix = v.result.bound !== undefined ? ` up to k = ${v.result.bound}` : '';
-  lines.push(`${v.name}: ${v.result.verdict}${boundSuffix} (fragment: ${v.result.fragment})`);
+  // `proof` is shown explicitly rather than left implicit in `bound`'s
+  // presence/absence — since the intersection/exclusion short-circuits
+  // (docs/DECISIONS.md), a bare, unbounded verdict on a structurally
+  // non-monotone fragment is now a real, distinct case (`proof: exact`),
+  // not the formatting bug it would have looked like before.
+  const proofSuffix = v.result.proof !== undefined ? `, proof: ${v.result.proof}` : '';
+  lines.push(
+    `${v.name}: ${v.result.verdict}${boundSuffix} (fragment: ${v.result.fragment}${proofSuffix})`,
+  );
   if (v.result.reason !== undefined) {
     lines.push(`  reason: ${v.result.reason}`);
   }
@@ -104,6 +112,7 @@ export interface JsonReport {
     readonly name: string;
     readonly verdict: string;
     readonly fragment: string | undefined;
+    readonly proof: string | undefined;
     readonly bound: number | undefined;
     readonly reason: string | undefined;
     readonly witness: readonly string[] | undefined;
@@ -124,6 +133,7 @@ export function toJsonReport(
       name: v.name,
       verdict: v.result.verdict,
       fragment: v.result.fragment,
+      proof: v.result.proof,
       bound: v.result.bound,
       reason: v.result.reason,
       witness: v.result.witness?.map(formatWitnessTuple),

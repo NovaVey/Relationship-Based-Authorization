@@ -110,11 +110,16 @@ export async function boundedSearch(
     // (rule 0.5: these schemas are tiny).
     const allowed = await evaluateSubset(schema, invariant, given, subset);
     if (allowed) {
-      return { verdict: 'VIOLATED', witness: [...given, ...subset], fragment: 'non-monotone' };
+      return {
+        verdict: 'VIOLATED',
+        witness: [...given, ...subset],
+        fragment: 'non-monotone',
+        proof: 'bounded',
+      };
     }
   }
 
-  return { verdict: 'HOLDS', fragment: 'non-monotone', bound: k };
+  return { verdict: 'HOLDS', fragment: 'non-monotone', proof: 'bounded', bound: k };
 }
 
 export { generateCandidateTuples, generateGivenTuples } from './candidates.js';

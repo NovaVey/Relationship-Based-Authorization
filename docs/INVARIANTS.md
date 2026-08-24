@@ -157,9 +157,18 @@ satisfiability — union-find plus a type check, never a solver. A
 `distinct(...)` group is enforced the same way, as a standing "never
 unify these" fact the union-find carries throughout.
 
-Reaching an intersection or exclusion edge yields `UNKNOWN` immediately
-from this function — §7, below, is where those are actually handled;
-`checkInvariant` itself never guesses. Cycles are handled with a
+Reaching an intersection or exclusion edge no longer _unconditionally_
+yields `UNKNOWN` from this function — two narrow, sound short-circuits
+(`docs/DECISIONS.md`, the entry adding them) can decide some cases
+outright: an intersection where any one child is structurally
+impossible (a type mismatch, most commonly) is impossible as a whole,
+since AND requires every conjunct; an exclusion `A - B` where the
+subtracted branch `B` is structurally impossible reduces exactly to
+`A`'s own result, since subtracting nothing changes nothing. Genuinely
+undecidable cases (an intersection where no child is structurally
+impossible; an exclusion whose subtract branch isn't) still return
+`UNKNOWN` — never a guess — and §7, below, is where those get a real,
+bounded answer. Cycles are handled with a
 per-search-path visited set, exactly as §3 anticipated — but keyed on
 **which object is being asked about, not the node alone**: a node
 revisited with the invariant's own named variable it was already tried
@@ -221,21 +230,47 @@ D-117.
 
 Intersection and exclusion don't have a small-model property the way
 union/computedUserset/tupleToUserset do — `checkInvariant` (§5) can't
-search them exactly, and never pretends to; it returns `UNKNOWN` the
-instant it meets one. §7 gives that case a real answer instead of leaving
-it there, for schemas where a caller is willing to accept "checked up to
-a bound" rather than an exact result.
+search the _general_ case exactly, and never pretends to. Its own two
+short-circuits (§5, above) decide a narrow slice of cases outright;
+everything else still reaches `UNKNOWN`. §7 gives that residual case a
+real answer instead of leaving it there, for schemas where a caller is
+willing to accept "checked up to a bound" rather than an exact result.
 
 `tools/schema-verifier/src/reachability/scanReachability(graph,
 goalNodeId)` walks _every_ edge reachable from the goal — unlike §5's
 search, it never stops at an intersection/exclusion edge — and reports
 which fragment the schema (as reachable from that one goal) falls into,
-plus every relation node it passed through. `checkAndValidate` consults
-this first, on every call: a `'monotone'` result routes to §5 and §6
-exactly as before; a `'non-monotone'` result routes to
-`tools/schema-verifier/src/bounded/boundedSearch` instead, and skips
-self-validation entirely — every verdict this path returns already came
-from the real engine directly, so there is nothing left to replay.
+plus every relation node it passed through. This is a purely structural
+fact about the schema (does it contain intersection/exclusion at all),
+independent of whether any _particular_ invariant against it can be
+decided exactly — see `Proof` below for the field that actually answers
+that.
+
+`checkAndValidate` now calls `checkInvariant` (§5) first on every call,
+regardless of fragment — its own short-circuits can decide some cases
+outright even on a structurally non-monotone schema. Only when
+`checkInvariant` itself returns `UNKNOWN`, on a structurally
+non-monotone schema, does this fall back to
+`tools/schema-verifier/src/bounded/boundedSearch` (for a structurally
+monotone schema, `checkInvariant` returning `UNKNOWN` can only be one of
+its own upfront invariant-validation checks, never the intersection/
+exclusion branch — routing to bounded search there would be pointless,
+not a real fallback). A decisive `checkInvariant` verdict — whether via
+the ordinary monotone search or via a short-circuit — gets exactly the
+same §6 self-validation either way; `boundedSearch`'s own verdicts still
+skip it entirely, since every one of them already came from the real
+engine directly, so there is nothing left to replay.
+
+**`Proof`** (`'exact' | 'bounded'`, `CheckResult.proof`) is the field
+that actually distinguishes an unconditional proof from a
+checked-up-to-`k` result — orthogonal to `Fragment`: a structurally
+non-monotone schema can still get `proof: 'exact'` when a short-circuit
+decides it, with `bound` left unset. `bound` is present, and the verdict
+must always be reported as `HOLDS up to k = N` rather than a bare
+`HOLDS` — the build spec's own explicit warning that collapsing "no
+counterexample found within a bound" into an unqualified `HOLDS` is
+exactly the failure mode that makes a verifier actively dangerous — only
+when `proof === 'bounded'`, never when `proof === 'exact'`.
 
 `boundedSearch` fixes a bound `k` on the number of fresh instances per
 type, enumerates every type-valid candidate tuple up to that bound
@@ -243,11 +278,8 @@ type, enumerates every type-valid candidate tuple up to that bound
 own real `subjectTypes` — never generate-and-filter), and brute-forces
 every _subset_ of those candidates directly through the real, unmodified
 `productionCheck`. The first subset that produces `allow` is `VIOLATED`;
-exhausting every subset with none allowing is always reported as `HOLDS
-up to k = N` — a bare `HOLDS` is never returned for this fragment, per
-the build spec's own explicit warning that collapsing "no counterexample
-found within a bound" into an unqualified `HOLDS` is exactly the failure
-mode that makes a verifier actively dangerous. An invariant's own
+exhausting every subset with none allowing is `HOLDS up to k = N`,
+`proof: 'bounded'`. An invariant's own
 `relationEquals` constraints (`blocked(o) = s`) are held fixed as _given_
 facts in every subset tried, never left to the enumeration to include or
 omit — without that, a claim like "a blocked user can never publish"

@@ -202,17 +202,28 @@ reachable from the invariant's own goal permission:
   `VIOLATED` witness against the real, unmodified production engine
   before it's ever reported, is D-117.
 - **Non-monotone** (the schema, as reachable from the goal, uses
-  intersection or exclusion anywhere): the verifier runs a **bounded**
-  search instead — every type-valid tuple set up to `k` objects per type,
-  checked through the real engine directly. A `VIOLATED` verdict here is
-  just as real as in the monotone case (it came from the real engine). A
-  `HOLDS` verdict is reported as `HOLDS up to k = N`, never bare `HOLDS` —
-  it means no violation was found within that bound, not that none
-  exists. `docs/DECISIONS.md` D-118 has the full reasoning, including a
-  real false-negative bug this bound caught while it was being built.
-- **`UNKNOWN`** is a real, distinct outcome the monotone search can
-  return on its own (before fragment routing even applies bounded
-  search) — never silently collapsed into `HOLDS`. Reported with a reason.
+  intersection or exclusion anywhere): `checkInvariant` still runs
+  first, and two narrow short-circuits (`docs/DECISIONS.md`, the entry
+  adding them) can decide some cases exactly even here — an
+  intersection with a structurally type-mismatched operand, or an
+  exclusion whose subtracted branch is structurally unreachable. Only
+  when neither can decide does the verifier fall back to a **bounded**
+  search — every type-valid tuple set up to `k` objects per type,
+  checked through the real engine directly. `CheckResult.proof`
+  (`'exact' | 'bounded'`) is what actually distinguishes the two, always
+  independent of `fragment`: a structurally non-monotone schema can
+  still get `proof: 'exact'`. A `VIOLATED` verdict from bounded search
+  is just as real as in the monotone case (it came from the real
+  engine). A bounded `HOLDS` verdict (`proof: 'bounded'`) is reported as
+  `HOLDS up to k = N`, never bare `HOLDS` — it means no violation was
+  found within that bound, not that none exists; an exact `HOLDS`
+  (`proof: 'exact'`) is a real, unconditional proof and is reported bare.
+  `docs/DECISIONS.md` D-118 has the full bounded-search reasoning,
+  including a real false-negative bug this bound caught while it was
+  being built.
+- **`UNKNOWN`** is a real, distinct outcome `checkInvariant` can return
+  on its own (before bounded search is ever reached) — never silently
+  collapsed into `HOLDS`. Reported with a reason.
 
 This tool never edits, generates, or migrates a schema. A `VIOLATED`
 verdict is a modeling question for whoever owns the schema, not

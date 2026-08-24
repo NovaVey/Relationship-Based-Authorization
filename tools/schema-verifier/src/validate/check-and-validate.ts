@@ -1,13 +1,29 @@
 /**
  * `checkAndValidate` — the single entry point build spec §6 describes:
  * "self-validation runs automatically on every VIOLATED result." Also
- * where §7's fragment detection lives: every call first asks which
- * fragment the schema falls into (as reachable from the goal), and
- * routes accordingly — the monotone fragment gets §5's exact search plus
- * §6's replay/fuzz self-validation; the non-monotone fragment gets §7's
- * bounded search directly (which needs no separate self-validation step
- * — every verdict it returns already came from the real engine, not a
- * static claim needing replay).
+ * where §7's fragment detection lives.
+ *
+ * Routing (docs/DECISIONS.md, the entry adding `search.ts`'s
+ * intersection/exclusion short-circuits): `checkInvariant` (§5) now
+ * always runs first, regardless of `scan.fragment` — its own
+ * AND-infeasibility and exclusion-reduction short-circuits can decide
+ * some cases outright even when the schema, as reachable from the goal,
+ * genuinely contains intersection/exclusion (`scan.fragment ===
+ * 'non-monotone'`). Only when `checkInvariant` itself returns `UNKNOWN`
+ * *and* the schema is structurally non-monotone does this fall back to
+ * §7's bounded search — for a structurally monotone schema,
+ * `checkInvariant` can only return `UNKNOWN` from one of its own
+ * upfront invariant-validation checks (never from meeting an
+ * intersection/exclusion edge, since `scanReachability` already proved
+ * none exists reachable from the goal), so routing there would be
+ * pointless work, not a real fallback — behaviorally identical to this
+ * function's own pre-existing routing for every schema with zero
+ * intersection/exclusion edges anywhere. A decisive `checkInvariant`
+ * verdict — whether from the original pure-monotone search or from a
+ * short-circuit on a structurally non-monotone schema — gets exactly
+ * the same §6 replay/fuzz self-validation either way; bounded search
+ * needs none, since every verdict it returns already came from the real
+ * engine directly, not a static claim needing replay.
  */
 import type { CompiledSchema } from '../../../../src/schema/dsl/types.js';
 import { generateCandidateTuples, boundedSearch } from '../bounded/index.js';
@@ -43,25 +59,34 @@ export async function checkAndValidate(
   const goalObjectType = invariant.variables.find((v) => v.name === invariant.goal.object)!.type;
   const goalNodeId = namedNodeId(goalObjectType, invariant.goal.permission);
   const scan = scanReachability(graph, goalNodeId);
+  const exact = checkInvariant(graph, schema, invariant);
 
-  if (scan.fragment === 'non-monotone') {
-    const k = options?.bound ?? 1;
-    const candidates = generateCandidateTuples(schema, scan.relations, invariant, k);
-    const result = await boundedSearch(schema, invariant, candidates, k);
-    // Every verdict boundedSearch returns already came from the real
-    // engine directly — there is nothing left to replay or fuzz.
+  if (exact.verdict !== 'UNKNOWN' || scan.fragment === 'monotone') {
+    const result: CheckResult = {
+      ...exact,
+      fragment: scan.fragment,
+      ...(exact.verdict !== 'UNKNOWN' ? { proof: 'exact' as const } : {}),
+    };
+
+    if (result.verdict === 'VIOLATED') {
+      const validation = await replayWitness(result.witness!, schema, invariant);
+      return { result, validation };
+    }
+    if (result.verdict === 'HOLDS') {
+      const validation = await fuzzHolds(schema, invariant, options?.fuzz);
+      return { result, validation };
+    }
     return { result, validation: { kind: 'not-applicable' } };
   }
 
-  const result = { ...checkInvariant(graph, schema, invariant), fragment: 'monotone' as const };
-
-  if (result.verdict === 'VIOLATED') {
-    const validation = await replayWitness(result.witness!, schema, invariant);
-    return { result, validation };
-  }
-  if (result.verdict === 'HOLDS') {
-    const validation = await fuzzHolds(schema, invariant, options?.fuzz);
-    return { result, validation };
-  }
+  // scan.fragment === 'non-monotone' and checkInvariant itself couldn't
+  // decide — the exact search genuinely reached an intersection/exclusion
+  // edge neither short-circuit above could resolve. §7's bounded search
+  // is the fallback for that residual case.
+  const k = options?.bound ?? 1;
+  const candidates = generateCandidateTuples(schema, scan.relations, invariant, k);
+  const result = await boundedSearch(schema, invariant, candidates, k);
+  // Every verdict boundedSearch returns already came from the real
+  // engine directly — there is nothing left to replay or fuzz.
   return { result, validation: { kind: 'not-applicable' } };
 }

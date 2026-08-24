@@ -289,11 +289,70 @@ function attempt(
     return mergeBranches(results);
   }
 
-  if (
-    byKind.has('intersectionChild') ||
-    byKind.has('exclusionBase') ||
-    byKind.has('exclusionSubtract')
-  ) {
+  const intersection = byKind.get('intersectionChild');
+  if (intersection) {
+    // AND-infeasibility short-circuit (docs/DECISIONS.md, the entry
+    // documenting this): intersection requires every child to hold for
+    // the SAME object/subject. attempt() returning 'fail' for a child —
+    // called independently here, with the same currentObjectVar/uf this
+    // whole node was reached with, same pattern as unionChild's own
+    // sibling calls above — means that child is structurally impossible
+    // no matter what tuples exist (the D-129 fix is exactly what makes
+    // this true in general, not just for acyclic subtrees). If ANY child
+    // is structurally impossible, the whole intersection is too,
+    // regardless of what the other children say — sound, and requires no
+    // risky merging of two independently-successful witnesses (a much
+    // bigger, separately-scoped problem: see this entry's own "not
+    // attempted" note). If no child is a structural 'fail', this falls
+    // through to the same 'unknown' every other unresolved
+    // intersection/exclusion case gets below — deliberately not
+    // attempting to combine two successes into one witness.
+    for (const edge of intersection) {
+      if (edge.kind !== 'intersectionChild') throw new Error('unreachable');
+      const result = attempt(ctx, edge.to, currentObjectVar, currentObjectType, nextVisited, uf);
+      if (result.kind === 'fail') return { kind: 'fail' };
+    }
+  }
+
+  const exclusionBase = byKind.get('exclusionBase')?.[0];
+  const exclusionSubtract = byKind.get('exclusionSubtract')?.[0];
+  if (exclusionBase && exclusionSubtract) {
+    // Exclusion reduction (docs/DECISIONS.md, same entry as above).
+    // `A - B`: if A itself is structurally impossible, so is A - B,
+    // regardless of B (a subject must satisfy A before B can subtract
+    // anything from it) — B's own attempt() is never even called in
+    // that case. Otherwise, if B is structurally impossible (attempt()
+    // on it returns 'fail'), subtracting an always-empty set changes
+    // nothing — A - B is exactly A, so A's own result (success or
+    // unknown, whichever it was) is returned as-is. If B is NOT
+    // structurally impossible, this falls through to 'unknown': proving
+    // "B is always true whenever A is satisfied" would be a universal
+    // claim this existential-witness search doesn't decide, and is
+    // deliberately not attempted here.
+    if (exclusionBase.kind !== 'exclusionBase' || exclusionSubtract.kind !== 'exclusionSubtract') {
+      throw new Error('unreachable');
+    }
+    const baseResult = attempt(
+      ctx,
+      exclusionBase.to,
+      currentObjectVar,
+      currentObjectType,
+      nextVisited,
+      uf,
+    );
+    if (baseResult.kind === 'fail') return { kind: 'fail' };
+    const subtractResult = attempt(
+      ctx,
+      exclusionSubtract.to,
+      currentObjectVar,
+      currentObjectType,
+      nextVisited,
+      uf,
+    );
+    if (subtractResult.kind === 'fail') return baseResult;
+  }
+
+  if (intersection || (exclusionBase && exclusionSubtract)) {
     return {
       kind: 'unknown',
       reason: `${nodeId} uses intersection/exclusion — outside the monotone fragment §5 covers; see build spec §7`,
