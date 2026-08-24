@@ -10,13 +10,14 @@
  *   file       := invariant+
  *   invariant  := "invariant" IDENT "{" variable+ constraint* goal "}"
  *   variable   := IDENT ":" IDENT
- *   constraint := distinctConstraint | relationConstraint
+ *   constraint := distinctConstraint | relationConstraint | notRelationConstraint
  *   distinctConstraint := "distinct" "(" IDENT ("," IDENT)+ ")"
  *   relationConstraint := IDENT "(" IDENT ")" "=" IDENT
+ *   notRelationConstraint := "not" IDENT "(" IDENT ")" "=" IDENT
  *   goal       := "goal" ":" IDENT "(" IDENT "," IDENT ")"
  *
  * Reserved words (never valid as a variable/invariant name): `invariant`,
- * `distinct`, `goal`. Relation and permission names (the `tenant` in
+ * `distinct`, `goal`, `not`. Relation and permission names (the `tenant` in
  * `tenant(s) = orgA`, the `view` in `goal: view(s, o)`) are NOT checked
  * against this reserved set or against a real schema here — resolving them
  * is §5's job, once an invariant and a schema graph are walked together.
@@ -45,7 +46,7 @@ import type {
   TypedVariable,
 } from './types.js';
 
-const RESERVED_WORDS = new Set(['invariant', 'distinct', 'goal']);
+const RESERVED_WORDS = new Set(['invariant', 'distinct', 'goal', 'not']);
 
 // `IDENTIFIER_PATTERN` is anchored (`^...$`) for whole-string validation;
 // composing it into these line-level regexes via its `.source` (unanchored)
@@ -63,6 +64,15 @@ const GOAL_LINE = new RegExp(
 );
 const DISTINCT_LINE = /^distinct\(([^)]*)\)$/;
 const RELATION_EQUALS_LINE = new RegExp(`^(${SCHEMA_ID})\\((${VAR_ID})\\)\\s*=\\s*(${VAR_ID})$`);
+// Requires `\s+` between `not` and the relation name, so it never collides
+// with RELATION_EQUALS_LINE matching a relation literally named `not`
+// (`not(s) = orgA`, no space, still matches that regex unchanged) — see
+// docs/DECISIONS.md D-131 for the direct proof this claims genuinely dead
+// syntax space (today, `not tenant(s) = orgA` with a space matches neither
+// regex and falls through to "unrecognized line").
+const NOT_RELATION_EQUALS_LINE = new RegExp(
+  `^not\\s+(${SCHEMA_ID})\\((${VAR_ID})\\)\\s*=\\s*(${VAR_ID})$`,
+);
 const VARIABLE_LINE = new RegExp(`^(${VAR_ID})\\s*:\\s*(${SCHEMA_ID})$`);
 
 interface Line {
@@ -229,6 +239,28 @@ export function parseInvariants(source: string): ParseInvariantsResult {
           }
         }
         constraints.push({ kind: 'relationEquals', relation, subject, value });
+        i++;
+        continue;
+      }
+
+      const notRelationMatch = NOT_RELATION_EQUALS_LINE.exec(line.text);
+      if (notRelationMatch) {
+        const [, relation, subject, value] = notRelationMatch as unknown as [
+          string,
+          string,
+          string,
+          string,
+        ];
+        checkIdentifier(relation, line.number, 'relation', errors);
+        for (const v of [subject, value]) {
+          if (!declared.has(v)) {
+            errors.push({
+              line: line.number,
+              message: `'not ${relation}(...)' references undeclared variable '${v}' (invariant '${name}')`,
+            });
+          }
+        }
+        constraints.push({ kind: 'notRelationEquals', relation, subject, value });
         i++;
         continue;
       }

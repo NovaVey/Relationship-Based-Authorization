@@ -168,4 +168,22 @@ export class UnionFind {
   slotValue(objectVar: VarId, relationName: string): VarId | undefined {
     return this.slots.get(`${this.find(objectVar)}#${relationName}`);
   }
+
+  /**
+   * True if `(objectVar, relationName)` is already bound — by a prior
+   * `relationEquals` constraint, or an earlier step of this same search —
+   * to something already known to be the same variable as `value`.
+   * Read-only: unlike `bindSlot`, never binds the slot or unions anything,
+   * so probing an unbound slot never fabricates a coincidental match.
+   * Built for `notRelationEquals`'s two enforcement sites (`search.ts`,
+   * `docs/DECISIONS.md` D-131): a `not <relation>(<var>) = <var>`
+   * constraint needs to ask "would this binding collide with the excluded
+   * value" without ever causing the union side effect that answering the
+   * same question via `bindSlot` would.
+   */
+  slotEquals(objectVar: VarId, relationName: string, value: VarId): boolean {
+    const existing = this.slotValue(objectVar, relationName);
+    if (existing === undefined) return false;
+    return this.same(existing, value);
+  }
 }

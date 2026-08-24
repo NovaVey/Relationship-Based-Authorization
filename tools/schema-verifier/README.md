@@ -167,7 +167,7 @@ Three parts, always in this order:
 ```
 invariant <name> {
   <typed variables, one per line, e.g. `s: user`>
-  <optional constraints, e.g. `distinct(orgA, orgB)` or `tenant(s) = orgA`>
+  <optional constraints, e.g. `distinct(orgA, orgB)`, `tenant(s) = orgA`, or `not tenant(s) = orgA`>
   goal: <permission>(<subject var>, <object var>)
 }
 ```
@@ -177,6 +177,18 @@ See `fixtures/invariants/*.invariant` for real examples, including
 constraint can and can't prove (short version: it can prove a leak is
 real; it essentially never proves one is impossible — see
 `docs/DECISIONS.md` D-116 for why).
+
+`not tenant(s) = orgA` (`docs/DECISIONS.md` D-131) is the one narrow
+exception to that: ruling out one already-known, already-declared
+`(relation, subject, value)` triple — `subject` and `value` must both
+already be declared variables, and `value` is always a bare principal,
+never a userset-subject. Not "this relation can never be satisfied via
+any object, anywhere" (that would need a different, schema-level
+primitive this doesn't attempt) — just "assume this one specific fact is
+false, does the goal still hold." See `docs/INVARIANTS.md`'s own
+"Negative constraints" section for the full scope statement, and the
+"Third-party schema survey" section below for exactly what it did and
+didn't close.
 
 ## Fragments and guarantees
 
@@ -257,14 +269,23 @@ published schemas (six OpenFGA `sample-stores`, six SpiceDB
 invariants their own docs state or imply (`thirdparty/*.invariant`); see
 `thirdparty/README.md` for the translation methodology and the disclosed
 expressiveness gaps (wildcard subjects, ABAC caveats/conditions). The
-survey's own biggest finding: nine of the twelve are `VIOLATED`, and eight
-of those share one root cause — this invariant language has no way to
-state a _negative_ precondition, only positive pins (`distinct`,
-`relationEquals`), so any goal permission reachable via a directly-
-grantable relation of the tested subject's type is trivially escapable
-regardless of what the invariant meant to probe. That's a real limit on
-what this language can currently verify, not a defect in any of the
-twelve source schemas.
+survey's own biggest finding, at first publication: nine of the twelve
+were `VIOLATED`, and eight of those shared one root cause — this
+invariant language had no way to state a _negative_ precondition, only
+positive pins (`distinct`, `relationEquals`), so any goal permission
+reachable via a directly-grantable relation of the tested subject's type
+was trivially escapable regardless of what the invariant meant to probe.
+
+`docs/DECISIONS.md` D-131 later added exactly that — a narrow
+`notRelationEquals` primitive (see "The invariant language," above) — and
+closed **two** of those nine (`spicedb-entitlements`,
+`openfga-entitlements`), now `HOLDS`. The other seven `VIOLATED` entries,
+including six that share the "no negative constraints" shape, are
+unaffected: each has a second, structurally different escape (a
+userset-subject or recursive path) this narrow, bare-principal-only
+primitive was never designed to reach. Current tally: **7 VIOLATED, 5
+HOLDS.** That's a real, still-standing limit on what this language can
+verify for those seven, not a defect in any of the twelve source schemas.
 
 ## What's not built yet
 
