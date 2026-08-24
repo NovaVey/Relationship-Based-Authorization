@@ -399,9 +399,26 @@ function flattenChildren(
   left: ParsedRewriteRule,
   right: ParsedRewriteRule,
 ): ParsedRewriteRule[] {
-  const leftChildren = left.kind === kind ? left.children : [left];
   const rightChildren = right.kind === kind ? right.children : [right];
-  return [...leftChildren, ...rightChildren];
+  if (left.kind === kind) {
+    // Extend `left.children` in place instead of always spreading into a
+    // fresh array — the difference between this being O(n) and O(n^2)
+    // over a flat same-operator chain (`docs/DECISIONS.md`, the entry
+    // documenting a confirmed, unauthenticated CPU-exhaustion DoS through
+    // this exact function before this fix: a ~32,700-term chain, well
+    // within the real request body's byte cap, took 8+ seconds of
+    // synchronous CPU to compile via the old always-spread version).
+    // Safe because `left` is always a `let` variable `parseTerm`/
+    // `parseExpression` is about to reassign to a brand-new object
+    // wrapping this same array — nothing else ever retains a reference
+    // to the old `left` wrapper, or to this array, before that
+    // reassignment happens. Looping rather than `left.children.push(
+    // ...rightChildren)` avoids relying on any engine's spread-argument
+    // count limit at this same worst-case chain length.
+    for (const child of rightChildren) left.children.push(child);
+    return left.children;
+  }
+  return [left, ...rightChildren];
 }
 
 function parseTerm(state: ParserState): ParsedRewriteRule {

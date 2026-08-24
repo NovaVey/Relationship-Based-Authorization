@@ -2297,3 +2297,29 @@ Fail-checked live: three isolated breaks (the exact-search site-1 check, the bou
 **Verification:** `tools/schema-verifier`'s own suite — 15 files, 151 tests (up from 134, 17 net new) — plus `npx eslint .`/`npx tsc --noEmit`/`npx prettier --check .` all clean. Full account: `docs/DECISIONS.md` D-131.
 
 This closes the four-item batch begun at D-127/D-128 in full (dynamic-invariants stub, token opacity, the cycle-guard fix, the intersection/exclusion short-circuits, and this). The fourth full-repo audit remains, per the agreed build order.
+
+## Fourth full-repo audit: 14 findings (1 critical, 7 medium, 6 low), 0 refuted — working through them by severity
+
+**Owner:** the main agent, directly, on `main`.
+
+Ran the `full-repo-audit` workflow (14 parallel review dimensions, adversarial verification of every raw finding before it's reported). Result: 14 findings survived verification, 0 refuted.
+
+**Critical (1):** an unauthenticated, confirmed, live-reproduced CPU-exhaustion DoS in the schema parser.
+**Medium (7):** a production-resolver false-deny gap (D-012's own "revisit if" condition, never closed) · a build-script merge-not-mirror bug in `dist/` migrations · no API body schema uses `.strict()`, silently dropping typo'd fields like `atToken`/`subjectRelation` · `expand()`'s multi-parent tuple-to-userset branch untested against real Postgres · `serve.ts` has zero test coverage · `POST /check`'s malformed-token rejection path untested · a doc screen shows a stale pre-D-064 `/health` response shape.
+**Low (6):** `serve()`'s `buildServer()` call unguarded, breaking this file's own try/catch convention · no test sends `subjectRelation` through the tuples API · a test cites a removed `docs/RELATIONS.md` line · README's reference table reads as if `/check`/`/expand` are unauthenticated · `env.ts`'s `ADMIN_API_KEY` comment understates D-064's scope · `NODE_ENV` validated/defaulted but drives no runtime behavior.
+
+Full findings detail (file/line, reproduction, verdict, suggested fix) recorded in the audit's own report, summarized per-finding in the entries below as each is closed. Working through them critical → medium → low, per the user's own explicit direction.
+
+## Critical audit finding closed: unauthenticated O(N²) CPU-exhaustion DoS in the schema parser's `flattenChildren` (D-132)
+
+**Owner:** the main agent, directly, on `main`.
+
+`src/schema/dsl/parser.ts`'s `flattenChildren` rebuilt the entire accumulated children array via array-spread on every step of a flat, unparenthesized same-operator chain (`a1 & a2 & ... & aN`) — genuine O(N²) work. Reachable through `POST /schema/compile`, one of only two routes that deliberately skip auth (D-067), which calls `compileSchema()` synchronously with no `await` — blocking the entire event loop, including `/health`, for every caller. A ~32,700-term chain (the largest that fits the real 65,536-byte body cap) took 8.3s of pure CPU before the fix; ~7-8 such requests, comfortably inside the existing 100/min rate limit, are enough to wedge the server permanently. Structurally distinct from the two DoS classes D-067 already closed (native recursion) — this involves zero recursion, so neither existing guard touched it.
+
+Fixed by extending the accumulated array in place (a loop, not a spread-into-push, to avoid any engine's argument-count limit) instead of always copying it — amortized O(1) per term instead of O(n). Re-verified directly: 8.3s → 49ms at the exact byte-cap boundary; the D-094 symmetric-flattening invariant (`a|(b|c)` and `(a|b)|c` producing identical shapes) confirmed untouched.
+
+3 new tests (`test/unit/schema/recursion-depth-guards.test.ts`, alongside D-067's own DoS regression suite, documented there as "Bug C"): 60,000-term flat `&`/`|` chains must compile fast _and_ produce a correctly-shaped node with all children present (not just fast — a silently-truncating fix would be worse than the bug), plus a mixed-operator test confirming the in-place mutation never aliases state across independent operators. Fail-checked live: reverting the fix flipped exactly the 2 timing-sensitive tests red (27s vs a 10s ceiling), nothing else.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npx vitest run` (47 files, 605 tests, up from 602) all clean; `tools/schema-verifier`'s own suite (151 tests) reconfirmed unaffected. Full account: `docs/DECISIONS.md` D-132.
+
+Medium and low findings continue next, per the agreed order.
