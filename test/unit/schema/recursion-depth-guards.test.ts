@@ -1,10 +1,10 @@
 /**
- * Regression tests for two independent, unauthenticated denial-of-service
- * paths found by a full-repo audit: unbounded native (JS call-stack)
- * recursion, with no depth guard, reachable from `POST /schema/compile`
- * (`src/api/server.ts`, unauthenticated by design — see that file's own
- * doc comment — but never itself reasoned about recursion-depth DoS until
- * now).
+ * Regression tests for three independent, unauthenticated denial-of-service
+ * paths found by full-repo audits: unbounded native (JS call-stack)
+ * recursion, and unbounded algorithmic complexity, with no guard against
+ * either, reachable from `POST /schema/compile` (`src/api/server.ts`,
+ * unauthenticated by design — see that file's own doc comment — but never
+ * itself reasoned about either DoS class until these fixes).
  *
  * Bug A: `src/schema/dsl/parser.ts`'s `parseAtom`/`parseTerm`/
  * `parseExpression` are mutually recursive with one native call-stack frame
@@ -23,6 +23,17 @@
  * comment on `checkCircularPermissions` for the rewrite and how it was
  * verified against the original recursive version), which sidesteps the
  * native-recursion depth problem entirely rather than merely capping it.
+ *
+ * Bug C (`docs/DECISIONS.md`, the entry documenting this fix):
+ * `parser.ts`'s `flattenChildren` rebuilt the *entire* accumulated
+ * children array via array-spread on every step of a flat, unparenthesized
+ * same-operator chain (`a1 & a2 & ... & aN`) — genuine O(N^2) work, with no
+ * recursion involved at all, so neither Bug A's nor Bug B's fix touches it.
+ * A confirmed, independently-reproduced ~32,700-term chain (the largest
+ * that fits the real 65,536-byte request-body cap) took 8+ seconds of pure
+ * synchronous CPU to compile before this fix — enough to freeze the
+ * server's entire single-threaded event loop for every caller. Fixed by
+ * extending the accumulated array in place instead of always copying it.
  *
  * Per §14 delegation rule 5, these tests were written with only
  * `src/schema/dsl/types.ts` and `src/schema/dsl/errors.ts` read for their
@@ -67,6 +78,13 @@ function longFlatCycleSource(n: number): string {
   }
   lines.push('}');
   return lines.join('\n');
+}
+
+function longFlatOperatorChainSource(n: number, op: '&' | '|'): string {
+  const chain = Array.from({ length: n }, () => 'owner').join(op);
+  return ['namespace document {', '  relation owner: user', `  permission p = ${chain}`, '}'].join(
+    '\n',
+  );
 }
 
 describe('deeply-nested-parenthesized-permission-expressions-are-rejected-with-a-clean-schema-error-not-a-rangeerror', () => {
@@ -152,5 +170,88 @@ describe('a-long-flat-non-nested-permission-dependency-chain-is-handled-without-
     // path once per member instead of once per cycle) — without that fix,
     // this case is a multi-second-to-OOM cost instead of a fast rejection.
     expect(elapsedMs).toBeLessThan(10_000);
+  });
+});
+
+describe('a-long-flat-same-operator-chain-in-one-permission-expression-compiles-in-roughly-linear-time-not-quadratic (Bug C)', () => {
+  // Deliberately no `(` anywhere — this is the third, structurally
+  // separate DoS class this file guards against: unlike Bug A/B, there is
+  // no recursion here at all (native or otherwise) to overflow. The bug
+  // was purely algorithmic complexity inside `flattenChildren`'s own
+  // array-spread, on every step of a flat chain of the SAME operator
+  // (`a & a & ... & a`, or `a | a | ... | a`) within one expression.
+  //
+  // 60,000 terms is chosen to comfortably exceed the real request-body
+  // byte cap's own worst-case chain length (~32,700 terms at 65,536
+  // bytes, per the audit's own binary search) while staying well inside
+  // what the fixed, roughly-linear implementation compiles in
+  // milliseconds — before this fix, a chain this long would not have
+  // finished in any test-suite-reasonable time at all (the O(N^2) cost
+  // measured at n=32,000 alone was already ~7.6s; n=60,000 would be
+  // several times that, not linearly scaled).
+
+  it.each(['&', '|'] as const)(
+    'a-60000-term-flat-%s-chain-compiles-quickly-and-produces-one-correctly-shaped-flat-node',
+    (op) => {
+      const n = 60_000;
+      const start = Date.now();
+      let result: SchemaCompileResult | undefined;
+      expect(() => {
+        result = compileSchema(longFlatOperatorChainSource(n, op));
+      }).not.toThrow();
+      const elapsedMs = Date.now() - start;
+      expect(result!.ok).toBe(true);
+      if (!result!.ok) return;
+      const rewrite = result!.schema.namespaces['document']?.permissions['p']?.rewrite;
+      const expectedKind = op === '&' ? 'intersection' : 'union';
+      expect(rewrite?.kind).toBe(expectedKind);
+      if (rewrite?.kind !== 'union' && rewrite?.kind !== 'intersection') return;
+      // Correctness, not just speed: the fast path must still flatten the
+      // entire chain into ONE node with all N children — not, say, quietly
+      // truncating or nesting to hit the speed target.
+      expect(rewrite.children).toHaveLength(n);
+      expect(rewrite.children.every((c) => c.kind === 'computedUserset')).toBe(true);
+      // A generous ceiling, same discipline as the two describe blocks
+      // above — this genuinely compiles in well under a second locally;
+      // the large timeout only guards against regressing back to the old
+      // O(N^2)-plus cost.
+      expect(elapsedMs).toBeLessThan(10_000);
+    },
+  );
+
+  it('a-mixed-amp-then-pipe-chain-still-flattens-each-operator-into-its-own-correctly-sized-node', () => {
+    // Guards against an in-place-mutation fix accidentally aliasing state
+    // across the two independent operators: `&` binds tighter than `|`
+    // (see `parseTerm`/`parseExpression`), so `a&a&...&a | a&a&...&a` must
+    // compile to a union of exactly two intersection nodes, each with its
+    // own, independently-sized children array — not one merged node, and
+    // not two nodes secretly sharing one mutated array.
+    const half = 15_000;
+    const chain = Array.from({ length: half }, () => 'owner').join('&');
+    const source = [
+      'namespace document {',
+      '  relation owner: user',
+      `  permission p = ${chain} | ${chain}`,
+      '}',
+    ].join('\n');
+    const result = compileSchema(source);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rewrite = result.schema.namespaces['document']?.permissions['p']?.rewrite;
+    expect(rewrite?.kind).toBe('union');
+    if (rewrite?.kind !== 'union') return;
+    expect(rewrite.children).toHaveLength(2);
+    for (const child of rewrite.children) {
+      expect(child.kind).toBe('intersection');
+      if (child.kind !== 'intersection') continue;
+      expect(child.children).toHaveLength(half);
+    }
+    // The two intersection children must be genuinely independent arrays
+    // — mutating one must never be observable on the other.
+    const [first, second] = rewrite.children;
+    expect(first === second).toBe(false);
+    if (first?.kind === 'intersection' && second?.kind === 'intersection') {
+      expect(first.children === second.children).toBe(false);
+    }
   });
 });
