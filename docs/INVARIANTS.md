@@ -386,7 +386,7 @@ implementation rather than assumed away by a clean test run.
 
 **A known-answer corpus.** `tools/schema-verifier/test/known-
 answers.test.ts` gathers every fixture invariant this project ships —
-all five, across both fragments and both verdicts — into one literal
+all six, across both fragments and both verdicts — into one literal
 table with its exact committed result and the `docs/DECISIONS.md` entry
 that reasoned out why, swept in a single loop. Not a duplicate of the
 scattered mechanism-specific assertions elsewhere; this is the one place

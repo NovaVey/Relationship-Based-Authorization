@@ -1,9 +1,20 @@
 # Deterministic simulation testing — scope and design
 
-A proposal, not yet built. Read this if the question is "what would it take
-to test this service's write path the way TigerBeetle or FoundationDB test
-theirs?" — the honest answer, including the parts of that comparison that
-don't hold, not an assumed yes.
+**Status: fully implemented and shipped**, as of `docs/DECISIONS.md` D-102
+(2026-08-22). Every phase in "Phased plan" below landed — see D-097 through
+D-102 for each phase's own settled decision entry and fail-check, and
+`docs/INVARIANTS.md`'s "Dynamic invariants (DST)" section for the five
+properties actually proven, CI-wired via `.github/workflows/dst.yml`
+(`dst-pr` on every PR, `dst-nightly` on a daily cron). What follows is the
+original design proposal, written before any of it was built, and
+preserved here for its rationale — most of it describes the system exactly
+as it was actually built, but not all of it: two places where the built
+system genuinely differs from what's proposed here are called out inline,
+in their own sections, rather than silently left to look current. Read
+this if the question is "what would it take to test this service's write
+path the way TigerBeetle or FoundationDB test theirs?" — the honest
+answer, including the parts of that comparison that don't hold, not an
+assumed yes.
 
 ## The problem this exists to name, not hide
 
@@ -95,9 +106,26 @@ ShapeHandler>`, keyed on the SQL text after whitespace normalization — no
 parsing, no regex, no tokenizer), throwing loudly on anything unrecognized
 rather than silently returning an empty result.
 
-**Three operations get promoted** to a named helper with two
-implementations (a real pg-backed one and an in-memory one), because each
-demonstrably needs more than "run a query and get rows back":
+**Three operations get promoted** beyond the fourteen plain shapes, because
+each demonstrably needs more than "run a query and get rows back" — as
+originally proposed, that meant a named helper with two implementations (a
+real pg-backed one and an in-memory one). **As actually built (D-098,
+D-099), only the third of the three — the frontier BFS — took that literal
+shape**, with the production side keeping the name `fetchReachableFrontier`
+and the in-memory reimplementation a distinctly-named
+`fetchReachableFrontierVia`. The first two ended up built differently:
+D-098/D-099 kept every real pg-backed call site's literal SQL text
+completely unchanged, and `src/store/dst/connection.ts` instead recognizes
+that exact literal text by special-casing it directly — architecturally the
+same mechanism as the fourteen plain shapes' exact-string lookup, just
+implemented outside `shapes.ts`'s own registry because of the
+blocking/identity requirements each of the two needs (see D-098/D-099 for
+why a shared named function on the production side wasn't the right shape
+once actually built). No `withSnapshotTransaction`/`withAdvisoryLock`
+function exists anywhere in `src/` today; the names below are the
+proposal's own vocabulary, kept as the clearest way to describe what each
+operation's fake-side handling has to account for, not a claim that a
+function by that name was built:
 
 - **`withSnapshotTransaction`** — `productionCheck`'s
   `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` transaction. Ordinary
@@ -248,6 +276,21 @@ an explicit runtime check — has any query run on this connection yet? —
 and throw if the snapshot-anchoring query isn't first. Without this, DST
 only ever exercises the side that was already safe.
 
+**As actually built: this graft was applied to the fake, not to the real
+pg-backed side.** `src/store/dst/connection.ts`'s in-memory implementation
+does enforce a form of this strictly (`bufferOp` throws if a write is ever
+attempted while in `Snapshot` mode — a related but distinct property: no
+writes during a snapshot, not "the snapshot-anchoring query must be
+first"). `src/resolve/production/resolver.ts`'s real
+`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` still relies entirely on
+code structure — it is issued as the literal first statement after
+`pool.connect()`, by inspection, with no runtime assertion anywhere in the
+file guarding that a future edit can't silently reorder it. This is a
+real, disclosed, still-open gap on the production side, found by this
+project's own live-verification doc audit (2026-08-25) — not fixed as part
+of that audit, since it's a production-code change outside a documentation
+pass's scope, but recorded here rather than left to look closed.
+
 **From the SQL-pattern-matching design: a required, always-on recognizer-
 coverage gate.** This design's own sharpest self-disclosed risk is that
 "a closed set of fifteen shapes" is a fact about today's code, not a
@@ -277,60 +320,76 @@ that this runs on pure JS state. A small, fixed seed batch, plus the
 recognizer-coverage gate above, plus an unconditional replay of the full
 regression corpus (below) on every run.
 
-**Nightly** — genuinely new machinery; no scheduled workflow of this
-shape exists anywhere in this repo today except CodeQL's unrelated weekly
-SAST cron. Thousands of seeds, the full fault-injection matrix at higher
-injection probability than a PR budget affords, filing or updating one
+**Nightly** — shipped (D-102): `.github/workflows/dst.yml`'s
+`dst-nightly` job, on a daily cron — genuinely new machinery at the time
+this was proposed, since no scheduled workflow of this shape existed
+anywhere in this repo before it, except CodeQL's unrelated weekly SAST
+cron. Thousands of seeds, the full fault-injection matrix at higher
+injection probability than the PR budget affords, filing or updating one
 tracking issue per distinct failure signature.
 
-**Regression corpus** — also genuinely new; this repo has no persisted
-seed corpus even for the _existing_ soundness fuzzer, which draws a fresh
-random seed every run. A checked-in file records `{seed, scheduleId,
-failureSummary, dateFound}` for every real bug a seed ever exposed; every
-PR replays the whole corpus unconditionally (cheap against an in-memory
-driver), so a fixed bug can never silently regress. Worth returning to:
-the existing soundness harness has the identical gap today and could
-adopt the same corpus discipline once this work proves the pattern.
+**Regression corpus** — shipped (D-102): `docs/dst-regression-corpus.json`,
+consumed by `src/store/dst/scheduler.ts`'s `regressionCorpusSeedsFor`. Also
+genuinely new at the time this was proposed — this repo had no persisted
+seed corpus even for the _existing_ soundness fuzzer, which still draws a
+fresh random seed every run and still has this same gap today (unchanged;
+worth returning to, per D-102's own text, once DST's own corpus discipline
+has more real entries to point to as precedent). The corpus file records
+`{seed, scheduleId, failureSummary, dateFound}` for every real bug a seed
+ever exposes; every PR replays the whole corpus unconditionally (cheap
+against an in-memory driver), so a fixed bug can never silently regress.
+Its `entries` array is honestly empty as of this writing — every DST bug
+found through D-102 was found incidentally, by fail-check, or by
+adversarial review, never by seed exploration, so nothing has been owed to
+it yet; the mechanism and its replay path are real and tested regardless.
 
-## Phased plan
+## Phased plan — all six phases shipped
 
-Each phase gets its own `docs/DECISIONS.md` entry recording the specific
-modeling choice made, in the file's own strict four-field template.
+Each phase got its own `docs/DECISIONS.md` entry recording the specific
+modeling choice made, in the file's own strict four-field template, its
+own fail-check, and its own exit criterion confirmed met before the next
+phase started. All dated 2026-08-22.
 
-- **D0 — prove the seam is wireable at all.** The connection/transaction
-  engine (write-buffer, commit-sequence tagging) plus the plain-shape
-  executor for `tuples.ts`/`tokens.ts` only — no locks, no snapshots, no
-  recursion. Narrow `writeTuple`/`deleteTuple`'s parameter type from
-  concrete `Pool` to the `publishOne`-precedented structural type,
-  verified by re-running the existing `tuple-store.integration.test.ts`
-  suite unmodified against it. Exit: one DST test — two writes for the
-  same key, a crash injected between them, atomicity asserted.
-- **D1 — advisory locks.** `withAdvisoryLock` for both lifetime models;
-  wire the write-log, publish, and migrations locks through it. Exit: the
-  D-083 reordering regression generalized across seeds, plus a
-  session-lock-crash test proving the lock auto-releases when its holding
-  connection dies.
-- **D2 — snapshot transactions.** `withSnapshotTransaction` and the
-  commit-sequence visibility model; wire `productionCheck` through it.
-  Record explicitly in its own decision entry that narrowing
-  `productionCheck`'s storage dependency is orthogonal to D-022 (which
-  forbids the _reference_ resolver sharing code with the _production_
-  one — parameterizing which physical driver answers the production
-  resolver's own storage calls touches neither side of that boundary).
-  Exit: the flagship D-092 phantom-witness regression reproduced and
-  proven unreachable under many seeded interleavings.
-- **D3 — recursive frontier** (parallelizable with D2; depends only on
-  D0). `fetchReachableFrontierVia` and its equivalence suite. Exit: zero
-  set-level mismatches across a large seeded differential run against
-  real Postgres, plus the reconvergent-diamond replay passing.
-- **D4 — the scheduler.** Generalize D0–D3's ad hoc per-test crash
-  points and interleavings into one seeded, reusable scheduler, built on
-  the same `fast-check`/`pure-rand` infrastructure this project already
-  chose. Exit: at least one earlier phase's test ported onto the shared
-  scheduler with identical pass/fail behavior, proving the abstraction
-  changes only how a test is driven, not what it tests.
-- **D5 — CI wiring.** The PR job, nightly job, and regression corpus
-  above, as real workflow YAML.
+- **D0 — prove the seam is wireable at all. Done (D-097).** The
+  connection/transaction engine (write-buffer, commit-sequence tagging)
+  plus the plain-shape executor for `tuples.ts`/`tokens.ts` only — no
+  locks, no snapshots, no recursion. Narrowed `writeTuple`/`deleteTuple`'s
+  parameter type from concrete `Pool` to the `publishOne`-precedented
+  structural type, verified by re-running the existing
+  `tuple-store.integration.test.ts` suite unmodified against it. Exit met:
+  a DST test proving atomicity — two writes for the same key, a crash
+  injected between them.
+- **D1 — advisory locks. Done (D-098).** `withAdvisoryLock`'s proposed
+  shape (see "As actually built," above, for how this landed as literal-SQL
+  special-casing in `connection.ts` rather than a shared named function)
+  for both lifetime models; wired the write-log, publish, and migrations
+  locks through it. Exit met: the D-083 reordering regression generalized
+  across seeds, plus a session-lock-crash test proving the lock
+  auto-releases when its holding connection dies.
+- **D2 — snapshot transactions. Done (D-099).** The commit-sequence
+  visibility model (see "As actually built," above, for the same
+  literal-SQL-special-casing shape this took in practice); wired
+  `productionCheck` through it. Recorded explicitly in its own decision
+  entry that narrowing `productionCheck`'s storage dependency is orthogonal
+  to D-022 (which forbids the _reference_ resolver sharing code with the
+  _production_ one — parameterizing which physical driver answers the
+  production resolver's own storage calls touches neither side of that
+  boundary). Exit met: the flagship D-092 phantom-witness regression
+  reproduced and proven unreachable under many seeded interleavings.
+- **D3 — recursive frontier. Done (D-100).** `fetchReachableFrontierVia`
+  and its equivalence suite — the one promoted operation that took the
+  proposal's literal named-helper-with-two-implementations shape. Exit
+  met: zero set-level mismatches across a large seeded differential run
+  against real Postgres, plus the reconvergent-diamond replay passing.
+- **D4 — the scheduler. Done (D-101).** Generalized D0–D3's ad hoc
+  per-test crash points and interleavings into one seeded, reusable
+  scheduler, built on the same `fast-check`/`pure-rand` infrastructure this
+  project already chose. Exit met: D0/D1/D2's own tests ported onto the
+  shared scheduler with identical pass/fail behavior, proving the
+  abstraction changes only how a test is driven, not what it tests.
+- **D5 — CI wiring. Done (D-102).** The PR job, nightly job, and
+  regression corpus above, as real workflow YAML — see "CI," above, for
+  each piece's shipped state.
 
 ## The risk this design accepts, stated plainly
 
