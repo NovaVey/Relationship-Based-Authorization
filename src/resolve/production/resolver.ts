@@ -112,10 +112,11 @@
  * statement of the just-opened transaction, on the same client whose
  * snapshot every later read in the check will share — see
  * `assertTokenObservedOnSnapshot`'s own doc comment for exactly why a
- * *pool*-level check beforehand isn't sufficient on its own, and
- * `productionCheck`'s own doc comment for the one deliberate, disclosed gap
- * this fix does *not* close (schema-config reads, `getConfig`, stay on the
- * plain `pool`, outside this transaction — see that doc comment for why).
+ * *pool*-level check beforehand isn't sufficient on its own. `getConfig`'s
+ * `namespace_configs` reads run on this same pinned client too (closing a
+ * gap this fix originally left open — see `productionCheck`'s own doc
+ * comment for the full history and the connection-exhaustion deadlock
+ * closing it also fixes).
  *
  * **`pool: ConnectionSource`/`client: QueryExecutor`, not concrete
  * `pg.Pool`/`pg.PoolClient` — DST D2 (`docs/DECISIONS.md` D-099).** The
@@ -358,20 +359,17 @@ type ProductionOutcome =
  * `productionCheck`'s returned `depth` reflects the deepest point *either*
  * mechanism actually reached, not just whichever one happened to run last.
  *
- * `pool` and `client` are deliberately two separate fields, used for two
- * deliberately different things (full-repo audit finding #1,
- * `docs/DECISIONS.md` D-092): `client` is the one connection whose
- * `REPEATABLE READ` transaction every `relation_tuples`/`write_log` read
- * in this check runs inside — `sqlRelationMembershipWithWitness` and
- * `listTupleSubjects` both take it, never `pool`. `pool` is kept only for
- * `getConfig`'s own `namespace_configs` lookups, which deliberately stay
- * *outside* that transaction — see `productionCheck`'s own doc comment for
- * why that's a disclosed, reasoned scoping choice, not an oversight (and,
- * since DST D2, no longer a *type*-forced one either — see that doc
- * comment).
+ * `client` is the *only* connection this whole check ever needs — every
+ * read (`relation_tuples`/`write_log` via `sqlRelationMembershipWithWitness`/
+ * `listTupleSubjects`, and, as of this fix, `namespace_configs` via
+ * `getConfig` below too) runs on this one pinned `REPEATABLE READ` client.
+ * A separate `pool` field used to live here for `getConfig` alone — see
+ * `productionCheck`'s own doc comment for why that was a real,
+ * production-reachable connection-exhaustion deadlock, not just a
+ * theoretical one, and why removing it (one connection per check, never
+ * two) is the fix, not a workaround.
  */
 interface WalkContext {
-  pool: ConnectionSource;
   client: QueryExecutor;
   maxDepth: number;
   schemaCache: Map<string, NamespaceConfig | null>;
@@ -381,7 +379,7 @@ interface WalkContext {
 async function getConfig(ctx: WalkContext, ns: string): Promise<NamespaceConfig | null> {
   const cached = ctx.schemaCache.get(ns);
   if (cached !== undefined) return cached;
-  const config = await getLatestNamespaceConfig(ctx.pool, ns);
+  const config = await getLatestNamespaceConfig(ctx.client, ns);
   const resolved = config ?? null;
   ctx.schemaCache.set(ns, resolved);
   return resolved;
@@ -1110,31 +1108,46 @@ async function assertTokenObservedOnSnapshot(client: QueryExecutor, token: numbe
  * would add serialization-failure retries this codebase has no retry logic
  * for, for no benefit a read-only transaction could ever collect on.
  *
- * **One disclosed, deliberate gap: `getConfig`'s `namespace_configs`
- * lookups stay on the plain `pool`, outside this transaction.** Originally
- * two reasons; now one. The original structural one — `getLatestNamespaceConfig`
- * (`src/schema/publish.ts`) took a `Pool`, and widening that signature was
- * outside this fix's own file scope — no longer applies: DST D0 already
- * narrowed `getLatestNamespaceConfig` to the same `QueryExecutor` shape
- * this file's own `pool: ConnectionSource` satisfies (`docs/DECISIONS.md`
- * D-097), and D2 narrowed this file's own types to match, so nothing
- * structurally prevents running `getConfig` inside the `REPEATABLE READ`
- * transaction today. It still deliberately doesn't, because the second,
- * more load-bearing reason was always sufficient on its own: the risk
- * this transaction closes for `relation_tuples` — two reads observing
- * *different* real moments in the database's history — is already
- * narrower for schema config than it looks. `WalkContext.schemaCache`
- * (unchanged by this fix) means a given namespace's config is fetched at
- * most once per check, however many times the walk revisits that
- * namespace, so the dangerous case (the *same* namespace observed at two
- * *different* published versions within one check) was already
- * structurally impossible before this fix and remains so. What's left
- * unclosed is a strictly weaker property — two *different* namespaces
- * touched by the same check could each be read as of a very slightly
- * different moment if a schema publish (rare, admin-gated, unlike a tuple
- * write) lands mid-check — not the phantom-witness scenario this finding's
- * own counterexample describes, which is specifically about
- * `relation_tuples`.
+ * **`getConfig`'s `namespace_configs` lookups now run on this same pinned
+ * client too (`docs/DECISIONS.md`, the entry closing D-140's own "Revisit
+ * if") — previously a disclosed, deliberate gap; now closed, for a reason
+ * stronger than the residual snapshot-consistency argument that originally
+ * justified leaving it open.** The original scoping reasoning still holds
+ * as a description of what closing this gap additionally buys: `getConfig`
+ * used to run on the plain `pool`, a second, independent connection outside
+ * this transaction, and `WalkContext.schemaCache` already made the
+ * dangerous case (the *same* namespace observed at two *different*
+ * published versions within one check) structurally impossible even then
+ * — what was left open was only the strictly weaker property that two
+ * *different* namespaces touched by the same check could each be read as
+ * of a very slightly different moment if a schema publish (rare,
+ * admin-gated) landed mid-check. That's a real, if narrow, correctness
+ * improvement this fix closes as a side effect, but it is not why this
+ * changed.
+ *
+ * **The actual reason: needing a *second* pool connection per check was a
+ * real, production-reachable connection-exhaustion deadlock, confirmed
+ * live, not theoretical.** Under N concurrent `productionCheck` calls where
+ * N is at or past the connection pool's own `max`, every connection gets
+ * consumed by the N calls' own pinned `client` acquisitions before any of
+ * them can obtain the *second* connection `getConfig` used to need —
+ * mutual starvation, not contention that resolves once a connection frees
+ * up (nothing releases until `getConfig` itself succeeds, and nothing lets
+ * `getConfig` succeed). First disclosed as a byproduct of an unrelated test
+ * (`docs/DECISIONS.md` D-140: 40 concurrent `productionCheck` calls
+ * deadlocked for real against local Postgres, confirmed directly via
+ * `pg_stat_activity`), then independently reproduced live a second time
+ * (D-142: a deliberately shrunk connection pool hung outright under 10
+ * concurrent checks, killed after a 2-minute timeout, not a flake). A
+ * check now only ever needs exactly one connection, for its entire life,
+ * no matter how many distinct namespaces the walk touches — the deadlock
+ * is closed structurally, not merely made numerically less likely by
+ * documenting or enforcing `MAX_CONCURRENCY < pool.max` (the alternative,
+ * weaker fix D-140's own "Revisit if" also named).
+ *
+ * `src/audit/expand.ts`'s `expand()` had the identical `pool`/`client`
+ * split for the identical reason, sharing this exact deadlock risk under
+ * concurrent `/expand` traffic — fixed the same way, in the same change.
  */
 export async function productionCheck(
   pool: ConnectionSource,
@@ -1161,7 +1174,7 @@ export async function productionCheck(
     if (atToken !== undefined) {
       await assertTokenObservedOnSnapshot(client, atToken);
     }
-    const ctx: WalkContext = { pool, client, maxDepth, schemaCache: new Map(), depthReached };
+    const ctx: WalkContext = { client, maxDepth, schemaCache: new Map(), depthReached };
     const outcome = await resolve(ctx, subject, object, relationOrPermission, new Set(), 0);
     await client.query('COMMIT');
     return outcome.allowed

@@ -288,37 +288,44 @@ describe('Property A — idempotent-duplicate-write-check-invariance', () => {
 
     // Both full query batches, back-to-back, with NO intervening write —
     // the exact condition the property's own corrected statement
-    // requires. Run SEQUENTIALLY, not via Promise.all, and not only for
-    // the "no intervening write" ordering discipline: a real,
-    // independently-discovered operational hazard, found live while
-    // developing this exact test, rules out concurrent execution here
-    // for a completely different reason. `productionCheck` holds ONE
-    // pinned `PoolClient` for its own `REPEATABLE READ` transaction for
-    // its whole lifetime, but `getConfig`'s `namespace_configs` lookup
-    // deliberately still goes through `ctx.pool` (a second, independent
-    // `pool.query()` call) rather than that same pinned client — a
-    // disclosed gap in `docs/DECISIONS.md` D-092's own writeup. That
-    // means one in-flight `productionCheck` call can need TWO real pool
-    // connections simultaneously. Racing `QUERY_COUNT` (40) such calls
-    // concurrently via `Promise.all` against `pg.Pool`'s default `max: 10`
-    // deadlocks the pool outright: the first 10 calls each grab one
-    // connection for their own pinned transaction and block on the token
-    // floor-check query; once all 10 are through that first query and
-    // ready to call `getConfig`, none of them can ever obtain the SECOND
-    // connection `getConfig` needs, because all 10 available connections
-    // are already held, each waiting on the other — confirmed live: this
-    // exact `Promise.all` version was run once, observed to hang
-    // indefinitely, and `pg_stat_activity` on the real database showed
-    // exactly 10 connections `idle in transaction`, all having just
-    // finished `select max(token) as max_token from write_log` (the
-    // token floor check) and stalled there, before this was rewritten to
-    // the strictly sequential form below. This is a real, disclosed
-    // operational finding about this test's own resource usage, not a
-    // production resolver bug — a single `productionCheck` call never
-    // needs more than 2 connections, and `MAX_CONCURRENCY` (this
-    // project's own env-configured fan-out control, default 8) already
-    // keeps `runSoundnessFuzz`'s own real concurrent-check fan-out safely
-    // under a plain `pg.Pool`'s default `max` for the identical reason.
+    // requires. Run SEQUENTIALLY, not via Promise.all — this is still
+    // required today, on its own, for the "no intervening write" ordering
+    // discipline alone: concurrent execution could let a write from one
+    // in-flight call's own connection interleave between two queries this
+    // property's own precondition needs to stay atomic, independent of
+    // anything about connection-pool sizing.
+    //
+    // Historical note — the SECOND, independent reason this was originally
+    // sequential no longer applies, but is kept here as the real account of
+    // how this test was actually developed, not retroactively cleaned up.
+    // When this test was first written, `productionCheck` held ONE pinned
+    // `PoolClient` for its own `REPEATABLE READ` transaction for its whole
+    // lifetime, but `getConfig`'s `namespace_configs` lookup deliberately
+    // still went through `ctx.pool` (a second, independent `pool.query()`
+    // call) rather than that same pinned client — a disclosed gap in
+    // `docs/DECISIONS.md` D-092's own writeup. That meant one in-flight
+    // `productionCheck` call could need TWO real pool connections
+    // simultaneously. Racing `QUERY_COUNT` (40) such calls concurrently via
+    // `Promise.all` against `pg.Pool`'s default `max: 10` deadlocked the
+    // pool outright: the first 10 calls each grabbed one connection for
+    // their own pinned transaction and blocked on the token floor-check
+    // query; once all 10 were through that first query and ready to call
+    // `getConfig`, none of them could ever obtain the SECOND connection
+    // `getConfig` needed, because all 10 available connections were already
+    // held, each waiting on the other — confirmed live: this exact
+    // `Promise.all` version was run once, observed to hang indefinitely,
+    // and `pg_stat_activity` on the real database showed exactly 10
+    // connections `idle in transaction`, all having just finished `select
+    // max(token) as max_token from write_log` (the token floor check) and
+    // stalled there, before this was rewritten to the strictly sequential
+    // form below. That gap — disclosed as real, live, standalone follow-up
+    // work (`docs/DECISIONS.md` D-140's own "Revisit if," independently
+    // reproduced a second time in D-142) — is now closed structurally:
+    // `getConfig` runs on the same pinned client as everything else in the
+    // check, so a single `productionCheck`/`expand()` call never needs more
+    // than one connection, at any concurrency (see `resolver.ts`'s own doc
+    // comment for the fix). This describe block's own query batches stay
+    // sequential regardless, per the first, still-live reason above.
     const resultsAtT0: boolean[] = [];
     for (const q of fixture.queries) {
       const result = await productionCheck(

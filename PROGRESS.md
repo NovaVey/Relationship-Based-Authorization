@@ -2442,3 +2442,23 @@ Built the one proof mechanism this repo's test suite genuinely lacked: `test/uni
 This closes the fourth and final of the four audits requested after the live-verification doc audit (D-139 → D-140 → D-141 → this entry).
 
 Full account: `docs/DECISIONS.md` D-142.
+
+## Connection-exhaustion deadlock fixed — `getConfig` shares its check's own pinned connection (D-143), closing D-140's and D-142's own "Revisit if"
+
+**Owner:** the main agent.
+
+Asked to fix the connection-exhaustion deadlock D-140 disclosed as a byproduct and D-142 independently reproduced live a second time. Root cause: every `productionCheck`/`expand()` call already pins one `REPEATABLE READ` connection for its whole life, but `getConfig`'s `namespace_configs` lookup ran on a _second_, separate pool connection instead of that same pinned one — under N concurrent checks with N ≥ `pool.max`, every connection gets consumed by pinned clients before any check can obtain the second connection its own `getConfig` needs. A genuine deadlock, not a slowdown: confirmed hanging 2+ minutes under `pool.max: 4` with 10 concurrent checks before this fix (D-142's own finding).
+
+**Fixed by choosing the strongest of D-140's own three named options**: make `getConfig` share its check's own pinned connection, removing the second-connection dependency entirely, rather than documenting or enforcing `MAX_CONCURRENCY < pool.max` numerically. This closes the whole hazard class for every caller of `productionCheck` or `expand()` permanently, not just the one instance (`runSoundnessFuzz`'s `checkAllQueries`) D-140/D-142 happened to reproduce it through.
+
+**Both files that had the gap, fixed together** — `resolver.ts`'s own doc comment had already flagged `expand.ts` as carrying the identical, already-reasoned gap: `WalkContext`'s `pool` field removed entirely from both; `getConfig` now queries via `ctx.client`. The DST fake's `latestNamespaceConfigHandler` (`shapes.ts`) had to be made snapshot-aware to match, since `getConfig` now genuinely runs inside a real snapshot transaction — the same `visibleAsOf`-filtering pattern three other handlers already use, with the supporting `commitSeq` field already in place and already correctly populated.
+
+**A real, silent ripple effect found by running the full suite proactively, not assumed away because nothing turned red.** Fixing the deadlock shifts every real statement number two DST test files count pause/crash points against — but the property those tests check (snapshot isolation holds at any post-anchor point) is robust to _which_ exact statement a pause lands after, so nothing failed. Left alone, each test's actual claimed coverage (which specific query-pair boundary gets exercised) would have silently narrowed with no red test ever flagging it. Re-derived every shifted value empirically, via a temporary trace instrumentation added and then cleanly removed (byte-clean `git diff --stat` afterward), rather than by hand: `production-check.dst.test.ts`'s D-092 phantom-witness pause point, `token-pin-coverage.dst.test.ts`'s four shared pause-point arrays (69/69 tests, up from fewer — the arrays generate more `it.each` cases), and `expand.test.ts`'s two hand-written mocks (which had `namespace_configs` wired only into the now-unused `pool.query` mock, with an assertion baking in the old routing — fixed and inverted).
+
+**Decisively verified live.** Reproduced D-142's exact hanging scenario (`pool.max: 4`, 10 concurrent `productionCheck` calls) against real Postgres via a temporary, uncommitted script. Before: hung 2+ minutes. After: **35ms, all 10 checks correct.**
+
+**Per D-140's and D-142's own "Revisit if," tried and failed to strengthen the epoch-fence load test using the now-safe smaller pool** — now that a small `pool.max` no longer risks a hang, re-ran `concurrent-load.integration.test.ts`'s epoch-fence race with `max: 4` and the epoch guard disabled, 4 repeated runs. Still never caught the race, confirming D-142's own conclusion stands: `Promise.all`'s eager evaluation order, not pool contention, is the limiting factor. Reverted the experiment cleanly; both integration files (`concurrent-load.integration.test.ts`, `algebraic-properties.integration.test.ts`) got a doc-comment-only update recording the fix, independently re-run live and confirmed byte-clean afterward.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .` all clean. Root fast suite: 56 files, 811 tests (up from 56/796). Both touched real-Postgres integration files re-run live via LOCALVERIFY and confirmed passing and byte-clean.
+
+Full account: `docs/DECISIONS.md` D-143.

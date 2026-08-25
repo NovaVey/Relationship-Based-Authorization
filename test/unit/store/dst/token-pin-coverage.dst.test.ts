@@ -215,10 +215,25 @@ async function expectOk(
 //      first REAL query, so THIS is what anchors the snapshot when pinned
 //   2'. [unpinned] the walk's own first real read IS statement 2, and IS
 //      what anchors the snapshot instead — same position, different query
-//   3..N. every further relation_tuples read the walk's own rewrite tree
-//      needs (frontier + tuples-on-frontier per relation-membership check;
-//      one listTupleSubjects per tupleToUserset hop)
+//   3..N. every further read the walk's own rewrite tree needs: one
+//      `getConfig` `namespace_configs` lookup per DISTINCT namespace the
+//      walk touches (memoized per namespace by `WalkContext.schemaCache` —
+//      a second lookup on an already-seen namespace is a cache hit, not a
+//      new statement), plus every `relation_tuples` read (frontier +
+//      tuples-on-frontier per relation-membership check; one
+//      `listTupleSubjects` per tupleToUserset hop)
 //   N+1. COMMIT
+//
+// **`getConfig` used to run on a separate, un-pinned `pool` connection and
+// never touched this count at all — it now runs on this same pinned
+// client** (closing a real connection-exhaustion deadlock; see
+// `resolver.ts`'s own doc comment and `docs/DECISIONS.md` for the full
+// history), inserting one new statement per distinct namespace, always
+// positioned immediately before that namespace's first relation/tuple read.
+// Every point-array below was re-traced empirically against the fixed code
+// (a temporary `DST_TRACE_STATEMENTS`-gated log line in `connection.ts`,
+// confirmed and reverted before this fix shipped) — not just shifted by
+// hand — per this file's own top-of-file "read, not guessed" discipline.
 //
 // "Post-anchor" pause points therefore always start at 2 (pinned: right
 // after the floor check; unpinned: right after the first real read) and run
@@ -234,29 +249,39 @@ async function expectOk(
  * TRUE branch, never on a false one. Every fixture below is deliberately
  * constructed so `branch_one` is false and `branch_two` is what the check
  * actually turns on, forcing both branches — and therefore the full 4-query
- * sequence — to run every time. Pinned: BEGIN(1) tokencheck(2, anchors)
- * frontier-a(3) tuples-a(4) frontier-b(5) tuples-b(6) COMMIT(7) — post-
- * anchor boundaries {2,3,4,5,6}. Unpinned: BEGIN(1) frontier-a(2, anchors)
- * tuples-a(3) frontier-b(4) tuples-b(5) COMMIT(6) — post-anchor boundaries
- * {2,3,4,5}. Intersection and exclusion below share this identical 4-query,
- * 2-relation-check shape (see each fixture's own note for why), so the
- * exact same two point-arrays are reused for all three.
+ * sequence — to run every time. Both branches check relations on the SAME
+ * object/namespace, so `getConfig` is called twice (once per `resolve()`
+ * entry, one per branch) but only issues ONE real statement — the second
+ * call is a `schemaCache` hit. Pinned: BEGIN(1) tokencheck(2, anchors)
+ * getConfig(3) frontier-a(4) tuples-a(5) frontier-b(6) tuples-b(7)
+ * COMMIT(8) — post-anchor boundaries {2,3,4,5,6,7}. Unpinned: BEGIN(1)
+ * getConfig(2, anchors) frontier-a(3) tuples-a(4) frontier-b(5) tuples-b(6)
+ * COMMIT(7) — post-anchor boundaries {2,3,4,5,6}. Intersection and
+ * exclusion below share this identical shape (see each fixture's own note
+ * for why), so the exact same two point-arrays are reused for all three.
  */
-const TWO_RELATION_CHECK_POST_ANCHOR_PINNED_POINTS = [2, 3, 4, 5, 6];
-const TWO_RELATION_CHECK_POST_ANCHOR_UNPINNED_POINTS = [2, 3, 4, 5];
+const TWO_RELATION_CHECK_POST_ANCHOR_PINNED_POINTS = [2, 3, 4, 5, 6, 7];
+const TWO_RELATION_CHECK_POST_ANCHOR_UNPINNED_POINTS = [2, 3, 4, 5, 6];
 
 /**
- * t2u_object's `view = parent_link->view` issues exactly one
- * `listTupleSubjects` query (the `parent_link` hop) followed by one
- * relation-membership check (frontier+tuples) on whatever it points to —
- * 3 real queries total, one fewer than the two-relation-check shape above.
- * Pinned: BEGIN(1) tokencheck(2, anchors) listTupleSubjects(3) frontier(4)
- * tuples(5) COMMIT(6) — post-anchor boundaries {2,3,4,5}. Unpinned:
- * BEGIN(1) listTupleSubjects(2, anchors) frontier(3) tuples(4) COMMIT(5) —
- * post-anchor boundaries {2,3,4}.
+ * t2u_object's `view = parent_link->view` issues one `getConfig` lookup for
+ * `t2u_object` itself, one `listTupleSubjects` query (the `parent_link`
+ * hop), a SECOND `getConfig` lookup for `t2u_target` (a genuinely different
+ * namespace from `t2u_object` — `schemaCache` doesn't help across the hop,
+ * so this really is a second real statement, not a cache hit), then one
+ * relation-membership check (frontier+tuples) on whatever it points to — 5
+ * real queries total, ending up with the identical statement COUNT as the
+ * two-relation-check shape above despite having a structurally different
+ * shape (2 namespaces × fewer relation-membership checks each, vs. 1
+ * namespace × more). Pinned: BEGIN(1) tokencheck(2, anchors)
+ * getConfig-object(3) listTupleSubjects(4) getConfig-target(5) frontier(6)
+ * tuples(7) COMMIT(8) — post-anchor boundaries {2,3,4,5,6,7}. Unpinned:
+ * BEGIN(1) getConfig-object(2, anchors) listTupleSubjects(3)
+ * getConfig-target(4) frontier(5) tuples(6) COMMIT(7) — post-anchor
+ * boundaries {2,3,4,5,6}.
  */
-const TUPLE_TO_USERSET_POST_ANCHOR_PINNED_POINTS = [2, 3, 4, 5];
-const TUPLE_TO_USERSET_POST_ANCHOR_UNPINNED_POINTS = [2, 3, 4];
+const TUPLE_TO_USERSET_POST_ANCHOR_PINNED_POINTS = [2, 3, 4, 5, 6, 7];
+const TUPLE_TO_USERSET_POST_ANCHOR_UNPINNED_POINTS = [2, 3, 4, 5, 6];
 
 // ---------------------------------------------------------------------------
 // Property 7a — forward-direction coverage expansion.

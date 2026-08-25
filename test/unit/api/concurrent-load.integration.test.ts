@@ -43,35 +43,40 @@
  * was fail-checked the way this project's own established discipline
  * requires: `CheckCache.trySet`'s epoch guard was disabled live
  * (`src/resolve/production/cache.ts`) and this file's own test re-run
- * against the mutation, both as a plain one-delete-vs-one-check race and,
- * after that didn't reproduce it, as a one-delete-vs-ten-concurrent-checks
- * burst. Neither ever caught it — confirmed clean across repeated runs
- * against the mutation, not just once. The reason, reasoned through and
- * then independently confirmed live: `Promise.all([del(), post()])`
+ * against the mutation, as (1) a plain one-delete-vs-one-check race, (2) a
+ * one-delete-vs-ten-concurrent-checks burst, and — after the connection-
+ * exhaustion deadlock below was fixed, revisiting this exact limitation per
+ * that fix's own "Revisit if" — (3) the same burst again, this time against
+ * a deliberately small `pg.Pool` (`max: 4`) to force more genuine
+ * scheduling contention, now that doing so no longer risks the hang (2) and
+ * (3) both used to. **None of the three ever caught it**, confirmed clean
+ * across repeated runs, not just once. The reason, reasoned through and
+ * independently confirmed live twice: `Promise.all([del(), post()])`
  * evaluates its array eagerly, left to right, giving the delete's own
- * `fetch()` a small but *real and consistent* head start on this
- * sandbox's fast, jitter-free Postgres/loopback path — real concurrent
- * timing here isn't landing inside the microsecond-scale unsafe window the
- * way DST deliberately constructs it to. Deliberately reducing the test's
- * own `pg.Pool`'s `max` to force more genuine scheduling variance was
- * tried and **independently reproduced this project's own already-disclosed
- * D-140 hazard live**: `productionCheck`'s pinned-connection-plus-
- * `getConfig` pattern under `max: 4` with 10 concurrent checks hung outright
- * (killed after 2 minutes, not a flake) — exactly the `MAX_CONCURRENCY`/
- * pool-`max` connection-exhaustion deadlock D-140's own "Revisit if" already
- * named as real, live, standalone follow-up work, now confirmed by a second,
- * independent live reproduction rather than left as a single prior
- * observation. Not pursued further here — deliberately constructing a test
- * that risks tripping a known, disclosed, *unfixed* deadlock hazard in CI
- * would trade one honest gap for a flaky, hanging test suite, a strictly
- * worse outcome. The epoch fence itself is not unverified: D-135's own
- * dedicated unit test and this project's own mutation-testing pass
- * (`docs/DECISIONS.md` D-141) both already fail-check this exact mechanism
- * deterministically, by DST's own controlled construction — what this file
- * adds instead is different, complementary evidence, proven, not assumed:
- * across many independent real trials over genuine concurrent HTTP traffic,
- * the system is never observably wrong at rest, and nothing crashes, hangs,
- * or double-counts under real concurrent load.
+ * `fetch()` a small but *real and consistent* head start that dominates
+ * real timing here regardless of connection-pool contention — real
+ * concurrent timing on this sandbox's fast, jitter-free loopback path
+ * isn't landing inside the microsecond-scale unsafe window the way DST
+ * deliberately constructs it to, and shrinking the pool changes *how much*
+ * genuine scheduling variance exists without changing *which* request
+ * reliably finishes first. The epoch fence itself is not left unverified by
+ * this: D-135's own dedicated unit test and this project's own
+ * mutation-testing pass (`docs/DECISIONS.md` D-141) both already
+ * fail-check this exact mechanism deterministically, by DST's own
+ * controlled construction — what this file adds instead is different,
+ * complementary evidence, proven, not assumed: across many independent
+ * real trials over genuine concurrent HTTP traffic, the system is never
+ * observably wrong at rest, and nothing crashes, hangs, or double-counts
+ * under real concurrent load.
+ *
+ * **The connection-exhaustion deadlock itself is fixed, not merely
+ * disclosed, as of `docs/DECISIONS.md`, the entry closing D-140's own
+ * "Revisit if" and D-142's own experiment above.** `getConfig`
+ * (`resolver.ts`/`expand.ts`) no longer needs a second pool connection at
+ * all — see `resolver.ts`'s own doc comment for the fix. The decisive live
+ * proof: the exact scenario that hung for 2+ minutes when first found
+ * (`max: 4`, 10 concurrent `productionCheck` calls) now completes in
+ * single-digit milliseconds, confirmed directly, not assumed.
  *
  * Real, ephemeral Postgres via `PostgreSqlContainer` — see
  * `docs/DECISIONS.md` D-019/D-030 (every `*.integration.test.ts` file

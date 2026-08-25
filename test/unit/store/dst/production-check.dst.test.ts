@@ -193,17 +193,22 @@ describe('D-106 — a connection that dies after BEGIN but before COMMIT never h
  * relation (no tuple-to-userset hop), is exactly: (1)
  * `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`, (2)
  * `assertTokenObservedOnSnapshot`'s floor check — the statement that
- * anchors the snapshot — (3) `fetchReachableFrontier`, (4)
- * `fetchTuplesOnFrontier`, (5) `COMMIT`. (`getConfig`'s own
- * `namespace_configs` lookup runs on a *different* connection — the plain
- * `pool` — and never touches this count; see `resolver.ts`'s own doc
- * comment.) `pauseAfterStatements: 2` therefore pauses right after the
- * snapshot anchors, before the frontier fetch; `3` pauses between the
- * frontier fetch and the tuple-on-frontier fetch — the exact query pair
- * D-092's own counterexample was about.
+ * anchors the snapshot — (3) `getConfig`'s own `namespace_configs` lookup
+ * (4) `fetchReachableFrontier`, (5) `fetchTuplesOnFrontier`, (6) `COMMIT`.
+ * (`getConfig` used to run on a *different* connection — the plain `pool`
+ * — and never touched this count at all; it now runs on this same pinned
+ * client, closing a real connection-exhaustion deadlock — see
+ * `resolver.ts`'s own doc comment, and `docs/DECISIONS.md`, for the full
+ * history. Traced empirically against this exact fixture, not assumed, via
+ * a temporary `DST_TRACE_STATEMENTS`-gated log line in `connection.ts`,
+ * confirmed and reverted before this fix shipped.) `pauseAfterStatements:
+ * 2` therefore pauses right after the snapshot anchors, before `getConfig`
+ * and the frontier fetch; `4` pauses between the frontier fetch and the
+ * tuple-on-frontier fetch — the exact query pair D-092's own counterexample
+ * was about, now one statement later than it used to be.
  */
 describe('the D-092 phantom-witness regression, reproduced through the fake and generalized across seeds (D-099)', () => {
-  it.each([2, 3])(
+  it.each([2, 4])(
     'pauseAfterStatements=%i: a grant committed while the check is paused mid-snapshot is invisible to that checks own result, even though a fresh check afterward sees it',
     async (pausePoint) => {
       const { state, source } = freshPlainSource();
@@ -279,7 +284,9 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
     'seed=%s: the same non-observation property holds across varied object/subject identifiers and pause points',
     async (seed) => {
       const rng = dstRngFromSeed(seed);
-      const pausePoint = rng.pick([2, 3]);
+      // [2, 4] — see the describe block's own doc comment above for the
+      // real statement sequence these two positions correspond to.
+      const pausePoint = rng.pick([2, 4]);
       const objectId = `racy_${seed}`;
       const subjectId = `user_${seed}`;
 
