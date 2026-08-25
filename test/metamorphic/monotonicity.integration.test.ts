@@ -46,36 +46,36 @@
  * is instead justified by the strict single-threaded ordering this test
  * enforces on itself, stated explicitly at each use.
  *
- * **Convention — deviates from `test/isolation/differential-soundness.fuzz
+ * **Convention — now matches `test/isolation/differential-soundness.fuzz
  * .integration.test.ts`/`test/metamorphic/algebraic-properties
- * .integration.test.ts`'s own `PostgreSqlContainer` precedent, deliberately,
- * for this execution environment specifically.** Those sibling files start
- * their own ephemeral `PostgreSqlContainer` via Docker
- * (`@testcontainers/postgresql`) precisely so no environment-specific
- * connection string is ever hardcoded (`docs/DECISIONS.md` D-019/D-030: a
- * hardcoded connection string has already broken CI twice on this project).
- * This sandbox has the `docker` CLI present but no reachable daemon
- * (confirmed directly: `docker ps` fails with "Cannot connect to the Docker
- * daemon"), so `PostgreSqlContainer.start()` fails outright here
- * (`getContainerRuntimeClient`: "Could not find a working container runtime
- * strategy") — this is not a hypothetical concern, it was tried first and
- * observed to fail before switching approaches. Per this task's own
- * explicit instruction ("DATABASE_URL is already set in .env, a live local
- * Postgres is reachable"), this file instead connects directly via
- * `process.env.DATABASE_URL` — confirmed live and reachable, with this
- * project's own migrations already applied (`schema_migrations`,
- * `namespace_configs`, `relation_tuples`, `write_log`, `checks`,
- * `soundness_runs` all present) — rather than attempting a container start
- * this environment cannot satisfy. `runMigrations` is still called
- * (idempotent against an already-migrated database — see `src/store/
- * migrate.ts`'s own contract) so this file is not silently dependent on
- * that pre-applied state either. Every namespace/object/subject name below
- * is still freshly salted per seed/trial (`uniqueName`, matching every
+ * .integration.test.ts`'s own `PostgreSqlContainer` precedent; it briefly
+ * deviated from it and that turned out to be a real bug, not a viable
+ * accommodation.** This file originally connected directly via
+ * `process.env.DATABASE_URL`, because the sandbox it was first written in
+ * had the `docker` CLI present but no reachable daemon (`docker ps`:
+ * "Cannot connect to the Docker daemon"), so `PostgreSqlContainer.start()`
+ * failed outright there. That reasoning didn't generalize: real CI
+ * (`.github/workflows/ci.yml`'s `test-integration` job) runs every sibling
+ * `PostgreSqlContainer`-based file successfully in the same job this file
+ * runs in, and never sets `DATABASE_URL` — so this file's own
+ * direct-connection form was the one integration test in the repo
+ * guaranteed to fail there unconditionally, caught live the first time this
+ * PR's own CI ran (`docs/DECISIONS.md` D-140's follow-up). Fixed by
+ * switching to the same ephemeral `PostgreSqlContainer` every sibling file
+ * already uses (`@testcontainers/postgresql`) — no environment-specific
+ * connection string hardcoded (`docs/DECISIONS.md` D-019/D-030: a hardcoded
+ * connection string has already broken CI twice on this project). A sandbox
+ * that genuinely lacks a reachable Docker daemon (as the one this fix was
+ * written in still does) uses this repo's own established LOCALVERIFY
+ * accommodation instead — swap this file's container-based `beforeAll`/
+ * `afterAll` for a direct `DATABASE_URL` pool, run, then restore the exact
+ * committed, container-based form before shipping — never a permanent
+ * change to the committed file itself. `runMigrations` is still called
+ * against the fresh container (matching every sibling file) so this file
+ * never depends on any state existing beforehand. Every namespace/object/subject name below
+ * is still freshly salted per seed/trial (`uniqueName` below, matching every
  * sibling `*.integration.test.ts` file's own established per-worker-salt
- * convention) — other agents in this same workflow may be running
- * real-Postgres integration tests concurrently against the SAME live
- * database, so nothing here may assume the database is empty or
- * exclusively its own. `generateFixture` itself independently salts every
+ * convention). `generateFixture` itself independently salts every
  * namespace name from a hash of its own `seed` argument (see `generators
  * .ts`'s own top-of-file doc comment) — passing a `uniqueName`-generated
  * seed here means BOTH layers of salting compose, closing the cross-run
@@ -84,6 +84,7 @@
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import { writeTuple, type TupleKey } from '../../src/store/tuples.js';
 import { publishSchema } from '../../src/schema/publish.js';
@@ -101,30 +102,28 @@ import { runMigrations } from '../../src/store/migrate.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../src/store/migrations', import.meta.url));
 
+let container: StartedPostgreSqlContainer;
 let pool: Pool;
 
 beforeAll(async () => {
-  if (!process.env.DATABASE_URL) {
-    throw new Error(
-      'DATABASE_URL is not set — this file connects to a live local Postgres directly ' +
-        "(see this file's own top-of-file doc comment for why it deviates from the " +
-        'PostgreSqlContainer-per-file convention used elsewhere in this repo).',
-    );
-  }
-  pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  pool = new Pool({ connectionString: container.getConnectionUri() });
   pool.on('error', (err) => {
     // pg's own documented contract — see the identical comment in every
     // sibling *.integration.test.ts file in this repo: without this, an
-    // idle client hitting a background/network-level error crashes the
-    // whole test run with an unhandled 'error' event, even though every
-    // real assertion already passed. Logged, not swallowed.
-    console.error(`pool error: ${err.message}`);
+    // idle client hitting a background/network-level error (most commonly
+    // this file's own container being stopped in afterAll while a pooled
+    // connection was still technically open) crashes the whole test run
+    // with an unhandled 'error' event, even though every real assertion
+    // already passed. Logged, not swallowed.
+    console.error(`pool error (expected during container teardown): ${err.message}`);
   });
   await runMigrations(pool, MIGRATIONS_DIR);
 }, 180_000);
 
 afterAll(async () => {
   await pool.end();
+  await container.stop();
 });
 
 // ---------------------------------------------------------------------------
