@@ -35,14 +35,22 @@ function compileDocumentNamespace(): NamespaceConfig {
 describe('D-107: expand() runs every relation_tuples read on one pinned connection, inside one transaction', () => {
   it('relation-tuples-reads-go-through-the-connected-client-never-the-raw-pool-directly', async () => {
     const namespaceConfig = compileDocumentNamespace();
-    const clientQuery = vi.fn(async (_sql: string) => ({ rows: [], rowCount: 0 }));
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes('namespace_configs')) {
+        return { rows: [{ config: namespaceConfig }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
     const clientRelease = vi.fn();
     const client = { query: clientQuery, release: clientRelease };
     const poolConnect = vi.fn(async () => client);
-    const poolQuery = vi.fn(async (_sql: string) => ({
-      rows: [{ config: namespaceConfig }],
-      rowCount: 1,
-    }));
+    // Never expected to be called at all — see the assertion below.
+    const poolQuery = vi.fn(async (_sql: string) => {
+      throw new Error(
+        'unexpected: nothing should call pool.query() directly — getConfig now runs on ' +
+          'the pinned client, closing the connection-exhaustion deadlock (docs/DECISIONS.md)',
+      );
+    });
     const pool = { query: poolQuery, connect: poolConnect } as unknown as ConnectionSource;
 
     const result = await expand(pool, { ns: 'document', id: 'readme' }, 'viewer');
@@ -66,28 +74,32 @@ describe('D-107: expand() runs every relation_tuples read on one pinned connecti
     expect(clientSqlCalls.at(-1)).toBe('COMMIT');
     expect(clientSqlCalls.some((sql) => sql.includes('relation_tuples'))).toBe(true);
 
-    // The one deliberate, disclosed exception (this fix's own doc comment
-    // on WalkContext/getConfig, mirroring resolver.ts's identical
-    // already-reasoned getConfig gap): schema-config reads still go
-    // through the raw pool, never the pinned client.
-    expect(poolQuery).toHaveBeenCalled();
-    const poolSqlCalls = poolQuery.mock.calls.map(([sql]) => sql);
-    expect(poolSqlCalls.every((sql) => sql.includes('namespace_configs'))).toBe(true);
-    expect(clientSqlCalls.some((sql) => sql.includes('namespace_configs'))).toBe(false);
+    // The connection-exhaustion-deadlock fix (`docs/DECISIONS.md`, the
+    // entry closing D-140's own "Revisit if"): `getConfig`'s
+    // `namespace_configs` lookup now runs on this same pinned client too —
+    // a check/expand call only ever needs exactly one connection from the
+    // pool for its entire life, never two. `pool.query()` itself is never
+    // called at all once a connection has been obtained; only
+    // `pool.connect()` is (asserted above).
+    expect(poolQuery).not.toHaveBeenCalled();
+    expect(clientSqlCalls.some((sql) => sql.includes('namespace_configs'))).toBe(true);
   });
 
   it('a-thrown-error-mid-walk-still-releases-the-connection-and-attempts-a-guarded-rollback', async () => {
     const clientQuery = vi.fn(async (sql: string) => {
       if (sql.includes('relation_tuples')) throw new Error('simulated read failure');
+      if (sql.includes('namespace_configs')) {
+        return { rows: [{ config: compileDocumentNamespace() }], rowCount: 1 };
+      }
       return { rows: [], rowCount: 0 };
     });
     const clientRelease = vi.fn();
     const client = { query: clientQuery, release: clientRelease };
     const pool = {
-      query: vi.fn(async () => ({
-        rows: [{ config: compileDocumentNamespace() }],
-        rowCount: 1,
-      })),
+      // Never expected to be called — see the sibling test's own identical assertion.
+      query: vi.fn(async () => {
+        throw new Error('unexpected: nothing should call pool.query() directly');
+      }),
       connect: vi.fn(async () => client),
     } as unknown as ConnectionSource;
 

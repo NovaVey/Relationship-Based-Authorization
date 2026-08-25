@@ -454,6 +454,86 @@ describe('a tuple write is validated against the latest published schema for its
   });
 });
 
+/**
+ * Closes a real, confirmed coverage gap found by this project's own
+ * mutation-testing pass (`docs/DECISIONS.md`, the entry documenting this
+ * batch): `validateAgainstSchema`'s `subjectTypeAllowed` check
+ * (`src/store/tuples.ts`) requires a declared `subjectTypes` entry to match
+ * a write's `(subjectNs, subjectRelation)` pair on *both* fields at once —
+ * `st.namespace === tuple.subjectNs && st.relation === tuple.subjectRelation`
+ * — and every existing test in this repo happened to only ever exercise
+ * writes where either both halves of some declared entry matched, or
+ * neither did. A mutation weakening that `&&` to `||` was applied live and
+ * confirmed to evade every one of them: 793/793 fast tests and every
+ * relevant real-Postgres test in this very file that could run under this
+ * sandbox's container-free LOCALVERIFY substitution stayed green.
+ *
+ * The gap it hides: a relation declaring both a plain subject type (e.g.
+ * `user`, whose `relation` field is `undefined`) and an unrelated userset
+ * type (e.g. `group#member`) makes `||` satisfiable by mixing halves from
+ * two *different* declared entries — a PLAIN `group:eng` write (no
+ * `subjectRelation` at all) matches the `user` entry's `relation ===
+ * undefined` half even though its `namespace` half plainly does not, and
+ * `.some()` returns true. The write is wrongly accepted even though this
+ * relation never declared plain `group` as an allowed subject type at
+ * all — only `group#member` (a userset) is. At check time this stored,
+ * invalid tuple is a literal, `subject_relation is null` grant to the
+ * entity `group:eng` itself, not to "members of group:eng" — a false
+ * grant to any check that happens to name `group:eng` directly as the
+ * checked subject.
+ */
+describe('a plain subject can never sneak in by matching only half of a different declared entry — closes a mutation-testing gap in validateAgainstSchema', () => {
+  function editorWithPlainAndUsersetTypesSource(ns: string, groupNs: string): string {
+    return [`namespace ${ns} {`, `  relation editor: user | ${groupNs}#member`, '}'].join('\n');
+  }
+
+  it('a-plain-group-subject-with-no-subjectRelation-is-rejected-even-though-user-plain-and-group-member-userset-are-each-independently-declared', async () => {
+    const ns = uniqueName('doc');
+    const groupNs = uniqueName('group');
+    const result0 = await publishSchema(pool, editorWithPlainAndUsersetTypesSource(ns, groupNs));
+    if (!result0.ok)
+      throw new Error(`fixture schema failed to publish: ${result0.errors.join('; ')}`);
+
+    // No subjectRelation at all — a PLAIN group:eng subject. `editor`
+    // declares `user` (plain) and `${groupNs}#member` (userset) — never
+    // plain `${groupNs}` itself.
+    const result = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: uniqueName('obj'),
+      relation: 'editor',
+      subjectNs: groupNs,
+      subjectId: 'eng',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((e) => e.code === 'subject_type_not_allowed')).toBe(true);
+  });
+
+  it('control-the-same-groupNs-member-userset-subject-with-subjectRelation-set-is-genuinely-accepted', async () => {
+    // Same schema, same groupNs — rules out "this fixture just rejects
+    // everything about groupNs" as an alternative explanation for the test
+    // above passing, and confirms `${groupNs}#member` really is a validly
+    // declared subject type on this exact relation.
+    const ns = uniqueName('doc');
+    const groupNs = uniqueName('group');
+    const result0 = await publishSchema(pool, editorWithPlainAndUsersetTypesSource(ns, groupNs));
+    if (!result0.ok)
+      throw new Error(`fixture schema failed to publish: ${result0.errors.join('; ')}`);
+
+    const result = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: uniqueName('obj'),
+      relation: 'editor',
+      subjectNs: groupNs,
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe('a tuple-to-userset subject is also validated against the SUBJECT namespace — full-repo audit finding #2', () => {
   // D-012's own "soft" cross-namespace check means a `document` namespace
   // compiled and published entirely on its own — never in the same

@@ -19,6 +19,7 @@ syntactically distinct on purpose:
 
 ```
 namespace document {
+  relation parent: folder
   relation owner: user
   relation editor: user | group#member
   relation viewer: user | group#member
@@ -109,6 +110,7 @@ answers the permission).
 ```
 namespace folder {
   relation parent: folder
+  ...
   permission edit = editor | owner | parent->edit
 }
 ```

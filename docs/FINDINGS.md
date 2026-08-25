@@ -1,8 +1,10 @@
 # Third-party schema survey — findings (build spec §10, `CHECKPOINT 6`)
 
-Twelve real, published ReBAC schemas this project didn't write — six from
+Twelve real, published ReBAC schemas this project didn't write — five from
 [OpenFGA's `sample-stores`](https://github.com/openfga/sample-stores) and
-six from [SpiceDB's `authzed/examples`](https://github.com/authzed/examples)
+seven from SpiceDB (six from
+[`authzed/examples`](https://github.com/authzed/examples), one from
+[`authzed/docs`](https://github.com/authzed/docs))
 — translated into this repo's own schema DSL
 (`tools/schema-verifier/thirdparty/*.authz`) and checked against invariants
 their own documentation states or clearly implies

@@ -160,3 +160,91 @@ describe('publishSchema — genuinely working end to end through the real, unmod
     expect(state.namespaceConfigs).toHaveLength(2);
   });
 });
+
+/**
+ * Closes a real, confirmed coverage gap found by this project's own
+ * mutation-testing pass (`docs/DECISIONS.md`, the entry documenting this
+ * batch): `publishSchema`'s compile-failure branch (`src/schema/publish.ts`)
+ * returns `{ ok: false, errors: compiled.errors.map(formatSchemaError) }` —
+ * the *actual*, per-error formatted detail, not a generic placeholder.
+ * Every existing test that publishes an invalid schema (including this
+ * file's own `a-compile-failure-publishes-nothing-through-the-fake-either`
+ * above) only ever asserted `result.ok === false`, never inspected
+ * `result.errors`'s own content — so a mutation replacing the real,
+ * specific compiler diagnostic with a generic, information-losing string
+ * was applied live and confirmed to evade every one of them: 793/793 fast
+ * tests stayed green. A caller (the CLI's `authz schema publish`, the
+ * report layer) relying on `result.errors` to tell an operator *which*
+ * namespace/relation/permission actually failed to compile would silently
+ * lose that detail.
+ */
+describe('a compile failure surfaces the real compiler diagnostic, not a generic placeholder — closes a mutation-testing gap', () => {
+  it('the-returned-error-names-the-actual-undeclared-relation-the-compiler-rejected', async () => {
+    const { source } = freshSource();
+
+    const result = await publishSchema(source, INVALID_SCHEMA);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // `formatSchemaError` on an `undeclared_relation_reference` error names
+    // the actual offending identifier — see `src/schema/dsl/errors.ts` —
+    // so this is real, specific compiler detail, not a static placeholder a
+    // generic "schema compilation failed" string would also satisfy.
+    expect(result.errors.some((e) => e.includes('nonexistent_relation'))).toBe(true);
+  });
+});
+
+/**
+ * Closes a second real, confirmed coverage gap found by this project's own
+ * mutation-testing pass (`docs/DECISIONS.md`, the entry documenting this
+ * batch): `publishSchema`'s catch block (`src/schema/publish.ts`) wraps its
+ * own cleanup `ROLLBACK` in a nested try/catch specifically so a *second*,
+ * unrelated failure from a connection that's already dead can never replace
+ * the real error the transaction actually failed with — the identical
+ * pattern `production-check.dst.test.ts`'s own D-106 describe block already
+ * regression-tests for `productionCheck`, and `src/store/tuples.ts`'s
+ * `writeTuple`/`deleteTuple` catch blocks apply too (this function's own
+ * doc comment cites both). Unlike D-106, this exact path had never been
+ * independently proven for `publishSchema` itself — every existing test
+ * that exercises a `publishSchema` failure is the pure compile-failure path
+ * above, which returns *before* `client.connect()` is ever called and never
+ * touches this catch block at all. A mutation removing the nested
+ * try/catch (letting the cleanup `ROLLBACK`'s own failure propagate in
+ * place of the real crash) was applied live and confirmed to evade every
+ * existing test: 793/793 fast tests stayed green.
+ */
+describe('D-106-equivalent for publishSchema — a connection that dies mid-transaction never has its own real error masked by a ROLLBACK failure — closes a mutation-testing gap', () => {
+  it('the-error-publishSchema-throws-is-the-original-crash-not-a-rollback-failure-error', async () => {
+    const { source } = freshSource();
+    // Statement 0 is `BEGIN` (publishSchema's own first query, before
+    // publishOne's advisory lock) — crashAfterStatements: 1 lets that one
+    // statement succeed, then crashes the very next query publishOne
+    // issues (`pg_advisory_xact_lock`), reproducing "BEGIN succeeded, the
+    // publish itself then failed" — exactly inside the transaction the
+    // catch block's own cleanup ROLLBACK runs against.
+    source.armNextConnectionCrash(1);
+
+    await expect(publishSchema(source, DOCUMENT_SCHEMA)).rejects.toThrow(
+      /simulated crash — connection terminated mid-statement/,
+    );
+  });
+
+  it('control-the-same-crash-point-would-throw-a-different-rollback-failure-message-if-the-catch-blocks-own-rollback-were-unprotected', async () => {
+    // Not a test of production code — a direct proof that this file's own
+    // fake connection really does behave the way the finding/fix above
+    // assumes: once dead, every subsequent `.query()` (including the
+    // `ROLLBACK` an unprotected catch block would have issued) throws a
+    // second, different error. If this ever stopped being true, the
+    // "not masked" assertion above would no longer mean anything.
+    const { source } = freshSource();
+    source.armNextConnectionCrash(1);
+    const client = await source.connect();
+    await expect(client.query('BEGIN')).resolves.toBeDefined();
+    await expect(
+      client.query('select pg_advisory_xact_lock(hashtext($1))', ['document']),
+    ).rejects.toThrow(/simulated crash — connection terminated mid-statement/);
+    await expect(client.query('ROLLBACK')).rejects.toThrow(
+      /query issued on a connection that has already crashed/,
+    );
+  });
+});

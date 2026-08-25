@@ -846,6 +846,120 @@ describe('a subject_relation-based (stored-tuple) reconvergent diamond does not 
   });
 });
 
+/**
+ * Closes a second real, confirmed coverage gap found by this project's own
+ * mutation-testing pass (`docs/DECISIONS.md`, the entry documenting this
+ * batch): `fetchReachableFrontier`'s recursive CTE (`resolver.ts`) joins
+ * `relation_tuples rt` to the frontier `membership m` on `rt.object_ns =
+ * m.ns and rt.object_id = m.id and rt.relation = m.relation` — three
+ * predicates, not two. Dropping only the third (`rt.relation = m.relation`)
+ * was applied live against real Postgres and confirmed to evade every
+ * existing test in this repo, fast suite and real-Postgres integration
+ * suite alike: 792/792 fast tests stayed green, and every other fixture in
+ * *this* file stayed green too, because no existing fixture ever puts two
+ * different userset-carrying relations on the same object. Without that
+ * predicate the recursive CTE's join is only object-scoped, not
+ * relation-scoped: a userset tuple stored under one relation on an object
+ * (e.g. `admin`) leaks into the transitive frontier of a *different*
+ * relation on that same object (e.g. `member`), and anyone reachable
+ * through the first relation's userset edge is wrongly treated as reachable
+ * through the second.
+ *
+ * The fixture below proves it directly: `group:target` carries only an
+ * `admin` tuple pointing at the userset `group:leaky#member` — no tuple of
+ * any kind names `target`'s `member` relation. `group:leaky` in turn has a
+ * plain `member` grant to `user:eve`. Correctly, `eve` is nowhere in
+ * `target`'s `member` frontier (the seed row's own relation, `member`,
+ * never matches `admin`'s stored tuple) and the check is denied. Under the
+ * mutation, the join ignores `rt.relation` entirely, so `admin`'s edge to
+ * `leaky#member` is followed anyway, `leaky` enters the (wrongly
+ * relation-blind) frontier, and `eve`'s plain grant there is picked up — a
+ * false grant on a relation `eve` was never actually a member of.
+ */
+describe('a userset tuple stored under one relation never leaks into a different relation on the same object — closes a mutation-testing gap in fetchReachableFrontier', () => {
+  function twoRelationGroupSource(gns: string): string {
+    return [
+      `namespace ${gns} {`,
+      `  relation admin: user | ${gns}#member`,
+      `  relation member: user | ${gns}#member`,
+      '}',
+    ].join('\n');
+  }
+
+  it('eve-is-a-real-member-reachable-only-through-the-sibling-admin-relations-userset-edge-and-is-still-denied-on-the-unrelated-member-relation', async () => {
+    const gns = uniqueName('leakgrp');
+    const schema = await setUpSchema(twoRelationGroupSource(gns));
+    const target = uniqueName('target');
+    const leaky = uniqueName('leaky');
+
+    const tuples: TupleKey[] = [
+      // target's ADMIN relation — not member — points at a userset. No
+      // tuple of any kind names target's `member` relation.
+      tuple(gns, target, 'admin', gns, leaky, 'member'),
+      // A real, plain member grant, but on the unrelated `leaky` group.
+      tuple(gns, leaky, 'member', 'user', 'eve'),
+    ];
+    for (const t of tuples) await writeOk(t);
+
+    const referenceResult = referenceCheck(
+      schema,
+      tuples,
+      ref('user', 'eve'),
+      ref(gns, target),
+      'member',
+    );
+    const productionResult = await productionCheck(
+      pool,
+      ref('user', 'eve'),
+      ref(gns, target),
+      'member',
+    );
+
+    // Hand-derived: target carries zero `member` tuples of any shape —
+    // eve's real membership lives entirely under the sibling `admin`
+    // relation's userset edge, which a correct, relation-scoped frontier
+    // walk must never cross into. Denied.
+    expect(referenceResult.allowed).toBe(false);
+    expect(productionResult.allowed).toBe(false);
+    expect(productionResult.allowed).toBe(referenceResult.allowed);
+  });
+
+  it('control-the-identical-userset-edge-stored-under-member-itself-instead-of-admin-does-grant-through-the-matching-relation', async () => {
+    // Same shape, but the edge is stored under `member` itself — rules out
+    // "this fixture just never grants at all" as an alternative explanation
+    // for the test above passing, and confirms this exact schema/tuple
+    // shape does produce a real grant when the relation genuinely matches.
+    const gns = uniqueName('leakgrp');
+    const schema = await setUpSchema(twoRelationGroupSource(gns));
+    const target = uniqueName('target');
+    const leaky = uniqueName('leaky');
+
+    const tuples: TupleKey[] = [
+      tuple(gns, target, 'member', gns, leaky, 'member'),
+      tuple(gns, leaky, 'member', 'user', 'eve'),
+    ];
+    for (const t of tuples) await writeOk(t);
+
+    const referenceResult = referenceCheck(
+      schema,
+      tuples,
+      ref('user', 'eve'),
+      ref(gns, target),
+      'member',
+    );
+    const productionResult = await productionCheck(
+      pool,
+      ref('user', 'eve'),
+      ref(gns, target),
+      'member',
+    );
+
+    expect(referenceResult.allowed).toBe(true);
+    expect(productionResult.allowed).toBe(true);
+    expect(productionResult.allowed).toBe(referenceResult.allowed);
+  });
+});
+
 describe('depth-budget accounting parity — deep fixtures the earlier 3-level fixtures above cannot catch', () => {
   // The fixtures above top out at three levels, which is nowhere near deep
   // enough to exercise `resolve()`'s depth-budget bookkeeping in

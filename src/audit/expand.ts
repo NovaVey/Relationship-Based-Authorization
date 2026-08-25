@@ -123,45 +123,54 @@ export type ExpandNode =
  * issued 20 separate round trips to `namespace_configs` for the identical
  * namespace, where the production resolver's equivalent walk issues
  * exactly 1.
+ *
+ * `client` is the *only* connection this whole `expand()` call ever needs
+ * — every read (`relation_tuples` via `fetchTuplesOn`, and, as of the
+ * connection-exhaustion-deadlock fix below, `namespace_configs` via
+ * `getConfig`) runs on this one pinned `REPEATABLE READ` client. A separate
+ * `pool` field used to live here for `getConfig` alone, mirroring
+ * `src/resolve/production/resolver.ts`'s own identical, now-closed gap —
+ * see `getConfig`'s own doc comment immediately below for why that was a
+ * real, production-reachable deadlock, not just a theoretical one.
  */
 interface WalkContext {
-  pool: ConnectionSource;
-  /**
-   * One connection, pinned for the life of this `expand()` call, running
-   * inside one `REPEATABLE READ` transaction (D-107) — every
-   * `relation_tuples` read (`fetchTuplesOn`) goes through this, never
-   * `ctx.pool` directly, so the whole walk sees one consistent MVCC
-   * snapshot. `getConfig` below deliberately still uses `ctx.pool`, not
-   * this — see that function's own doc comment for why, mirroring
-   * `src/resolve/production/resolver.ts`'s identical, already-reasoned
-   * `getConfig` gap exactly.
-   */
   client: QueryExecutor;
   maxDepth: number;
   schemaCache: Map<string, NamespaceConfig | null>;
 }
 
 /**
- * Deliberately still reads through `ctx.pool`, not `ctx.client`'s pinned
- * transaction (D-107) — mirroring `src/resolve/production/resolver.ts`'s
- * own identical, already-reasoned `getConfig` gap exactly. The risk the
- * transaction above closes for `relation_tuples` (two reads observing
- * *different* real moments in the database's history) is already narrower
- * for schema config than it looks: `WalkContext.schemaCache` (unchanged)
- * means a given namespace's config is fetched at most once per `expand()`
- * call however many times the walk revisits that namespace, so the
- * dangerous case — the *same* namespace observed at two *different*
- * published versions within one call — was already structurally
- * impossible before this fix and remains so. What's left unclosed is a
- * strictly weaker property (two *different* namespaces each read as of a
- * very slightly different moment if a schema publish, rare and
- * admin-gated, lands mid-walk) — not the phantom-witness scenario D-107
- * exists to close, which is specifically about `relation_tuples`.
+ * Runs on `ctx.client`, this call's own pinned `REPEATABLE READ` connection
+ * — the same connection every other read in this walk uses, not a second
+ * one from the pool. This used to deliberately read through a separate
+ * `ctx.pool` instead, mirroring `src/resolve/production/resolver.ts`'s own
+ * identical, then-reasoned `getConfig` gap: the risk this connection's
+ * `REPEATABLE READ` transaction closes for `relation_tuples` (two reads
+ * observing *different* real moments in the database's history) was
+ * already narrower for schema config than it looked, since
+ * `WalkContext.schemaCache` (unchanged) already made the dangerous case —
+ * the *same* namespace observed at two *different* published versions
+ * within one call — structurally impossible even then.
+ *
+ * That old reasoning is no longer why this runs on `client` — it's a real,
+ * production-reachable connection-exhaustion deadlock that makes a second
+ * connection unsafe to need at all, not just a residual snapshot-
+ * consistency nicety. Under N concurrent `expand()` (or `productionCheck`)
+ * calls at or past the connection pool's own `max`, every connection gets
+ * consumed by the N calls' own pinned `client` acquisitions before any of
+ * them could obtain the second connection `getConfig` used to need — mutual
+ * starvation, confirmed live against real Postgres, not theoretical (see
+ * `src/resolve/production/resolver.ts`'s own doc comment, and
+ * `docs/DECISIONS.md`, for the full history: first disclosed as a byproduct
+ * of an unrelated test, D-140; independently reproduced live a second time,
+ * D-142; closed here, in the same fix that closes `resolver.ts`'s identical
+ * gap). One connection per `expand()` call, for its entire life, regardless
+ * of how many distinct namespaces the walk touches, closes it structurally.
  */
 async function getConfig(ctx: WalkContext, ns: string): Promise<NamespaceConfig | null> {
   const cached = ctx.schemaCache.get(ns);
   if (cached !== undefined) return cached;
-  const config = await getLatestNamespaceConfig(ctx.pool, ns);
+  const config = await getLatestNamespaceConfig(ctx.client, ns);
   const resolved = config ?? null;
   ctx.schemaCache.set(ns, resolved);
   return resolved;
@@ -353,7 +362,7 @@ export async function expand(
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    const ctx: WalkContext = { pool, client, maxDepth, schemaCache: new Map() };
+    const ctx: WalkContext = { client, maxDepth, schemaCache: new Map() };
     const result = await expandName(ctx, object, relationOrPermission, new Set(), 0);
     await client.query('COMMIT');
     return result;

@@ -286,18 +286,25 @@ const maxTokenHandler: ShapeHandler = ({ state, visibleAsOf }) => {
 
 // ---------------------------------------------------------------------------
 // publish.ts's getLatestNamespaceConfig — the one dependency writeTuple's
-// own schema validation pulls in from outside tuples.ts/tokens.ts. Never
-// snapshot-filtered: resolver.ts's own getConfig deliberately runs this on
-// the plain, un-pinned connection, outside productionCheck's REPEATABLE
-// READ transaction (docs/DECISIONS.md D-092's own disclosed scope note) —
-// so `visibleAsOf` is always `undefined` for every real call to this
-// handler, and it is not threaded through here at all, matching that.
+// own schema validation pulls in from outside tuples.ts/tokens.ts.
+// Snapshot-aware (unlike D0's original version of this handler): `getConfig`
+// in both resolver.ts and expand.ts now runs this on their own pinned
+// REPEATABLE READ client (closing the connection-exhaustion deadlock
+// docs/DECISIONS.md documents — see resolver.ts's own doc comment for the
+// full history), so `visibleAsOf` is a real number for every one of those
+// calls, same as listTupleSubjectsHandler/fetchReachableFrontierHandler/
+// fetchTuplesOnFrontierHandler below. Every other real caller —
+// writeTuple/deleteTuple's own schema validation, publishOne's own
+// version-increment lookup — still calls this on the plain, un-pinned pool,
+// so `visibleAsOf` is `undefined` there exactly as before; `isVisible`'s own
+// "no boundary" fallback means this change is purely additive for them,
+// identical to every other handler D2 already made snapshot-aware.
 // ---------------------------------------------------------------------------
 
-const latestNamespaceConfigHandler: ShapeHandler = ({ state, params }) => {
+const latestNamespaceConfigHandler: ShapeHandler = ({ state, params, visibleAsOf }) => {
   const [namespace] = params as [string];
   const rows = state.namespaceConfigs
-    .filter((row) => row.namespace === namespace)
+    .filter((row) => row.namespace === namespace && isVisible(row.commitSeq, visibleAsOf))
     .sort((a, b) => b.version - a.version);
   const top = rows[0];
   if (!top) return { rows: [], rowCount: 0 };

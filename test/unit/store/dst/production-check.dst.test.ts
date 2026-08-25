@@ -193,17 +193,22 @@ describe('D-106 — a connection that dies after BEGIN but before COMMIT never h
  * relation (no tuple-to-userset hop), is exactly: (1)
  * `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`, (2)
  * `assertTokenObservedOnSnapshot`'s floor check — the statement that
- * anchors the snapshot — (3) `fetchReachableFrontier`, (4)
- * `fetchTuplesOnFrontier`, (5) `COMMIT`. (`getConfig`'s own
- * `namespace_configs` lookup runs on a *different* connection — the plain
- * `pool` — and never touches this count; see `resolver.ts`'s own doc
- * comment.) `pauseAfterStatements: 2` therefore pauses right after the
- * snapshot anchors, before the frontier fetch; `3` pauses between the
- * frontier fetch and the tuple-on-frontier fetch — the exact query pair
- * D-092's own counterexample was about.
+ * anchors the snapshot — (3) `getConfig`'s own `namespace_configs` lookup
+ * (4) `fetchReachableFrontier`, (5) `fetchTuplesOnFrontier`, (6) `COMMIT`.
+ * (`getConfig` used to run on a *different* connection — the plain `pool`
+ * — and never touched this count at all; it now runs on this same pinned
+ * client, closing a real connection-exhaustion deadlock — see
+ * `resolver.ts`'s own doc comment, and `docs/DECISIONS.md`, for the full
+ * history. Traced empirically against this exact fixture, not assumed, via
+ * a temporary `DST_TRACE_STATEMENTS`-gated log line in `connection.ts`,
+ * confirmed and reverted before this fix shipped.) `pauseAfterStatements:
+ * 2` therefore pauses right after the snapshot anchors, before `getConfig`
+ * and the frontier fetch; `4` pauses between the frontier fetch and the
+ * tuple-on-frontier fetch — the exact query pair D-092's own counterexample
+ * was about, now one statement later than it used to be.
  */
 describe('the D-092 phantom-witness regression, reproduced through the fake and generalized across seeds (D-099)', () => {
-  it.each([2, 3])(
+  it.each([2, 4])(
     'pauseAfterStatements=%i: a grant committed while the check is paused mid-snapshot is invisible to that checks own result, even though a fresh check afterward sees it',
     async (pausePoint) => {
       const { state, source } = freshPlainSource();
@@ -279,7 +284,9 @@ describe('the D-092 phantom-witness regression, reproduced through the fake and 
     'seed=%s: the same non-observation property holds across varied object/subject identifiers and pause points',
     async (seed) => {
       const rng = dstRngFromSeed(seed);
-      const pausePoint = rng.pick([2, 3]);
+      // [2, 4] — see the describe block's own doc comment above for the
+      // real statement sequence these two positions correspond to.
+      const pausePoint = rng.pick([2, 4]);
       const objectId = `racy_${seed}`;
       const subjectId = `user_${seed}`;
 
@@ -571,5 +578,79 @@ describe("the tuple-to-userset hop (parent->view) — listTupleSubjects's own SQ
     );
 
     expect(result.allowed).toBe(false);
+  });
+
+  /**
+   * Closes a real, confirmed coverage gap found by this project's own
+   * mutation-testing pass (`docs/DECISIONS.md`, the entry documenting this
+   * batch): `evalRewrite`'s `tupleToUserset` case (`resolver.ts`) is
+   * documented to follow EVERY stored subject `listTupleSubjects` returns
+   * for the followed relation, not just the first — nothing in the schema
+   * or the tuple store prevents a `parent`-style relation from carrying more
+   * than one tuple on the same object (no uniqueness constraint spans only
+   * `object_ns/object_id/relation`; `subject_ns/subject_id` are part of the
+   * key). A mutation that silently narrowed the loop to `subjects.slice(0,
+   * 1)` — dropping every branch after the first — was applied live and
+   * confirmed to evade every existing test in this repo, fast suite and
+   * real-Postgres integration suite alike: 792/792 fast tests stayed green,
+   * and `cross-resolver-agreement.integration.test.ts` (real Postgres, 25
+   * tests) stayed green too, since no existing fixture ever writes two
+   * `parent`-style tuples on the same object. This test closes that gap
+   * directly: `document:readme` gets TWO `parent` tuples — `folder:dead_end`
+   * (written first, lower `id`, no viewer grant on it at all) and
+   * `folder:real_path` (written second, higher `id`, alice's real grant) —
+   * so a first-subject-only bug would deterministically try `dead_end`
+   * first (the DST fake's own `listTupleSubjectsHandler` sorts by `id`
+   * ascending, matching the real SQL's row order for a small, single-insert-
+   * order table) and wrongly deny, while the real, correct implementation
+   * (which must try every subject, not just the first) finds `real_path` on
+   * its second attempt and correctly allows.
+   */
+  it('a-document-with-two-parent-tuples-where-only-the-second-one-grants-still-resolves-allowed-proving-every-stored-subject-is-followed-not-just-the-first', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(TUPLE_TO_USERSET_SCHEMA_SOURCE, 'folder'));
+    seedNamespaceConfig(state, compileNamespace(TUPLE_TO_USERSET_SCHEMA_SOURCE, 'document'));
+    const source = createFakeConnectionSource(state);
+
+    // Written FIRST (lower id) — a real parent tuple, but folder:dead_end
+    // has zero viewer tuples anywhere: this branch must be tried and
+    // correctly denied, not skipped.
+    const deadEndParent = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: 'dead_end',
+    });
+    expect(deadEndParent.ok).toBe(true);
+
+    // Written SECOND (higher id) — the real grant path. A first-subject-only
+    // bug never reaches this tuple at all.
+    const realPathParent = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: 'real_path',
+    });
+    expect(realPathParent.ok).toBe(true);
+
+    const grantWrite = await writeTuple(source, {
+      objectNs: 'folder',
+      objectId: 'real_path',
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(grantWrite.ok).toBe(true);
+
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'alice' },
+      { ns: 'document', id: 'readme' },
+      'view',
+    );
+
+    expect(result.allowed).toBe(true);
   });
 });

@@ -261,11 +261,23 @@ exclusion) and genuinely reports `HOLDS up to k = 1`, never an
 unconditional proof — and why the job still gates on that as a pass, not
 a failure (that file's own "Exit-code gating" section).
 
+The nightly differential test (`test/differential.nightly.test.ts`, §8b —
+brute-force agreement at `k = 3`, deliberately excluded from the default
+`vitest run` because it's slow) is fully built, independently verified,
+and — since `docs/DECISIONS.md` D-134 — wired into its own scheduled CI
+job: `.github/workflows/schema-verifier.yml`'s `schema-verifier-nightly`
+job, on a daily cron, separate from the PR-speed `k = 1` job above. Run it
+directly (e.g. to reproduce a nightly failure locally):
+
+```
+npx vitest run --config tools/schema-verifier/vitest.nightly.config.ts
+```
+
 ## Third-party schema survey
 
 `docs/FINDINGS.md` — build spec §10, `CHECKPOINT 6`, closed. Twelve real,
-published schemas (six OpenFGA `sample-stores`, six SpiceDB
-`authzed/examples`) translated (`thirdparty/*.authz`) and checked against
+published schemas (five OpenFGA `sample-stores`; seven SpiceDB — six from
+`authzed/examples`, one from `authzed/docs`) translated (`thirdparty/*.authz`) and checked against
 invariants their own docs state or imply (`thirdparty/*.invariant`); see
 `thirdparty/README.md` for the translation methodology and the disclosed
 expressiveness gaps (wildcard subjects, ABAC caveats/conditions). The
@@ -294,17 +306,6 @@ Tracked, explicit future work — not silently missing:
 - Explicitly out of scope for this tool entirely (build spec §13): no
   edits to the schema parser, engine, or storage layer; no consistency
   tokens; no SMT solver; no performance work; no web UI.
-
-The nightly differential test (`test/differential.nightly.test.ts`, §8b —
-brute-force agreement at `k = 3`, deliberately excluded from the default
-`vitest run` because it's slow) is fully built and independently
-verified, but not yet wired into its own scheduled CI job — a separate,
-smaller gap from the CI wiring above, not shipped as part of it. Run it
-directly:
-
-```
-npx vitest run --config tools/schema-verifier/vitest.nightly.config.ts
-```
 
 ## Further reading
 
