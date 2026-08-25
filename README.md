@@ -27,6 +27,7 @@ to try the DSL compiler itself against your own source.
 - [The soundness result](#the-soundness-result)
 - [Also proven: the write path survives a crash mid-transaction, and every advisory lock actually blocks](#also-proven-the-write-path-survives-a-crash-mid-transaction-and-every-advisory-lock-actually-blocks)
 - [A third proof: the static schema verifier](#a-third-proof-the-static-schema-verifier)
+- [A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed](#a-fourth-proof-metamorphic-and-mutation-testing--plus-a-real-deadlock-found-reproduced-and-fixed)
 - [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
 - [How it works](#how-it-works)
 - [Latency](#latency)
@@ -264,6 +265,103 @@ differential test the verifier's own test suite always had was only
 actually wired into a scheduled CI job later (D-134). Track real, current
 status in [`PROGRESS.md`](PROGRESS.md).
 
+## A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed
+
+The three proofs above all check things this project already knew to check
+for. A **live-verification doc audit** asked a different question instead —
+does anything already written down still match reality — by having 7
+parallel review agents actually execute every documented command and count
+every claimed number against live ground truth, rather than re-reading
+prose and comparing it to code by inspection. It found real, confirmed
+drift: `docs/DST-PROPOSAL.md` still opened "A proposal, not yet built"
+while the entire design it describes had shipped weeks earlier as D-097
+through D-102; two other docs both claimed the third-party schema survey's
+OpenFGA/SpiceDB split was "six and six," when the real split, confirmed by
+reading every source file's own header, is five and seven. Both fixed,
+along with six more confirmed findings — see `docs/DECISIONS.md` D-139.
+
+That audit was the first of four requested in sequence. The next three are
+genuinely new ways of checking the engine itself, not the docs describing
+it:
+
+- **Metamorphic/invariant testing** (`test/metamorphic/`, D-140) checks
+  algebraic properties — idempotence, write-order commutativity,
+  monotonicity — directly against the real, unmodified production engine,
+  needing no second implementation to compare against. This closes a blind
+  spot differential fuzzing (above) structurally cannot reach: a bug the
+  production engine and the independent reference resolver both share, from
+  a common misreading of the same spec sentence, would still agree with
+  itself and pass every differential run forever. All 7 originally-proposed
+  properties turned out flawed on adversarial review before a line of
+  implementation code was written — one property's own "backward" half was
+  proven **false** by a constructed counterexample, not just softened. What
+  shipped: 4 new files, 69 new tests, zero existing files modified,
+  including `src/metamorphic/monotonicity.ts`'s classifier — sound but
+  deliberately incomplete: a genuinely-monotone cyclic permission gets
+  conservatively misclassified `false`, since the alternative risks the
+  opposite, actually-dangerous direction — a real soundness bug in the
+  classifier itself.
+
+- **Mutation testing** of the four files carrying this project's actual
+  soundness/audit guarantees — `resolver.ts`, `tuples.ts`, `publish.ts`,
+  `checks.ts` — hand-curated and live-executed, the same discipline
+  `tools/schema-verifier` already established at D-119, not a mechanical
+  operator-flipping framework. Of 21 hand-chosen candidates, 5 were real,
+  previously **100%-uncovered** coverage gaps, each closed with a new,
+  fail-checked test (D-141). Two: narrowing `evalRewrite`'s
+  `tupleToUserset` case to try only the first stored subject a followed
+  relation returns — nothing in the schema stops a `parent`-style relation
+  from carrying more than one tuple on an object, and no fixture anywhere
+  had ever written two; and dropping the relation predicate from
+  `fetchReachableFrontier`'s recursive CTE join, letting a userset tuple
+  stored under one relation leak into a _different_
+  relation's transitive frontier on the same object. Both mutations passed
+  all 792 fast tests and every real-Postgres fixture that existed at the
+  time — a concrete input sequence reaching a wrong `allowed` answer today,
+  in shipped code, that nothing caught.
+
+- **A real concurrent load test**
+  (`test/unit/api/concurrent-load.integration.test.ts`, D-142) fires
+  genuine OS-level HTTP concurrency — a real `app.listen()` socket, Node's
+  `fetch`, `Promise.all` — at a real, listening server, distinct from DST's
+  deterministic single-process fault injection (above). 30 real concurrent
+  `DELETE /tuples` calls against the 20/minute rate limit: exactly 20
+  succeed, exactly 10 return `429`, nothing hangs or double-counts. A
+  second test races a real revocation against a burst of concurrent
+  `/check` calls to confirm the D-135 cache epoch fence holds under
+  genuine, non-deterministic timing, not just DST's controlled pauses.
+
+The metamorphic tests above also **found a real production bug as a
+byproduct — then it was reproduced live a second time, then fixed.** An
+early draft of one property test ran two query batches concurrently — 40
+concurrent `productionCheck` calls via `Promise.all` — and deadlocked for
+real against local Postgres: every connection was consumed by checks' own
+pinned `REPEATABLE READ` clients before any of them could obtain the
+_second_, separate connection `getConfig`'s `namespace_configs` lookup
+needed — a genuine structural hazard inside `productionCheck`/`expand()`
+themselves, disclosed but not fixed at the time (D-140). Building the
+concurrent load test above independently reproduced the identical hang live
+a second time while deliberately shrinking the connection pool to force
+more real scheduling variance: `pool.max: 4` with 10 concurrent checks hung
+outright, killed after a 2-minute timeout, not a flake (D-142). D-143 then
+fixed it for good: `getConfig` now shares its check's own pinned connection
+instead of opening a second one, closing the hazard for every caller of
+`productionCheck`/`expand()` permanently, not just the one call path that
+happened to surface it. Decisively verified live, not just reasoned through
+— the exact hanging scenario went from a **2+ minute hang to 35ms**, all 10
+checks correctly `allowed: true`.
+
+Not everything this batch touched closed cleanly. The concurrent-load
+test's own epoch-fence race has still never actually been caught live, even
+after the deadlock fix made it safe to retry under a smaller, more
+contended pool — real timing on a fast, jitter-free sandbox never lands
+inside the microsecond-scale window DST constructs on demand. That property
+is proven the deterministic way instead, by D-135's own unit test and by
+D-141's mutation pass; the load test is documented as complementary
+evidence that nothing crashes or is silently wrong under real traffic, not
+a substitute for either. Full account of all five:
+[`docs/DECISIONS.md`](docs/DECISIONS.md) D-139 through D-143.
+
 ## Try it yourself — under 10 minutes, from a clean clone
 
 ```bash
@@ -457,26 +555,28 @@ same real example data.
 
 ```
 src/
-  config/    validated environment loading
-  schema/    the namespace DSL — publish.ts, plus dsl/ (parser, compiler, types, errors)
-  store/     migrations/ (the real .sql files), the tuple store, consistency tokens
+  config/      validated environment loading
+  schema/      the namespace DSL — publish.ts, plus dsl/ (parser, compiler, types, errors)
+  store/       migrations/ (the real .sql files), the tuple store, consistency tokens
     dst/     deterministic simulation testing — the in-memory fake storage seam (docs/DST-PROPOSAL.md)
   resolve/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
     production/  the real, SQL-backed check engine, plus the opt-in check-result cache (cache.ts)
-  soundness/ the differential-fuzz generator, classifier, runner
-  audit/     expand(), listObjects()/listUsers(), and the checks audit trail every real check is logged to
-  report/    markdown/JSON soundness reporters, exit codes, PR-comment logic
-  api/       the Fastify server, plus the opt-in Redis-backed rate-limit store (redis-store.ts)
-  cli/       the authz CLI — index.ts, plus commands/ (one file per subcommand)
+  metamorphic/ classifyMonotone() — the monotonicity classifier backing test/metamorphic/'s property tests (D-140)
+  soundness/   the differential-fuzz generator, classifier, runner
+  audit/       expand(), listObjects()/listUsers(), and the checks audit trail every real check is logged to
+  report/      markdown/JSON soundness reporters, exit codes, PR-comment logic
+  api/         the Fastify server, plus the opt-in Redis-backed rate-limit store (redis-store.ts)
+  cli/         the authz CLI — index.ts, plus commands/ (one file per subcommand)
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
 tools/schema-verifier/  the static schema verifier — see "A third proof" above
 docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, INVARIANTS.md, FINDINGS.md,
              DST-PROPOSAL.md, github-governance.md, dst-regression-corpus.json, screens/
 test/
-  isolation/ the inherited, repurposed proof suite — see test/isolation/README.md
-  unit/      per-module unit + integration tests, one file per real claim
+  isolation/   the inherited, repurposed proof suite — see test/isolation/README.md
+  metamorphic/ a fourth proof mechanism — algebraic/invariant properties, no second implementation needed (D-140)
+  unit/        per-module unit + integration tests, one file per real claim
 .claude/commands/  the build specification this whole project was built under
 .claude/agents/    the subagents that specification delegates specific phases to
 .claude/workflows/ the multi-agent audit workflow this project runs periodically against itself
