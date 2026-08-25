@@ -572,4 +572,78 @@ describe("the tuple-to-userset hop (parent->view) — listTupleSubjects's own SQ
 
     expect(result.allowed).toBe(false);
   });
+
+  /**
+   * Closes a real, confirmed coverage gap found by this project's own
+   * mutation-testing pass (`docs/DECISIONS.md`, the entry documenting this
+   * batch): `evalRewrite`'s `tupleToUserset` case (`resolver.ts`) is
+   * documented to follow EVERY stored subject `listTupleSubjects` returns
+   * for the followed relation, not just the first — nothing in the schema
+   * or the tuple store prevents a `parent`-style relation from carrying more
+   * than one tuple on the same object (no uniqueness constraint spans only
+   * `object_ns/object_id/relation`; `subject_ns/subject_id` are part of the
+   * key). A mutation that silently narrowed the loop to `subjects.slice(0,
+   * 1)` — dropping every branch after the first — was applied live and
+   * confirmed to evade every existing test in this repo, fast suite and
+   * real-Postgres integration suite alike: 792/792 fast tests stayed green,
+   * and `cross-resolver-agreement.integration.test.ts` (real Postgres, 25
+   * tests) stayed green too, since no existing fixture ever writes two
+   * `parent`-style tuples on the same object. This test closes that gap
+   * directly: `document:readme` gets TWO `parent` tuples — `folder:dead_end`
+   * (written first, lower `id`, no viewer grant on it at all) and
+   * `folder:real_path` (written second, higher `id`, alice's real grant) —
+   * so a first-subject-only bug would deterministically try `dead_end`
+   * first (the DST fake's own `listTupleSubjectsHandler` sorts by `id`
+   * ascending, matching the real SQL's row order for a small, single-insert-
+   * order table) and wrongly deny, while the real, correct implementation
+   * (which must try every subject, not just the first) finds `real_path` on
+   * its second attempt and correctly allows.
+   */
+  it('a-document-with-two-parent-tuples-where-only-the-second-one-grants-still-resolves-allowed-proving-every-stored-subject-is-followed-not-just-the-first', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(TUPLE_TO_USERSET_SCHEMA_SOURCE, 'folder'));
+    seedNamespaceConfig(state, compileNamespace(TUPLE_TO_USERSET_SCHEMA_SOURCE, 'document'));
+    const source = createFakeConnectionSource(state);
+
+    // Written FIRST (lower id) — a real parent tuple, but folder:dead_end
+    // has zero viewer tuples anywhere: this branch must be tried and
+    // correctly denied, not skipped.
+    const deadEndParent = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: 'dead_end',
+    });
+    expect(deadEndParent.ok).toBe(true);
+
+    // Written SECOND (higher id) — the real grant path. A first-subject-only
+    // bug never reaches this tuple at all.
+    const realPathParent = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: 'real_path',
+    });
+    expect(realPathParent.ok).toBe(true);
+
+    const grantWrite = await writeTuple(source, {
+      objectNs: 'folder',
+      objectId: 'real_path',
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(grantWrite.ok).toBe(true);
+
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'alice' },
+      { ns: 'document', id: 'readme' },
+      'view',
+    );
+
+    expect(result.allowed).toBe(true);
+  });
 });
