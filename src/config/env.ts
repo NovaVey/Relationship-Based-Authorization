@@ -109,6 +109,33 @@ export const EnvSchema = z.object({
   SOUNDNESS_FUZZ_SEED: optionalString(),
 
   MAX_CONCURRENCY: optionalNumber(z.coerce.number().int().positive().default(8)),
+  // The `pg` Pool's own `max` option — how many real Postgres connections
+  // this process ever holds open at once. Left unset before this field
+  // existed, `getPool()` (`src/store/client.ts`) passed no `max` at all,
+  // silently inheriting `pg`'s own undocumented-here library default of 10;
+  // this field's own default (10) is chosen to match that exactly, so a
+  // deployment that never sets it sees no behavior change. Exists as its
+  // own validated env field, not just a `getPool()` call-site constant,
+  // because `authz doctor` (`src/cli/commands/doctor.ts`) needs to compare
+  // it against `MAX_CONCURRENCY` at startup — see the invariant below.
+  //
+  // The invariant this exists to let `doctor` check:
+  // `MAX_CONCURRENCY < PG_POOL_MAX`. `runSoundnessFuzz`'s own
+  // `checkAllQueries` (`src/soundness/runner.ts`) batches up to
+  // `MAX_CONCURRENCY` concurrent `productionCheck` calls against this same
+  // pool; each pins one connection for its whole life. D-143 already fixed
+  // the one call path (`getConfig`'s old second-connection dependency) that
+  // made `MAX_CONCURRENCY >= pool.max` a genuine deadlock rather than a
+  // throughput problem — every `productionCheck`/`expand()` call now needs
+  // exactly one pool connection, so violating this invariant today only
+  // means the excess concurrent checks queue for a free connection instead
+  // of running in parallel (worse throughput, not a hang). D-140's own
+  // "Revisit if" named enforcing this numeric relationship at startup as
+  // the weaker of two options it left open; this is that weaker option,
+  // built now as real, cheap insurance against a *future* call path
+  // reintroducing a second-connection dependency the same way `getConfig`
+  // once did, not because today's code still deadlocks on it.
+  PG_POOL_MAX: optionalNumber(z.coerce.number().int().positive().default(10)),
 
   // `.min(32)` (finding #10, MEDIUM, third audit, 2026-08-17): a startup
   // with a trivially short admin key now fails fast with a clear message

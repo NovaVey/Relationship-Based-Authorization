@@ -30,6 +30,15 @@ export function getPool(config: PoolConfig = {}): Pool {
     pool = new Pool({
       connectionString: env.DATABASE_URL,
       connectionTimeoutMillis: 5_000,
+      // Explicit, validated, and env-configurable (env.PG_POOL_MAX,
+      // src/config/env.ts) rather than left to `pg`'s own unstated library
+      // default — this project's `authz doctor` needs a real, known number
+      // to check against `MAX_CONCURRENCY` (see env.ts's own doc comment on
+      // PG_POOL_MAX and docs/DECISIONS.md D-140/D-143). Defaults to 10,
+      // matching `pg`'s own undocumented-here default exactly, so a
+      // deployment that never sets PG_POOL_MAX sees no behavior change from
+      // before this field existed.
+      max: env.PG_POOL_MAX,
       ...config,
     });
     // pg's own documented contract: the pool emits 'error' on behalf of any
