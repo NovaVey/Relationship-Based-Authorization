@@ -213,16 +213,37 @@ interface ParserState {
   tokens: Token[];
   pos: number;
   /**
-   * How many `(` a permission expression is currently nested inside, at
-   * the point `parseAtom` is about to descend one level further —
-   * incremented on `(`, decremented on the matching `)`. `parseAtom`,
-   * `parseTerm`, and `parseExpression` are mutually recursive with one
-   * native call-stack frame consumed per level of `(` nesting; this
-   * counter is what lets `parseAtom` reject past
-   * `MAX_EXPRESSION_NESTING_DEPTH` with a clean `SchemaError` instead of
-   * letting that recursion run until Node's real call stack overflows.
+   * How deep the rewrite-rule AST this parse is building is currently
+   * nested, at the point either `parseAtom` is about to descend one level
+   * further via `(`, or `parseExpression` is about to add one more link to
+   * an unparenthesized `-` (exclusion) chain — incremented on either event,
+   * decremented symmetrically once that nesting/chain link is fully closed
+   * out.
+   *
+   * Two structurally distinct things share this one counter and ceiling
+   * because they pose the *identical* downstream risk: `compiler.ts`'s
+   * `checkCircularPermissions`/`collectPermissionDeps` and `compileRewriteRule`
+   * both walk the finished AST with one native call-stack frame per level
+   * of tree depth, with no bound of their own. `(` nesting is the obvious
+   * source of that depth — `parseAtom`/`parseTerm`/`parseExpression` are
+   * themselves mutually recursive, one frame per `(`, so a source string
+   * with a few thousand nested parens drives that same recursion past
+   * Node's default call-stack size while still *parsing*. A flat,
+   * unparenthesized exclusion chain (`a - a - a - ... - a`, no `(`
+   * anywhere) is the second, easy-to-miss source: unlike `|`/`&`, which
+   * `flattenChildren` merges into one flat n-ary node regardless of chain
+   * length (set union/intersection are associative), exclusion is not
+   * associative (`(a-b)-c != a-(b-c)` in general), so each `-` genuinely
+   * nests a new `{kind:'exclusion', base:left, ...}` node one level deeper
+   * than the last — building that chain is itself a flat, non-recursive
+   * loop (see `parseExpression`) and stays fast at any length, but the
+   * resulting *tree* is exactly as deep as the chain is long, with nothing
+   * bounding it before this fix. Confirmed live: a ~5,000-term flat `-`
+   * chain (well inside the real request-body byte cap) threw a raw,
+   * unhandled `RangeError` from `collectPermissionDeps`'s own recursion,
+   * with zero `(` characters anywhere in the source. See `docs/DECISIONS.md`.
    */
-  parenDepth: number;
+  nestingDepth: number;
 }
 
 function peek(state: ParserState): Token {
@@ -347,8 +368,8 @@ function parseRelation(state: ParserState): ParsedRelation {
 function parseAtom(state: ParserState): ParsedRewriteRule {
   if (peek(state).type === 'lparen') {
     const openToken = consume(state);
-    state.parenDepth += 1;
-    if (state.parenDepth > MAX_EXPRESSION_NESTING_DEPTH) {
+    state.nestingDepth += 1;
+    if (state.nestingDepth > MAX_EXPRESSION_NESTING_DEPTH) {
       throw new SchemaParseError(
         makeSchemaError(
           'expression_nesting_too_deep',
@@ -359,7 +380,7 @@ function parseAtom(state: ParserState): ParsedRewriteRule {
     }
     const expr = parseExpression(state);
     expectPunct(state, 'rparen', ')');
-    state.parenDepth -= 1;
+    state.nestingDepth -= 1;
     return expr;
   }
   const nameToken = expectWord(state, 'a relation, permission, or tuple-to-userset reference');
@@ -437,6 +458,12 @@ function parseTerm(state: ParserState): ParsedRewriteRule {
 
 function parseExpression(state: ParserState): ParsedRewriteRule {
   let left = parseTerm(state);
+  // Tracks how much of `state.nestingDepth` this call has itself added via
+  // exclusion chaining below, so it can be given back before returning —
+  // symmetric with how `parseAtom` gives back exactly what one `(`/`)`
+  // pair added. Never touched for the `pipe` branch: union flattening adds
+  // no depth (see `flattenChildren`), so it never charges this counter.
+  let exclusionLinksAdded = 0;
   while (peek(state).type === 'pipe' || peek(state).type === 'minus') {
     const opToken = consume(state);
     const right = parseTerm(state);
@@ -447,9 +474,33 @@ function parseExpression(state: ParserState): ParsedRewriteRule {
         line: left.kind === 'union' ? left.line : opToken.line,
       };
     } else {
+      // Exclusion is never flattened (unlike `|`/`&` — set difference is
+      // not associative, so `(a-b)-c` and `a-(b-c)` are genuinely
+      // different, and collapsing a chain into one n-ary node the way
+      // `flattenChildren` does for union/intersection would silently
+      // change what the schema means). Each `-` therefore nests one real
+      // AST level deeper than the last via `base: left` below — this loop
+      // itself stays flat and fast at any chain length (no recursion here,
+      // just repeated reassignment), but the *tree* it builds is exactly
+      // as deep as the chain is long, and `compiler.ts`'s
+      // `collectPermissionDeps`/`compileRewriteRule` both recurse once per
+      // AST level when they walk it later. See `ParserState.nestingDepth`'s
+      // own doc comment for the live-confirmed crash this closes.
+      exclusionLinksAdded += 1;
+      state.nestingDepth += 1;
+      if (state.nestingDepth > MAX_EXPRESSION_NESTING_DEPTH) {
+        throw new SchemaParseError(
+          makeSchemaError(
+            'expression_nesting_too_deep',
+            `permission expression at line ${opToken.line} chains more than ${MAX_EXPRESSION_NESTING_DEPTH} '-' operators deep (each unparenthesized '-' nests one level, exactly like '(', since exclusion can never be flattened into a flat chain the way '|'/'&' are)`,
+            opToken.line,
+          ),
+        );
+      }
       left = { kind: 'exclusion', base: left, subtract: right, line: opToken.line };
     }
   }
+  state.nestingDepth -= exclusionLinksAdded;
   return left;
 }
 
@@ -540,7 +591,7 @@ export function parseSchema(source: string): ParseResult {
 
   try {
     const tokens = tokenize(source);
-    const state: ParserState = { tokens, pos: 0, parenDepth: 0 };
+    const state: ParserState = { tokens, pos: 0, nestingDepth: 0 };
     const namespaces: ParsedNamespace[] = [];
     while (peek(state).type !== 'eof') {
       namespaces.push(parseNamespace(state));
