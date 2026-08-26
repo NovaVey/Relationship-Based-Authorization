@@ -37,7 +37,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { buildServer } from '../../../src/api/server.js';
 import { runMigrations } from '../../../src/store/migrate.js';
-import { createApiKey, revokeApiKey } from '../../../src/api/db-api-keys.js';
+import { createApiKey, revokeApiKey, hashApiKey } from '../../../src/api/db-api-keys.js';
 import { env } from '../../../src/config/env.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
@@ -204,9 +204,8 @@ describe('an already-expired key is rejected outright', () => {
     // explicitly, so the row is inserted directly, bypassing that guard,
     // to prove validateDbApiKey's own WHERE-clause enforcement rather than
     // createApiKey's creation-time guard.
-    const { createHash } = await import('node:crypto');
     const rawKey = 'directly-inserted-already-expired-key';
-    const keyHash = createHash('sha256').update(rawKey, 'utf8').digest('hex');
+    const keyHash = hashApiKey(rawKey);
     await pool.query(
       `insert into api_keys (name, key_hash, role, expires_at)
        values ($1, $2, 'admin', now() - interval '1 hour')`,

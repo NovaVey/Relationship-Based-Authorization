@@ -10,7 +10,7 @@ create table api_keys (
   id          bigint generated always as identity primary key,
   name        text not null,
 
-  -- The SHA-256 hex digest of the raw key (`src/api/db-api-keys.ts`'s
+  -- The scrypt-derived hex digest of the raw key (`src/api/db-api-keys.ts`'s
   -- `hashApiKey`), never the raw key itself — a lookup key, not a secret
   -- this table needs to keep confidential on its own: even a full dump of
   -- this table (or `authz apikey list`, or a stray `select *`) never hands

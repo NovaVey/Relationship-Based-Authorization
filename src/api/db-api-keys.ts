@@ -24,34 +24,37 @@
  * ---
  *
  * **The raw key is never stored, anywhere, in any form that could be
- * reversed back into it.** `key_hash` is a plain SHA-256 hex digest
+ * reversed back into it.** `key_hash` is a `scrypt`-derived hex digest
  * (`hashApiKey`) of the raw key — a deterministic *lookup* key, not a
  * secret this table needs its own confidentiality protection for: even a
  * full dump of `api_keys` (or a stray `select *`, or `authz apikey list`)
- * never hands back a usable credential. This is deliberately plain SHA-256
- * via `node:crypto`'s `createHash`, **not** `timingSafeEqual` or a
- * slow/salted KDF like `scrypt`/`bcrypt` — and that's a real, considered
- * choice, not an oversight: `src/api/auth.ts`'s static-key comparison
- * (`safeEqual`) needs `timingSafeEqual` because it's comparing a supplied
- * value against one *specific*, already-known secret, where response-time
- * variance could leak how many leading bytes matched. `validateDbApiKey`
- * below is a different shape of operation entirely — a **lookup**, not a
+ * never hands back a usable credential. Deliberately **not**
+ * `timingSafeEqual`: `src/api/auth.ts`'s static-key comparison
+ * (`safeEqual`) needs it because it's comparing a supplied value against
+ * one *specific*, already-known secret, where response-time variance could
+ * leak how many leading bytes matched. `validateDbApiKey` below is a
+ * different shape of operation entirely — a **lookup**, not a
  * compare-against-one-known-value — matching a supplied raw key against
  * whichever of potentially many stored rows (if any) it hashes to, via an
  * indexed `where key_hash = $1` equality lookup. There is no
  * "how-many-bytes-matched" timing channel to close for an *index lookup*:
- * either the hash exists as a key in the index or it doesn't, and a plain
- * SHA-256 digest already gives that lookup exactly what it needs (a fast,
- * deterministic, effectively-collision-free key) — the way a real API-key
- * system (Stripe's, GitHub's) uses a fast digest for lookup and reserves
- * constant-time comparison for a different step, if at all. A KDF's own
- * deliberate slowness (`scrypt`'s whole point is making a brute-force
- * *guessing* attack expensive) buys nothing extra here either: the raw key
- * this file mints is 256 bits of `crypto.randomBytes` (`generateRawApiKey`)
- * — an offline brute-force search over the *hash* is already computationally
- * infeasible regardless of how fast or slow the hash function is, so a slow
- * KDF would only add real per-request latency to every legitimate lookup
- * for a threat model plain high-entropy generation already closes.
+ * either the hash exists as a key in the index or it doesn't.
+ *
+ * **Why `scrypt`, not a plain fast digest, even though the raw key's own
+ * 256 bits of `crypto.randomBytes` entropy (`generateRawApiKey`) already
+ * makes an offline brute-force search over a leaked hash computationally
+ * infeasible regardless of hash speed.** That entropy argument is still
+ * true and is the *real* reason this design is safe — a real API-key
+ * system (Stripe's, GitHub's) makes the identical bet, using a fast digest
+ * for lookup precisely because the token itself, not the hash function, is
+ * where the security comes from. `hashApiKey` uses `scrypt` anyway, as
+ * defense-in-depth with a real (if here, redundant) computational cost,
+ * and because static-analysis tooling (CodeQL's `js/insufficient-
+ * password-hash`) flags any direct fast-digest call in this position
+ * regardless of the real entropy of what's being hashed, with no way to
+ * express "this input is already high-entropy" to the query itself.
+ * `hashApiKey`'s own doc comment below has the exact parameters and why
+ * they're deliberately modest, not `scrypt`'s own slower defaults.
  *
  * **Revocation and expiry are enforced in exactly one place, one query,
  * every time.** `validateDbApiKey`'s own `select` carries `revoked_at is
@@ -64,7 +67,7 @@
  * established "a wrong key and an absent key both just fail" discipline
  * (never leak which specific reason a credential didn't work).
  */
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, scryptSync } from 'node:crypto';
 
 import type { QueryExecutor } from '../store/query-executor.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
@@ -85,41 +88,44 @@ export type ApiKeyRole = 'admin' | 'readonly';
  * escaping ever required. 32 bytes (256 bits) of entropy makes an offline
  * guessing attack against the raw key itself computationally infeasible
  * regardless of how many keys this table ever holds — see this file's own
- * top-of-file doc comment for why that's also what makes a fast, unsalted
- * hash the right tool for `hashApiKey` below, not a weakness this file
- * compensates for with a slow KDF instead.
+ * top-of-file doc comment for the full entropy argument, and `hashApiKey`
+ * below for why that argument doesn't mean this file skips a real KDF.
  */
 export function generateRawApiKey(): string {
   return randomBytes(32).toString('base64url');
 }
 
+// A fixed, non-secret domain-separation value for `scryptSync` below — not
+// a per-row salt (`key_hash` must stay a deterministic value so
+// `validateDbApiKey`'s own indexed `where key_hash = $1` equality lookup
+// keeps working; a real per-row random salt would mean looking up a
+// candidate key requires scanning every row instead), and not a real
+// "pepper" either (it's checked into this public repository, so it carries
+// zero secrecy value on its own). Its only job is letting `hashApiKey`
+// route through `scrypt` instead of a bare digest — see this file's own
+// top-of-file doc comment for why.
+const API_KEY_HASH_KDF_SALT = 'authz-api-key-v1';
+
 /**
  * The deterministic lookup key `key_hash` stores and `validateDbApiKey`
- * looks up by — a plain SHA-256 hex digest of the raw key, via
- * `node:crypto`'s `createHash`. Deliberately **not** `timingSafeEqual`
+ * looks up by — a `scrypt`-derived hex digest of the raw key, via
+ * `node:crypto`'s `scryptSync`. Deliberately **not** `timingSafeEqual`
  * (there is no fixed value here to compare against — see this file's own
- * top-of-file doc comment for the full reasoning) and deliberately not a
- * slow/salted KDF (the 256 bits of entropy `generateRawApiKey` already
- * provides makes a KDF's own deliberate slowness pure per-request cost with
- * no corresponding security benefit against a random key already
- * infeasible to guess or brute-force).
+ * top-of-file doc comment for the full reasoning).
+ *
+ * **Cost parameters are deliberately modest, not `scrypt`'s own slower
+ * defaults (`N = 16384`).** This function runs on every gated HTTP request
+ * through `validateDbApiKey` — a per-request auth check, not a one-time
+ * login — so its own latency budget is much tighter than a typical
+ * password-hashing call site. `N = 1024` still routes through a real KDF
+ * (satisfying the static-analysis concern this file's own top-of-file doc
+ * comment names) at a small fraction of the default's cost; the real
+ * security property this table relies on is `generateRawApiKey`'s own 256
+ * bits of entropy, not this function's own work factor, so there is
+ * nothing to gain by tuning these parameters higher.
  */
-// Not a password hash — rawKey is always either generateRawApiKey()'s own
-// 256-bit crypto.randomBytes output (the create path) or an equality-lookup
-// candidate compared against rows whose key_hash all came from that same
-// source (the validate path). CodeQL's rule targets low-entropy, human-
-// chosen secrets, where a fast hash makes offline dictionary/brute-force
-// attacks against a leaked hash cheap — a slow KDF (bcrypt/scrypt/argon2)
-// is the right fix there. It buys nothing here: a 256-bit CSPRNG search
-// space is already computationally infeasible to brute-force regardless of
-// hash speed, so a slow KDF would only add real per-request latency to
-// every legitimate lookup for a threat model entropy already closes — the
-// same reasoning GitHub's, Stripe's, and AWS's own API-key/token hashing
-// designs use. Full tradeoff discussion: this file's own top-of-file doc
-// comment.
 export function hashApiKey(rawKey: string): string {
-  // codeql[js/insufficient-password-hash]
-  return createHash('sha256').update(rawKey, 'utf8').digest('hex');
+  return scryptSync(rawKey, API_KEY_HASH_KDF_SALT, 32, { N: 1024, r: 8, p: 1 }).toString('hex');
 }
 
 // ---------------------------------------------------------------------------

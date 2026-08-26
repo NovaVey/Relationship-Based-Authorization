@@ -57,10 +57,10 @@ describe('generateRawApiKey — a real, high-entropy, URL-safe secret', () => {
 });
 
 // ---------------------------------------------------------------------------
-// hashApiKey — a deterministic SHA-256 hex digest.
+// hashApiKey — a deterministic scrypt-derived hex digest.
 // ---------------------------------------------------------------------------
 
-describe('hashApiKey — a deterministic SHA-256 hex digest, never the raw key itself', () => {
+describe('hashApiKey — a deterministic scrypt-derived hex digest, never the raw key itself', () => {
   it('the-same-raw-key-hashes-to-the-same-digest-every-time', () => {
     const raw = 'a-fixed-raw-key-value-for-this-test';
     expect(hashApiKey(raw)).toBe(hashApiKey(raw));
@@ -70,7 +70,7 @@ describe('hashApiKey — a deterministic SHA-256 hex digest, never the raw key i
     expect(hashApiKey('raw-key-one')).not.toBe(hashApiKey('raw-key-two'));
   });
 
-  it('the-digest-is-64-lowercase-hex-characters-a-real-sha-256-hex-shape', () => {
+  it('the-digest-is-64-lowercase-hex-characters-a-real-32-byte-scrypt-output-shape', () => {
     const digest = hashApiKey('some-raw-key');
     expect(digest).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -82,11 +82,14 @@ describe('hashApiKey — a deterministic SHA-256 hex digest, never the raw key i
     expect(digest).not.toContain(raw);
   });
 
-  it('matches-a-hand-computed-sha-256-hex-digest-for-a-known-input-not-just-internally-self-consistent', () => {
-    // sha256("hello") — a well-known, independently-verifiable test vector,
-    // computed by a source other than this file's own function under test.
+  it('matches-a-hand-computed-scrypt-digest-for-a-known-input-not-just-internally-self-consistent', () => {
+    // scrypt('hello', 'authz-api-key-v1', 32, { N: 1024, r: 8, p: 1 }) —
+    // computed directly via node:crypto by a source other than this file's
+    // own function under test, confirming hashApiKey's own real parameters
+    // (the KDF salt constant, N/r/p, and 32-byte output length) rather than
+    // just asserting internal self-consistency.
     expect(hashApiKey('hello')).toBe(
-      '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+      '09474c845387756cd04e958a1b38bc275707b3411edef0f42b46768b9f683332',
     );
   });
 });
