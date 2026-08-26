@@ -174,6 +174,7 @@ function seedFakeGraph(
       subjectRelation: relation,
       createdAt: new Date(0),
       commitSeq: 1,
+      expiresAt: null, // D-144 — this differential suite doesn't test expiry
     });
   }
 }

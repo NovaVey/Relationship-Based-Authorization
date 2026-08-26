@@ -128,6 +128,56 @@ non-goals) — stating the simpler guarantee honestly now is what makes it
 possible to know exactly what would have to change later, rather than
 discovering the gap in production.
 
+## Time-based revocation: a deny with no corresponding write event
+
+Every guarantee above is stated in terms of writes: a check pinned to
+token T sees every write with token ≤ T; an unpinned check sees whatever's
+currently committed. Expiring tuples (D-144, `relation_tuples.expires_at`)
+introduce a genuinely different category, not an extension of the token
+model — a tuple can stop granting access at a specific instant with **no
+write ever landing**, `write_log` never advancing, and no token a caller
+could pin to ever reflecting it. Stated plainly rather than left for
+someone to assume the token guarantee already covers it: **the token
+model says nothing about when an expiry takes effect.** What governs that
+instead is the same wall clock every part of this system already shares —
+"is `now() > expires_at`?", evaluated fresh by both resolvers at the
+moment a check actually runs (`src/resolve/production/resolver.ts`,
+`src/resolve/reference/resolver.ts`), never cached or precomputed, the
+identical `there is no cached, precomputed permission anywhere` discipline
+this project already holds itself to for every other kind of grant.
+
+**Snapshot isolation still composes correctly with this — deliberately
+proven, not assumed.** A `productionCheck` call's `REPEATABLE READ`
+transaction fixes real Postgres's `now()` at the transaction's own start,
+the exact same anchor point `assertTokenObservedOnSnapshot`'s own token
+floor check already relies on — so every expiry comparison inside one
+check agrees on one instant, even if real wall-clock time keeps advancing
+while that check's own multi-statement walk is still in flight. An expiry
+boundary crossing mid-transaction therefore behaves exactly the way a
+concurrent write does under `REPEATABLE READ`: invisible to a snapshot
+already anchored before it, visible to the next one opened after.
+
+**The one place this needs special handling, not just "the same as
+everything else": the opt-in check-result cache.** Every cache-invalidation
+mechanism this project has (`cache.ts`'s `clear()`, called after every
+write) is triggered by a write event — and an expiry, by definition, is
+the one kind of access change that never produces one. A cached `allowed:
+true` result that depended on a tuple which later expires would otherwise
+be served past its real expiry for as long as the cache's own TTL allows,
+with nothing to invalidate it. Closed narrowly rather than by disabling
+caching for every check that merely touches an expiring relation: a check
+result is simply never written into the cache when it was `allowed: true`
+**and** its own resolution read a live, still-unexpired tuple carrying an
+`expires_at` (`ProductionCheckResult.touchedExpiringTuple` —
+`src/resolve/production/resolver.ts`, consumed by `performCheck`,
+`src/audit/checks.ts`). A cached `allowed: false` result is always safe to
+keep serving regardless of this flag: expiry only ever removes access over
+time, so a denial can never become stale-wrong the way a grant can. A
+pinned (`atToken`) result gets no special exemption from this rule either —
+the token's own "valid forever" guarantee is about write-log observation,
+a completely different axis from wall-clock expiry, and doesn't make an
+expiring grant any safer to cache past its own `expires_at`.
+
 ## The cache: latency only, never the source of truth
 
 `CHECK_CACHE_TTL_MS` (default `0`, disabled) exists purely to bound

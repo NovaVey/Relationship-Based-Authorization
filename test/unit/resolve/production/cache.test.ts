@@ -41,8 +41,9 @@ const ALLOWED: ProductionCheckResult = {
   allowed: true,
   path: { kind: 'directGrant', object: README, relation: 'viewer', subject: ALICE },
   depth: 1,
+  touchedExpiringTuple: false,
 };
-const DENIED: ProductionCheckResult = { allowed: false, depth: 0 };
+const DENIED: ProductionCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
 
 describe('buildCacheKey', () => {
   it('the-same-inputs-produce-the-same-key', () => {

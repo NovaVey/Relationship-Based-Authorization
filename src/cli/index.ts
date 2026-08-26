@@ -93,9 +93,15 @@ tuple
     '<subject>',
     "namespace:id or namespace:id#relation, e.g. 'user:alice' or 'group:eng#member'",
   )
-  .action(async (object: string, relation: string, subject: string) => {
-    await tupleWrite(object, relation, subject);
-  });
+  .option(
+    '--expires-at <iso8601>',
+    'optional validity-window expiry (ISO-8601) — the tuple is treated as absent once this instant passes (D-144)',
+  )
+  .action(
+    async (object: string, relation: string, subject: string, options: { expiresAt?: string }) => {
+      await tupleWrite(object, relation, subject, options);
+    },
+  );
 
 tuple
   .command('delete')

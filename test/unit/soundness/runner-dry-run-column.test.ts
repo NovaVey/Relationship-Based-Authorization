@@ -48,7 +48,11 @@ function wireHappyPathMocks(): ReturnType<typeof generateFixture> {
     published: fixture.namespaces.map((n) => ({ namespace: n.namespace, version: 1 })),
   });
   vi.spyOn(tuplesModule, 'writeTuple').mockResolvedValue({ ok: true, token: 1, created: true });
-  vi.spyOn(productionModule, 'productionCheck').mockResolvedValue({ allowed: false, depth: 0 });
+  vi.spyOn(productionModule, 'productionCheck').mockResolvedValue({
+    allowed: false,
+    depth: 0,
+    touchedExpiringTuple: false,
+  });
 
   return fixture;
 }

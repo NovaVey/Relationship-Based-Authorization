@@ -51,6 +51,30 @@ const ALLOWED: ProductionCheckResult = {
   allowed: true,
   path: { kind: 'directGrant', object: README, relation: RELATION, subject: ALICE },
   depth: 1,
+  touchedExpiringTuple: false,
+};
+
+/** D-144's cache-safety fix: an allowed result that touched a live expiring tuple must never be cached. */
+const ALLOWED_TOUCHED_EXPIRING: ProductionCheckResult = {
+  allowed: true,
+  path: { kind: 'directGrant', object: README, relation: RELATION, subject: ALICE },
+  depth: 1,
+  touchedExpiringTuple: true,
+};
+
+/** The regression-guard contrast case: allowed, but no expiring tuple was read anywhere in the walk. */
+const ALLOWED_NOT_TOUCHED_EXPIRING: ProductionCheckResult = {
+  allowed: true,
+  path: { kind: 'directGrant', object: README, relation: RELATION, subject: ALICE },
+  depth: 1,
+  touchedExpiringTuple: false,
+};
+
+/** Proves the fix is asymmetric, not a blanket disable: a denied result stays cacheable regardless of touchedExpiringTuple. */
+const DENIED_TOUCHED_EXPIRING: ProductionCheckResult = {
+  allowed: false,
+  depth: 1,
+  touchedExpiringTuple: true,
 };
 
 afterEach(() => {
@@ -247,5 +271,77 @@ describe('performCheck with a cache: a failed audit insert on a miss never poiso
     );
 
     expect(cache.get(key)).toBeUndefined();
+  });
+});
+
+describe('performCheck with a cache: D-144 cache-safety fix — an allowed result that touched an expiring tuple is never cached', () => {
+  it('an-allowed-result-with-touchedExpiringTuple-true-is-never-cached-a-second-identical-call-recomputes', async () => {
+    const productionCheckSpy = vi
+      .spyOn(productionModule, 'productionCheck')
+      .mockResolvedValue(ALLOWED_TOUCHED_EXPIRING);
+    const { pool, insertCalls } = fakePool();
+    const cache = new CheckCache(100, 60_000);
+    const key = buildCacheKey(ALICE, RELATION, README, {});
+
+    const first = await performCheck(pool, ALICE, README, RELATION, {}, cache);
+    expect(first).toEqual(ALLOWED_TOUCHED_EXPIRING);
+    // Never written into the cache — trySet is skipped entirely for this
+    // combination (see checks.ts's own doc comment).
+    expect(cache.get(key)).toBeUndefined();
+
+    const second = await performCheck(pool, ALICE, README, RELATION, {}, cache);
+    expect(second).toEqual(ALLOWED_TOUCHED_EXPIRING);
+
+    // Both calls are genuine misses that recompute — if the first call had
+    // (wrongly) been cached, this would be a single call, not two.
+    expect(productionCheckSpy).toHaveBeenCalledTimes(2);
+    // Still logged unconditionally on both calls, exactly like every other
+    // miss — this fix only ever affects caching, never auditing.
+    expect(insertCalls).toHaveLength(2);
+    expect(cache.get(key)).toBeUndefined();
+  });
+
+  it('an-allowed-result-with-touchedExpiringTuple-false-is-still-cached-exactly-as-before-a-regression-guard', async () => {
+    const productionCheckSpy = vi
+      .spyOn(productionModule, 'productionCheck')
+      .mockResolvedValue(ALLOWED_NOT_TOUCHED_EXPIRING);
+    const { pool, insertCalls } = fakePool();
+    const cache = new CheckCache(100, 60_000);
+    const key = buildCacheKey(ALICE, RELATION, README, {});
+
+    const first = await performCheck(pool, ALICE, README, RELATION, {}, cache);
+    expect(first).toEqual(ALLOWED_NOT_TOUCHED_EXPIRING);
+    expect(cache.get(key)).toEqual(ALLOWED_NOT_TOUCHED_EXPIRING);
+
+    const second = await performCheck(pool, ALICE, README, RELATION, {}, cache);
+    expect(second).toEqual(ALLOWED_NOT_TOUCHED_EXPIRING);
+
+    // The second call is a genuine cache hit — productionCheck runs only once.
+    expect(productionCheckSpy).toHaveBeenCalledTimes(1);
+    // Both calls are still logged (a hit logs too, per performCheck's own
+    // established contract) — only the graph walk itself is skipped.
+    expect(insertCalls).toHaveLength(2);
+  });
+
+  it('a-denied-result-with-touchedExpiringTuple-true-is-still-cached-proving-the-asymmetry-is-real-not-a-blanket-disable', async () => {
+    const productionCheckSpy = vi
+      .spyOn(productionModule, 'productionCheck')
+      .mockResolvedValue(DENIED_TOUCHED_EXPIRING);
+    const { pool, insertCalls } = fakePool();
+    const cache = new CheckCache(100, 60_000);
+    const key = buildCacheKey(ALICE, RELATION, README, {});
+
+    const first = await performCheck(pool, ALICE, README, RELATION, {}, cache);
+    expect(first).toEqual(DENIED_TOUCHED_EXPIRING);
+    // Cached despite touchedExpiringTuple being true — the guard is keyed on
+    // `allowed && touchedExpiringTuple`, not `touchedExpiringTuple` alone.
+    expect(cache.get(key)).toEqual(DENIED_TOUCHED_EXPIRING);
+
+    const second = await performCheck(pool, ALICE, README, RELATION, {}, cache);
+    expect(second).toEqual(DENIED_TOUCHED_EXPIRING);
+
+    // The second call is a genuine cache hit — productionCheck runs only once.
+    expect(productionCheckSpy).toHaveBeenCalledTimes(1);
+    expect(insertCalls).toHaveLength(2);
   });
 });

@@ -29,6 +29,7 @@ to try the DSL compiler itself against your own source.
 - [A third proof: the static schema verifier](#a-third-proof-the-static-schema-verifier)
 - [A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed](#a-fourth-proof-metamorphic-and-mutation-testing--plus-a-real-deadlock-found-reproduced-and-fixed)
 - [A scope decision, two proof extensions, a tamper-evident audit log, and a schema safety net](#a-scope-decision-two-proof-extensions-a-tamper-evident-audit-log-and-a-schema-safety-net)
+- [Expiring tuples: D-144's own caveat, built](#expiring-tuples-d-144s-own-caveat-built)
 - [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
 - [How it works](#how-it-works)
 - [Latency](#latency)
@@ -383,8 +384,9 @@ check on a tuple (an `expires_at` comparison against the current clock,
 provable the same way `atToken`'s floor comparison already is). **What
 stays out, unchanged:** a general attribute/context-evaluation engine
 (CEL/Rego/Cedar-style) — the "What this is not" section below still holds
-that line. This entry is a decision only; no code shipped. Building the
-narrow form is separate, tracked follow-up work.
+that line. This entry was a decision only, with no code — the narrow form
+itself, expiring/time-boxed tuples, shipped separately afterward (see
+below).
 
 Five further items shipped, built in parallel as independent, isolated
 pieces of work:
@@ -443,6 +445,40 @@ checking the merged file's real content directly, then fixed by hand and
 reconfirmed with real, un-mocked CLI invocations of both command groups.
 Full account of both problems, and every decision above:
 [`docs/DECISIONS.md`](docs/DECISIONS.md) D-144 through D-149.
+
+## Expiring tuples: D-144's own caveat, built
+
+A tuple can now optionally carry a validity window — `authz tuple write ...
+--expires-at 2026-09-01T00:00:00Z` (CLI) or `expiresAt` (API body) — the
+closed form D-144 scoped in above, not a general attribute engine. Once
+that instant passes, the tuple is treated as though it had been deleted:
+both resolvers stop granting through it independently (D-022's isolation
+preserved), `authz expand`'s own resolved tree agrees, and — the one place
+this needed care beyond "just filter by a timestamp" — the opt-in
+check-result cache never serves a stale `ALLOW` past a real expiry, since
+an expiry produces no write for the cache's own invalidation to react to.
+Proven, not assumed: a new deterministic simulation-testing fault shows an
+expiry crossing mid-check is invisible to a `REPEATABLE READ` snapshot
+already anchored before it — the identical composition already proven for
+a concurrent write landing mid-check, applied here to a concurrent clock
+advance — and a real-Postgres integration test shows a live grant flip to
+denied from nothing but a raw `UPDATE` simulating time passing, with the
+cache immediately reflecting it rather than masking it for its own TTL.
+
+Built via four independent, fully disjoint-file pieces (storage, the
+reference resolver, cache safety, CLI/API), each agent handed an exact,
+pinned interface contract rather than left to design any shared piece —
+directly applying the previous batch's own two lessons above: no two
+agents ever touched the same file, and every agent's own summary was
+independently re-verified against its real files before being trusted. A
+second real, distinct cross-cutting gap surfaced anyway and was disclosed,
+not hidden: DST's fake store matches every query by exact SQL text, so a
+real query's own SQL changing (a new column, a new filter) silently
+invalidates whatever the fake had registered for the old text — found by
+one agent running the full suite beyond its own assigned task and naming
+the exact failure, fixed by reconciling every affected shape once every
+piece had merged. Full account, including every fail-check:
+[`docs/DECISIONS.md`](docs/DECISIONS.md) D-150.
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
@@ -599,7 +635,7 @@ of this project has.
 | `authz schema publish <file>`                                                          | Compile and publish a new `namespace_configs` version                                                                                      |
 | `authz schema diff <file>`                                                             | Compare a candidate against each namespace's currently-published version; warns (exit 1) on any change that isn't a provable widen (D-149) |
 | `authz schema rollback <namespace> <version>`                                          | Republish an earlier published version's exact original source as a new version (D-149)                                                    |
-| `authz tuple write <object> <relation> <subject>`                                      | Write a tuple, prints the returned consistency token                                                                                       |
+| `authz tuple write <object> <relation> <subject> [--expires-at T]`                     | Write a tuple, prints the returned consistency token; `--expires-at` (ISO-8601) makes it live only until then (D-150)                      |
 | `authz tuple delete <object> <relation> <subject>`                                     | Delete a tuple, prints the returned consistency token                                                                                      |
 | `authz check <subject> <relation> <object> [--at-token T] [--path]`                    | Is `subject` related to `object` via `relation`? `--path` prints the real resolution path (see "What an `allow`..." above)                 |
 | `authz expand <object> <relation>`                                                     | Print the resolved subject tree for `object`#`relation`                                                                                    |
@@ -616,7 +652,7 @@ reverse-lookup operations with no CLI command of their own:
 | `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                           |
 | `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                      |
 | `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                    |
-| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple                                                  |
+| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                    |
 | `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                 |
 | `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)       |
 | `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                   |

@@ -164,6 +164,15 @@ export class FakeConnectionImpl implements FakeConnection {
   // both reset to their initial values on COMMIT/ROLLBACK.
   private snapshotSeq: number | undefined;
   private snapshotAnchored = false;
+  // D-144 (expiring tuples) — captured at the exact same anchor point as
+  // `snapshotSeq` (this connection's first real query after entering
+  // Snapshot mode), for the identical reason: real Postgres's `now()` is
+  // fixed at a REPEATABLE READ transaction's own start, not re-evaluated
+  // per statement, so every expiry check inside one check's transaction
+  // must agree on one instant, exactly like every read already agrees on
+  // one `visibleAsOf` commit-order boundary. `undefined` until anchored,
+  // reset alongside `snapshotSeq` on COMMIT/ROLLBACK/a fresh SNAPSHOT_BEGIN.
+  private snapshotNow: Date | undefined;
   // D2, test-only — see this file's own top-of-file doc comment on the
   // pause mechanism. One-shot: consumed the first time the threshold is
   // reached, never fires again on this same connection.
@@ -225,6 +234,7 @@ export class FakeConnectionImpl implements FakeConnection {
       this.txState = TxState.Snapshot;
       this.snapshotAnchored = false;
       this.snapshotSeq = undefined;
+      this.snapshotNow = undefined;
       return { rows: [], rowCount: 0 };
     }
     if (normalized === 'COMMIT') {
@@ -235,6 +245,7 @@ export class FakeConnectionImpl implements FakeConnection {
       this.txState = TxState.Idle;
       this.snapshotAnchored = false;
       this.snapshotSeq = undefined;
+      this.snapshotNow = undefined;
       // Postgres releases every transaction-scoped advisory lock this
       // session holds at COMMIT, unconditionally — not just ones acquired
       // in exactly this statement sequence. Session-scoped locks (the
@@ -248,6 +259,7 @@ export class FakeConnectionImpl implements FakeConnection {
       this.txState = TxState.Idle;
       this.snapshotAnchored = false;
       this.snapshotSeq = undefined;
+      this.snapshotNow = undefined;
       // Postgres releases xact-scoped advisory locks on ROLLBACK exactly
       // as it does on COMMIT — see the COMMIT branch's own comment above.
       releaseLocksForConnection(this.state.locks, this.connectionId, 'xact');
@@ -257,12 +269,24 @@ export class FakeConnectionImpl implements FakeConnection {
     // D2 — REPEATABLE READ's snapshot anchors at the transaction's first
     // *real* query, never at BEGIN itself (see this file's own top-of-file
     // doc comment). This is that anchor point: the first non-transaction-
-    // control statement reached while in Snapshot mode.
+    // control statement reached while in Snapshot mode. D-144 (expiring
+    // tuples) — `snapshotNow` is captured here too, in the same statement,
+    // for the identical reason `snapshotSeq` already is: see this class's
+    // own `snapshotNow` field doc comment.
     if (this.txState === TxState.Snapshot && !this.snapshotAnchored) {
       this.snapshotSeq = this.state.nextCommitSeq - 1;
+      this.snapshotNow = this.state.now;
       this.snapshotAnchored = true;
     }
     const visibleAsOf = this.txState === TxState.Snapshot ? this.snapshotSeq : undefined;
+    // D-144 — outside a snapshot transaction, "now" is just the fake's
+    // current clock directly (mirroring `visibleAsOf`'s own "no boundary"
+    // fallback conceptually, though `now` always has a concrete value,
+    // never `undefined` — every expiry filter needs a real instant to
+    // compare against, unlike a commit-order ceiling which can genuinely be
+    // absent).
+    const now =
+      this.txState === TxState.Snapshot && this.snapshotNow ? this.snapshotNow : this.state.now;
 
     const key = normalizeSql(sql);
 
@@ -327,7 +351,13 @@ export class FakeConnectionImpl implements FakeConnection {
     // runtime-verified shape — matches the real `pg` driver's own
     // `.query<Row>(...)` exactly: it doesn't validate the requested
     // generic against what actually came back either.
-    return handler({ state: this.state, params, bufferOp, visibleAsOf }) as FakeQueryResult<Row>;
+    return handler({
+      state: this.state,
+      params,
+      bufferOp,
+      visibleAsOf,
+      now,
+    }) as FakeQueryResult<Row>;
   }
 
   release(): void {

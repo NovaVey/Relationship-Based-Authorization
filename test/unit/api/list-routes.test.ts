@@ -567,9 +567,11 @@ describe('a caller holding only a valid READONLY_API_KEY (ADMIN_API_KEY unset) r
     env.ADMIN_API_KEY = undefined;
     env.READONLY_API_KEY = READONLY_KEY;
 
-    const checkSpy = vi
-      .spyOn(checksModule, 'performCheck')
-      .mockResolvedValue({ allowed: false, depth: 0 } satisfies PerformCheckResult);
+    const checkSpy = vi.spyOn(checksModule, 'performCheck').mockResolvedValue({
+      allowed: false,
+      depth: 0,
+      touchedExpiringTuple: false,
+    } satisfies PerformCheckResult);
     const expandSpy = vi.spyOn(expandModule, 'expand').mockResolvedValue({
       kind: 'relation',
       object: { ns: 'document', id: 'readme' },

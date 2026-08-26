@@ -1,0 +1,24 @@
+-- `relation_tuples.expires_at` — the storage layer for D-144's approved
+-- scope: a narrow, closed-form time-window condition on a tuple, expressed
+-- as a plain timestamp checked by a plain comparison against the current
+-- time, exactly the way `atToken`'s own floor comparison already works
+-- (D-144's own "Why a closed form is provable" section). This is the
+-- storage layer for D-144's own follow-up implementation, tracked under
+-- its own new decision entry once complete — this migration does not by
+-- itself make any resolver honor the column; see D-144's "What 'in scope'
+-- requires before it ships" for the remaining work (both resolvers, the
+-- cache interaction, the new DST fault, the docs/CONSISTENCY.md paragraph).
+--
+-- Nullable, no default: NULL means "never expires" — a tuple written before
+-- this column existed, or one deliberately written with no validity
+-- window, must keep behaving exactly as every tuple in this store has
+-- always behaved (permanent, until explicitly deleted). Adding a `not null
+-- default <something>` here would force every existing and every future
+-- ordinary tuple to carry a manufactured expiry value that means nothing —
+-- there is no honest non-NULL default for "this fact does not expire."
+-- Modeling "never expires" as NULL, checked as `expires_at is null or
+-- expires_at > now()`, keeps the common case (no validity window at all)
+-- indistinguishable in cost or behavior from how this table already
+-- works, and makes a real, finite `expires_at` the deliberate opt-in case
+-- instead.
+alter table relation_tuples add column expires_at timestamptz;

@@ -39,6 +39,7 @@ function pushEdge(
     subjectRelation,
     createdAt: new Date(0),
     commitSeq,
+    expiresAt: null, // D-144 — this file's own fixtures never test expiry
   });
 }
 

@@ -336,6 +336,25 @@ export interface ProductionCheckResult {
   path?: ResolutionStep;
   /** The actual maximum recursion depth reached anywhere in this check — see this file's own top-of-file doc comment. */
   depth: number;
+  /**
+   * D-144 (expiring tuples) — true iff this check's own resolution read at
+   * least one LIVE (not currently expired) relation tuple carrying a
+   * non-null `expiresAt`, i.e. a tuple with a validity window that could
+   * still expire in the future. Deliberately conservative/over-approximate:
+   * set whenever any such tuple was read anywhere during the walk
+   * (`fetchTuplesOnFrontier` or `listTupleSubjects`), whether or not it
+   * ultimately contributed to the final allowed/denied answer — the safe
+   * failure direction, matching this project's own established D-149
+   * precedent (over-warn rather than under-warn). Consumed by
+   * `src/audit/checks.ts`'s `performCheck` to decide whether a result is
+   * safe to cache: expiry only ever REMOVES a tuple over time, so a cached
+   * `allowed: false` result is always safe to keep serving regardless of
+   * this flag, but a cached `allowed: true` result that touched a still-live
+   * expiring tuple could go stale-wrong once that tuple's own `expiresAt`
+   * passes with no corresponding write event — see that file's own doc
+   * comment for the full reasoning.
+   */
+  touchedExpiringTuple: boolean;
 }
 
 /** `{ allowed: true; proof }` or `{ allowed: false; disproof }` — the one return shape every recursive step below produces. */
@@ -374,6 +393,18 @@ interface WalkContext {
   maxDepth: number;
   schemaCache: Map<string, NamespaceConfig | null>;
   depthReached: { value: number };
+  /**
+   * D-144 (expiring tuples) — a single mutable high-water-mark flag for the
+   * whole check, mirroring `depthReached`'s own shape exactly: true the
+   * moment ANY read anywhere in this check (either mechanism —
+   * `sqlRelationMembershipWithWitness` via `fetchTuplesOnFrontier`, or
+   * `listTupleSubjects`'s own tuple-to-userset hop) returns a live tuple
+   * carrying a non-null `expires_at`, whether or not that specific tuple
+   * ended up on the winning proof/disproof path. `ProductionCheckResult
+   * .touchedExpiringTuple`'s own doc comment states why this deliberate
+   * over-approximation is the safe direction.
+   */
+  touchedExpiringTuple: { value: boolean };
 }
 
 async function getConfig(ctx: WalkContext, ns: string): Promise<NamespaceConfig | null> {
@@ -471,6 +502,7 @@ async function resolve(
         remainingDepth,
       );
       ctx.depthReached.value = Math.max(ctx.depthReached.value, sqlOutcome.depthReached);
+      ctx.touchedExpiringTuple.value ||= sqlOutcome.touchedExpiringTuple;
       return sqlOutcome.allowed
         ? { allowed: true, proof: sqlOutcome.proof }
         : { allowed: false, disproof: sqlOutcome.disproof };
@@ -573,7 +605,12 @@ async function evalRewrite(
       };
     }
     case 'tupleToUserset': {
-      const subjects = await listTupleSubjects(ctx.client, object, rule.relation);
+      const { subjects, touchedExpiringTuple } = await listTupleSubjects(
+        ctx.client,
+        object,
+        rule.relation,
+      );
+      ctx.touchedExpiringTuple.value ||= touchedExpiringTuple;
       const followed: Array<{ through: EntityRef; disproof: DisproofStep }> = [];
       for (const newObject of subjects) {
         const outcome = await resolve(
@@ -612,6 +649,8 @@ async function evalRewrite(
 interface TupleSubjectRow {
   subject_ns: string;
   subject_id: string;
+  /** See `FrontierTupleRow.expires_at`'s own doc comment — the identical D-144 liveness/touch-tracking convention, applied to this file's other real-tuple read. */
+  expires_at: Date | null;
 }
 
 /**
@@ -643,19 +682,32 @@ interface TupleSubjectRow {
  * a different real moment in the database's history than the frontier
  * queries `sqlRelationMembershipWithWitness` issues later in the very same
  * check.
+ *
+ * Expiring tuples (D-144): the `where` clause's `expires_at is null or
+ * expires_at > now()` excludes an expired tuple-to-userset link exactly as
+ * if it had already been deleted — a `parent`-style relation that has
+ * timed out is simply never followed. Unlike `fetchTuplesOnFrontier`'s own
+ * read (mechanism 2), this is a wholly separate mechanism (mechanism 1)
+ * with no other query that would otherwise catch an expiring hop here, so
+ * this function reports its own `touchedExpiringTuple` back to its caller
+ * directly rather than relying on some other read to cover it.
  */
 async function listTupleSubjects(
   client: QueryExecutor,
   object: EntityRef,
   relation: string,
-): Promise<EntityRef[]> {
+): Promise<{ subjects: EntityRef[]; touchedExpiringTuple: boolean }> {
   const { rows } = await client.query<TupleSubjectRow>(
-    `select subject_ns, subject_id
+    `select subject_ns, subject_id, expires_at
      from relation_tuples
-     where object_ns = $1 and object_id = $2 and relation = $3`,
+     where object_ns = $1 and object_id = $2 and relation = $3
+       and (expires_at is null or expires_at > now())`,
     [object.ns, object.id, relation],
   );
-  return rows.map((row) => ({ ns: row.subject_ns, id: row.subject_id }));
+  return {
+    subjects: rows.map((row) => ({ ns: row.subject_ns, id: row.subject_id })),
+    touchedExpiringTuple: rows.some((row) => row.expires_at !== null),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -763,6 +815,18 @@ export interface FrontierRow {
  * Exported — see `FrontierRow`'s own doc comment for why (DST D3's
  * differential-equivalence suite, `docs/DECISIONS.md` D-100, calls this
  * real function directly against a real Postgres testcontainer).
+ *
+ * **Expiring tuples (D-144).** The recursive term's own `where` clause
+ * excludes an expired edge tuple (`rt.expires_at is null or rt.expires_at >
+ * now()`) exactly as if it had already been deleted — an expired userset
+ * link is simply never traversed. Deliberately not reflected in `FrontierRow`
+ * itself (no new column here): `fetchTuplesOnFrontier`'s own result set
+ * already re-reads every real tuple on every node this function reaches,
+ * `subject_relation` set or not, which is a strict superset of the edges
+ * this function's own traversal consumed — see that function's own doc
+ * comment for why `touchedExpiringTuple` tracking lives there instead,
+ * keeping `FrontierRow`'s shape (and DST's differential-equivalence
+ * comparison against it) completely unaffected by this feature.
  */
 export async function fetchReachableFrontier(
   client: QueryExecutor,
@@ -789,6 +853,7 @@ export async function fetchReachableFrontier(
        join membership m
          on rt.object_ns = m.ns and rt.object_id = m.id and rt.relation = m.relation
        where rt.subject_relation is not null
+         and (rt.expires_at is null or rt.expires_at > now())
          and m.depth < $4
          and not (
            (rt.subject_ns || ':' || rt.subject_id || '#' || rt.subject_relation) = any (m.path)
@@ -822,6 +887,20 @@ interface FrontierTupleRow {
   subject_ns: string;
   subject_id: string;
   subject_relation: string | null;
+  /**
+   * Non-null iff this real, stored tuple carries a validity window (D-144).
+   * Every row returned here has already passed the liveness filter in this
+   * function's own SQL (see `fetchTuplesOnFrontier`'s doc comment) — a
+   * non-null value here means "live right now, but not forever," never
+   * "expired." `productionCheck` folds this into `touchedExpiringTuple`
+   * (see `ProductionCheckResult`'s own doc comment) precisely because this
+   * function's result set already covers every tuple `fetchReachableFrontier`
+   * itself traversed as an edge (any tuple stored on a reached frontier
+   * node, `subject_relation` set or not) as well as every plain-grant
+   * candidate — so checking expiry here alone is sufficient without also
+   * threading it through `FrontierRow` itself.
+   */
+  expires_at: Date | null;
 }
 
 /**
@@ -834,6 +913,20 @@ interface FrontierTupleRow {
  * deleted, and its target independently (re)granted, between these two
  * queries — see `docs/DECISIONS.md` D-092 and `productionCheck`'s own doc
  * comment for the transaction this now runs inside.
+ *
+ * **Expiring tuples (D-144).** `where rt.expires_at is null or rt.expires_at
+ * > now()` excludes an expired tuple exactly as if it had already been
+ * deleted — real Postgres's `now()` is fixed at this transaction's own start
+ * (the same `REPEATABLE READ` anchoring `assertTokenObservedOnSnapshot`'s
+ * own doc comment already relies on for the token floor check), so every
+ * read inside one check agrees on the same instant, never drifting mid-walk.
+ * This is the ONE place in this mechanism expiry is filtered — deliberately
+ * not also duplicated into `fetchReachableFrontier`'s own frontier-discovery
+ * query, since this query's own frontier-unnest join already re-reads every
+ * real tuple stored on every reached node (`subject_relation` set or not),
+ * a strict superset of the edge tuples that query traversed to reach those
+ * nodes in the first place — see `FrontierTupleRow.expires_at`'s own doc
+ * comment for why checking expiry here alone is sufficient.
  */
 async function fetchTuplesOnFrontier(
   client: QueryExecutor,
@@ -849,12 +942,13 @@ async function fetchTuplesOnFrontier(
     relArr.push(row.relation);
   }
   const { rows } = await client.query<FrontierTupleRow>(
-    `select rt.object_ns, rt.object_id, rt.relation, rt.subject_ns, rt.subject_id, rt.subject_relation
+    `select rt.object_ns, rt.object_id, rt.relation, rt.subject_ns, rt.subject_id, rt.subject_relation, rt.expires_at
      from relation_tuples rt
      join (
        select unnest($1::text[]) as ns, unnest($2::text[]) as id, unnest($3::text[]) as relation
      ) as frontier
-       on rt.object_ns = frontier.ns and rt.object_id = frontier.id and rt.relation = frontier.relation`,
+       on rt.object_ns = frontier.ns and rt.object_id = frontier.id and rt.relation = frontier.relation
+     where rt.expires_at is null or rt.expires_at > now()`,
     [nsArr, idArr, relArr],
   );
   return rows;
@@ -954,10 +1048,18 @@ function buildRelationDisproof(
   return { kind: 'relationDisproof', object, relation, maxDepth, nodes };
 }
 
-/** Same shape as `ProductionOutcome`, plus the deepest frontier depth this specific call's own recursive CTE reached (0 if it never recursed at all). */
+/**
+ * Same shape as `ProductionOutcome`, plus the deepest frontier depth this
+ * specific call's own recursive CTE reached (0 if it never recursed at
+ * all), plus `touchedExpiringTuple` (D-144) — true iff `fetchTuplesOnFrontier`
+ * returned any live tuple carrying a non-null `expires_at`, regardless of
+ * whether it was the one that matched; see `ProductionCheckResult
+ * .touchedExpiringTuple`'s own doc comment for why this is deliberately
+ * over-approximate.
+ */
 type SqlRelationOutcome =
-  | { allowed: true; proof: ResolutionStep; depthReached: number }
-  | { allowed: false; disproof: DisproofStep; depthReached: number };
+  | { allowed: true; proof: ResolutionStep; depthReached: number; touchedExpiringTuple: boolean }
+  | { allowed: false; disproof: DisproofStep; depthReached: number; touchedExpiringTuple: boolean };
 
 /**
  * Answers "is `subject` a transitive member of the set granted by
@@ -999,6 +1101,12 @@ async function sqlRelationMembershipWithWitness(
 
   const tupleRows = await fetchTuplesOnFrontier(client, frontier);
   const tuplesByFrontierKey = groupTuplesByFrontierKey(tupleRows);
+  // D-144 — see FrontierTupleRow.expires_at's own doc comment for why this
+  // one check covers every expiring tuple relevant to this whole mechanism,
+  // both the plain-grant candidates below and every userset edge
+  // fetchReachableFrontier traversed to reach this frontier in the first
+  // place (tupleRows is a strict superset of those edges).
+  const touchedExpiringTuple = tupleRows.some((t) => t.expires_at !== null);
 
   const orderedFrontier = [...frontier.values()].sort((a, b) => a.depth - b.depth);
   for (const row of orderedFrontier) {
@@ -1008,7 +1116,12 @@ async function sqlRelationMembershipWithWitness(
         t.subject_relation === null && t.subject_ns === subject.ns && t.subject_id === subject.id,
     );
     if (match) {
-      return { allowed: true, proof: reconstructProof(row.path, subject), depthReached };
+      return {
+        allowed: true,
+        proof: reconstructProof(row.path, subject),
+        depthReached,
+        touchedExpiringTuple,
+      };
     }
   }
 
@@ -1016,6 +1129,7 @@ async function sqlRelationMembershipWithWitness(
     allowed: false,
     disproof: buildRelationDisproof(object, relation, maxDepth, frontier, tuplesByFrontierKey),
     depthReached,
+    touchedExpiringTuple,
   };
 }
 
@@ -1167,6 +1281,7 @@ export async function productionCheck(
 
   const maxDepth = options?.maxDepth ?? env.CHECK_MAX_DEPTH;
   const depthReached = { value: 0 };
+  const touchedExpiringTuple = { value: false };
 
   const client = await pool.connect();
   try {
@@ -1174,12 +1289,27 @@ export async function productionCheck(
     if (atToken !== undefined) {
       await assertTokenObservedOnSnapshot(client, atToken);
     }
-    const ctx: WalkContext = { client, maxDepth, schemaCache: new Map(), depthReached };
+    const ctx: WalkContext = {
+      client,
+      maxDepth,
+      schemaCache: new Map(),
+      depthReached,
+      touchedExpiringTuple,
+    };
     const outcome = await resolve(ctx, subject, object, relationOrPermission, new Set(), 0);
     await client.query('COMMIT');
     return outcome.allowed
-      ? { allowed: true, path: outcome.proof, depth: depthReached.value }
-      : { allowed: false, depth: depthReached.value };
+      ? {
+          allowed: true,
+          path: outcome.proof,
+          depth: depthReached.value,
+          touchedExpiringTuple: touchedExpiringTuple.value,
+        }
+      : {
+          allowed: false,
+          depth: depthReached.value,
+          touchedExpiringTuple: touchedExpiringTuple.value,
+        };
   } catch (err) {
     // The ROLLBACK call's own failure must never replace `err` — the exact
     // bug class found and fixed via DST crash-injection work in

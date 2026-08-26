@@ -198,6 +198,17 @@ const tupleBodySchema = z
     subjectNs: z.string().min(1),
     subjectId: z.string().min(1),
     subjectRelation: z.string().min(1).optional(),
+    // Optional validity-window expiry (D-144) — an opaque, unvalidated
+    // string here, same as `checkBodySchema.atToken` above: no
+    // `format: 'date-time'` keyword and no min-length check at the schema
+    // layer (grepped for an existing precedent first; there isn't one in
+    // this codebase) because the actual parse-and-range-check happens in
+    // the `POST /tuples` route handler below, exactly the way that route's
+    // sibling `/check` already decodes `atToken` itself rather than
+    // validating it here, so a malformed value gets this API's one
+    // `invalid_request` shape via `invalidRequestError`, not a
+    // differently-worded Zod error.
+    expiresAt: z.string().optional(),
   })
   .strict();
 
@@ -945,7 +956,25 @@ export async function buildServer(
         await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
         return;
       }
+      // Optional validity-window expiry (D-144) — parsed here, not in
+      // `tupleBodySchema` above, mirroring `/check`'s own `atToken` decode:
+      // a malformed value gets this route's own `invalidRequestError` shape,
+      // not a differently-worded Zod error, and `writeTuple` is never
+      // called for it.
+      const { expiresAt: rawExpiresAt } = parsed.data;
+      let expiresAt: Date | undefined;
+      if (rawExpiresAt !== undefined) {
+        expiresAt = new Date(rawExpiresAt);
+        if (Number.isNaN(expiresAt.getTime())) {
+          await sendApiError(
+            reply,
+            invalidRequestError('expiresAt: not a valid ISO-8601 date string'),
+          );
+          return;
+        }
+      }
       const tuple = toTupleKey(parsed.data);
+      if (expiresAt !== undefined) tuple.expiresAt = expiresAt;
       const result = await runOrInfrastructureError(reply, () => writeTuple(pool, tuple));
       if (result === undefined) return;
       // Every successful write can change a cached check's answer — see

@@ -69,7 +69,11 @@ function wireHappyPathMocks(): ReturnType<typeof generateFixture> {
   // `ProductionCheckResult` shape so `buildDivergenceRecord` has something
   // sane to classify. This test cares about cleanup-failure handling, not
   // about which verdict results — see the top-of-file doc comment.
-  vi.spyOn(productionModule, 'productionCheck').mockResolvedValue({ allowed: false, depth: 0 });
+  vi.spyOn(productionModule, 'productionCheck').mockResolvedValue({
+    allowed: false,
+    depth: 0,
+    touchedExpiringTuple: false,
+  });
 
   return fixture;
 }

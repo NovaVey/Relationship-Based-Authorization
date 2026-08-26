@@ -607,7 +607,7 @@ describe('with ADMIN_API_KEY set, a wrong bearer key rejects with 401 and never 
 describe('with the correct admin key, each gated route calls its domain function and returns its result verbatim', () => {
   it('a-correct-admin-key-on-post-check-calls-performcheck-and-returns-its-result-verbatim', async () => {
     env.ADMIN_API_KEY = CORRECT_KEY;
-    const canned: PerformCheckResult = { allowed: false, depth: 0 };
+    const canned: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
     const spy = vi.spyOn(checksModule, 'performCheck').mockResolvedValue(canned);
 
     const res = await app.inject({
@@ -1262,4 +1262,77 @@ describe('D-105: authFloodState is a bounded LruMap, not an unbounded plain Map'
       await boundedApp.close();
     }
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 13. D-144 — the optional `expiresAt` validity-window field on
+//     `POST /tuples`. Parsed and range-checked directly in the route
+//     handler (mirroring `/check`'s own `atToken` decode above, not
+//     `tupleBodySchema` itself) so a malformed value gets this API's one
+//     `invalid_request` shape via `invalidRequestError`, never a
+//     differently-worded Zod error — and `writeTuple` is never called for
+//     it.
+// ---------------------------------------------------------------------------
+
+describe('POST /tuples expiresAt (D-144)', () => {
+  it('a-valid-iso-8601-expiresat-body-field-is-parsed-into-a-date-and-passed-through-to-writetuple-verbatim', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi
+      .spyOn(tuplesModule, 'writeTuple')
+      .mockResolvedValue({ ok: true, token: 1, created: true } satisfies WriteTupleResult);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: { ...validTupleBody, expiresAt: '2027-01-01T00:00:00.000Z' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ expiresAt: new Date('2027-01-01T00:00:00.000Z') }),
+    );
+  });
+
+  it('a-malformed-expiresat-body-field-is-rejected-with-400-invalid-request-and-writetuple-is-never-called', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(tuplesModule, 'writeTuple');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: { ...validTupleBody, expiresAt: 'not-a-real-date' },
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  // Regression guard: a request with no `expiresAt` at all — the shape
+  // every existing caller sends — must keep behaving exactly as it did
+  // before this field existed, both in the response returned and in what
+  // `writeTuple` is actually called with (no `expiresAt` key at all, not an
+  // explicit `undefined` one).
+  it('a-tuple-write-body-with-no-expiresat-at-all-still-calls-writetuple-with-no-expiresat-key-exactly-as-before-this-field-existed', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const canned: WriteTupleResult = { ok: true, token: 42, created: true };
+    const spy = vi.spyOn(tuplesModule, 'writeTuple').mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: validTupleBody,
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(await parseBody(res)).toEqual({ token: encodeToken(42), created: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [, calledTuple] = spy.mock.calls[0]!;
+    expect(calledTuple).not.toHaveProperty('expiresAt');
+  });
 });
