@@ -77,14 +77,20 @@ describe('verify-schema — exit codes against the known-answer corpus, through 
     expect(result.stdout).toContain('VIOLATED');
   }, 20_000);
 
-  it('non-monotone HOLDS up to k=1 (bounded, not a proof) → exit 2, reported with the bound', async () => {
+  it('non-monotone HOLDS, now decided exactly by the new SMT tier (not bounded) → exit 0, reported bare, no "up to k"', async () => {
+    // Before the SMT tier (docs/DECISIONS.md) existed, this fixture fell
+    // through to bounded search and reported `HOLDS up to k = 1`, exit 2
+    // — a bound, not a proof. The SMT tier now decides this exclusion
+    // exactly (`document.publish = editor - blocked`, non-recursive), so
+    // `checkAndValidate` never reaches bounded search for it at all.
     const result = await runCli([
       SCHEMA_DIR + 'non-monotone.authz',
       '--invariants',
       INVARIANT_DIR + 'exclusion-blocked-cannot-publish.invariant',
     ]);
-    expect(result.exitCode).toBe(2);
-    expect(result.stdout).toContain('HOLDS up to k = 1');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('HOLDS (fragment: non-monotone, proof: exact)');
+    expect(result.stdout).not.toContain('up to k');
   }, 20_000);
 
   it('a real static/runtime self-validation mismatch (depth-exceeds-limit) → exit 3, reported loudly, not as a confirmed VIOLATED', async () => {

@@ -19,7 +19,7 @@ const NOT_APPLICABLE: ValidationOutcome = { kind: 'not-applicable' };
 const CONFIRMED: ValidationOutcome = {
   kind: 'confirmed',
   witness: [],
-  engineResult: { allowed: true, depth: 1 },
+  engineResult: { allowed: true, depth: 1, touchedExpiringTuple: false },
 };
 const EMPIRICALLY_CLEAN: ValidationOutcome = { kind: 'empirically-clean', sampled: 200 };
 const MISMATCH: ValidationOutcome = {
@@ -30,7 +30,7 @@ const MISMATCH: ValidationOutcome = {
 const EMPIRICAL_COUNTEREXAMPLE: ValidationOutcome = {
   kind: 'empirical-counterexample',
   tuples: [],
-  engineResult: { allowed: true, depth: 3 },
+  engineResult: { allowed: true, depth: 3, touchedExpiringTuple: false },
 };
 
 function result(partial: Partial<CheckResult> & Pick<CheckResult, 'verdict'>): CheckResult {

@@ -1,0 +1,15 @@
+// Companion to `fixtures/schemas/sensitive-review-non-recursive.authz` —
+// see that file's own header comment. No constraints at all, deliberately
+// (matching `positive-control.invariant`'s own shape): this asks whether
+// `sensitive_review` is reachable at all, the same "no constraints, just
+// a lot of candidate tuples" shape that made the real
+// `folder#sensitive_review` exceed `MAX_BOUNDED_CANDIDATES` in the first
+// place (docs/DECISIONS.md D-118) — expected VIOLATED, since nothing
+// stops a witness from directly granting `sensitive_reviewer` alongside
+// `viewer`.
+invariant sensitive_review_reachable {
+  s: user
+  o: document2
+
+  goal: sensitive_review(s, o)
+}

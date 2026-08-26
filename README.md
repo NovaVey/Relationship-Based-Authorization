@@ -642,9 +642,9 @@ of this project has.
 | `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]` | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr)         |
 | `authz audit verify`                                                                   | Walk the `checks` hash chain; reports every row verified intact or names the exact first tampered row (D-148)                              |
 | `authz audit privesc <object> <relation> [--expected s1,s2,...]`                       | Every real subject currently able to reach a relation/permission, each with its own path; `--expected` flags UNEXPECTED/MISSING drift      |
-| `authz apikey create --role <admin\|readonly> [--scope ns1,ns2] [--expires-at T]`      | Mint a real, DB-backed API key; prints the raw key exactly once (D-151)                                                                    |
-| `authz apikey revoke <id>`                                                             | Revoke a DB-backed API key by id; rejected immediately on every future use (D-151)                                                         |
-| `authz apikey list`                                                                    | List every DB-backed API key (id, name, role, scopes, timestamps) — never a hash or raw key (D-151)                                        |
+| `authz apikey create --role <admin\|readonly> [--scope ns1,ns2] [--expires-at T]`      | Mint a real, DB-backed API key; prints the raw key exactly once (D-152)                                                                    |
+| `authz apikey revoke <id>`                                                             | Revoke a DB-backed API key by id; rejected immediately on every future use (D-152)                                                         |
+| `authz apikey list`                                                                    | List every DB-backed API key (id, name, role, scopes, timestamps) — never a hash or raw key (D-152)                                        |
 | `authz serve`                                                                          | Start the Fastify API server                                                                                                               |
 
 `authz serve` exposes the same operations over HTTP, plus two bulk
@@ -653,7 +653,7 @@ reverse-lookup operations with no CLI command of their own:
 | Method   | Route             | Auth                                  | Rate limit | Does                                                                       |
 | -------- | ----------------- | ------------------------------------- | ---------- | -------------------------------------------------------------------------- |
 | `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                           |
-| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-151) |
+| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-152) |
 | `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                              |
 | `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                         |
 | `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                       |
@@ -667,7 +667,7 @@ reverse-lookup operations with no CLI command of their own:
 `READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
 the four read/list routes above without also granting write access.
 `ADMIN_API_KEY` alone still authorizes every route, exactly as before that
-credential existed. A third, optional credential tier (D-151) mints real,
+credential existed. A third, optional credential tier (D-152) mints real,
 DB-backed keys (`authz apikey create/revoke/list`) that can additionally be
 scoped to a fixed set of namespaces and/or given an expiry — every gated
 route above rejects an out-of-scope namespace with `403`, and neither
