@@ -2462,3 +2462,17 @@ Asked to fix the connection-exhaustion deadlock D-140 disclosed as a byproduct a
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .` all clean. Root fast suite: 56 files, 811 tests (up from 56/796). Both touched real-Postgres integration files re-run live via LOCALVERIFY and confirmed passing and byte-clean.
 
 Full account: `docs/DECISIONS.md` D-143.
+
+## Feature ideation, then a scope decision made deliberately (D-144): time-window caveats in, general ABAC out
+
+**Owner:** the main agent, dispatching a 6-lens ideation workflow (model parity, ops readiness, DX/API surface, security/audit, performance/scale, proof-methodology), each agent grounded directly in README.md/DECISIONS.md/the real source tree rather than proposing generic ideas.
+
+Asked for feature ideas, then asked to build them. Two of the ~28 raised ideas turned out not to be "just build it" — a materialized group-membership closure (real, measured value, but a naive shortcut is exactly the shape of change that could silently reintroduce a false grant) and general caveats/attribute conditions on a relation, which D-114 had already named as explicitly out of scope for v1.
+
+D-114 itself said the right move, if a real need ever surfaced, was a new, dated decision reopening it — never a silent drift. A concrete need came up during this same ideation pass: expiring/time-boxed tuples (contractor access, temporary elevation), which this DSL currently has no way to express without an external cron job deleting tuples out-of-band — exactly the "authorization logic scattered outside the system of record" failure mode this project's own README opens by naming as the problem it exists to stop.
+
+**D-144 reopens D-114's exclusion, narrowly.** In scope: a closed-form time-window check on a tuple (an `expires_at` comparison against the current clock, the same shape as `atToken`'s existing floor comparison) — provable the same way everything else here is proven, because the input space stays closed. Explicitly still out: a general attribute/context-evaluation engine (CEL/Rego/Cedar-style), which README's own "What this is not" section already draws a hard line against — that would open the input space to an unbounded caller-supplied context, a materially different and much larger soundness obligation this entry does not take on.
+
+This entry makes no code change — it's the decision D-114 itself asked for before implementation touches that boundary. Building the narrow form (migration, both resolvers' independent expiry logic, a new DST fault for an expiry boundary crossing mid-transaction, and a new `docs/CONSISTENCY.md` paragraph — time-based revocation is a deny with no corresponding write event, a genuinely new category) is tracked, separate follow-up work, not done here. One sharp risk flagged in the entry so it isn't rediscovered the hard way later: the opt-in check-result cache (D-135) invalidates only on writes today, so a cached `ALLOW` could outlive a tuple's real expiry unless the cache's TTL is proven to never outlive the shortest live `expires_at` it cached.
+
+Full account: `docs/DECISIONS.md` D-144.
