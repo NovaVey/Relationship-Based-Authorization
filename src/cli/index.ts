@@ -22,6 +22,7 @@ import { expandCli } from './commands/expand.js';
 import { serve } from './commands/serve.js';
 import { auditVerify } from './commands/audit.js';
 import { apikeyCreate, apikeyRevoke, apikeyList } from './commands/apikey.js';
+import { privescCli } from './commands/privesc.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -230,6 +231,24 @@ apikey
   .description('List every API key (id, name, role, scopes, timestamps) — never a hash or raw key')
   .action(async () => {
     await apikeyList();
+  });
+
+audit
+  .command('privesc')
+  .description(
+    'Report every real subject currently able to reach a relation or permission on an ' +
+      'object, each with its own real resolution path — a policy-drift detector for a ' +
+      'security reviewer',
+  )
+  .argument('<object>', "namespace:id, e.g. 'document:sensitive-doc'")
+  .argument('<relation>', 'relation or permission name')
+  .option(
+    '--expected <subjects>',
+    "comma-separated 'namespace:id' allow-list; flags any other subject found as " +
+      'UNEXPECTED and any listed subject not found as MISSING',
+  )
+  .action(async (object: string, relation: string, options: { expected?: string }) => {
+    await privescCli(object, relation, options);
   });
 
 program
