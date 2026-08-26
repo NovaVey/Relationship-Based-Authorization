@@ -130,3 +130,87 @@ describe('authz doctor — a runMigrations failure is never blamed on Postgres r
     expect(errors.some((line) => line.includes('Check DATABASE_URL in .env'))).toBe(true);
   });
 });
+
+/**
+ * The MAX_CONCURRENCY/PG_POOL_MAX startup check, closing D-140's own
+ * "Revisit if" (enforced weakly, at startup, as a warning — see
+ * `src/config/env.ts`'s own `PG_POOL_MAX` doc comment for why this is a
+ * soft warning, not a §7 exit-code-3 hard failure: D-143 already fixed
+ * `getConfig`'s second-connection dependency, so the deadlock this
+ * invariant used to guard against no longer happens; violating it today
+ * only costs throughput, not correctness). Same DB-free mocking pattern as
+ * the finding #4 tests above — `getPool`/`closePool`/`runMigrations` are
+ * all mocked, no real Postgres needed to prove which message prints when.
+ */
+describe('authz doctor — the MAX_CONCURRENCY/PG_POOL_MAX startup warning', () => {
+  const ORIGINAL_DATABASE_URL = env.DATABASE_URL;
+  const ORIGINAL_MAX_CONCURRENCY = env.MAX_CONCURRENCY;
+  const ORIGINAL_PG_POOL_MAX = env.PG_POOL_MAX;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    env.DATABASE_URL = ORIGINAL_DATABASE_URL;
+    env.MAX_CONCURRENCY = ORIGINAL_MAX_CONCURRENCY;
+    env.PG_POOL_MAX = ORIGINAL_PG_POOL_MAX;
+    process.exitCode = undefined;
+  });
+
+  function mockHealthyDoctorDeps(): void {
+    env.DATABASE_URL = 'postgres://placeholder/db'; // getPool is mocked below — never a real connection
+    const fakePool = {
+      query: vi
+        .fn()
+        .mockResolvedValue({ rows: [{ current_database: 'authz', server_version: '16.4' }] }),
+    };
+    vi.spyOn(clientModule, 'getPool').mockReturnValue(fakePool as unknown as Pool);
+    vi.spyOn(clientModule, 'closePool').mockResolvedValue(undefined);
+    vi.spyOn(migrateModule, 'runMigrations').mockResolvedValue({ applied: [], alreadyApplied: [] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  }
+
+  it('MAX_CONCURRENCY-equal-to-PG_POOL_MAX-warns-with-both-exact-numbers-and-still-exits-successfully', async () => {
+    mockHealthyDoctorDeps();
+    env.MAX_CONCURRENCY = 10;
+    env.PG_POOL_MAX = 10;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await doctor();
+
+    expect(process.exitCode).toBeUndefined(); // never a hard failure — see this describe block's own doc comment
+    const warnings = warnSpy.mock.calls.map((call) => String(call[0]));
+    expect(
+      warnings.some(
+        (line) => line.includes('MAX_CONCURRENCY (10)') && line.includes('PG_POOL_MAX (10)'),
+      ),
+    ).toBe(true);
+  });
+
+  it('MAX_CONCURRENCY-greater-than-PG_POOL_MAX-warns-with-both-exact-numbers', async () => {
+    mockHealthyDoctorDeps();
+    env.MAX_CONCURRENCY = 12;
+    env.PG_POOL_MAX = 8;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await doctor();
+
+    expect(process.exitCode).toBeUndefined();
+    const warnings = warnSpy.mock.calls.map((call) => String(call[0]));
+    expect(
+      warnings.some(
+        (line) => line.includes('MAX_CONCURRENCY (12)') && line.includes('PG_POOL_MAX (8)'),
+      ),
+    ).toBe(true);
+  });
+
+  it('MAX_CONCURRENCY-safely-below-PG_POOL_MAX-stays-silent', async () => {
+    mockHealthyDoctorDeps();
+    env.MAX_CONCURRENCY = 8;
+    env.PG_POOL_MAX = 10;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await doctor();
+
+    expect(process.exitCode).toBeUndefined();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});

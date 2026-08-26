@@ -84,14 +84,49 @@ const validSchemaSourceBody = {
 };
 
 /** The one query shape performCheck's own audit insert issues — anything else reaching this pool is a sign of a broken isolation assumption in this file. */
-function fakePool(): Pool {
+// insertCheckRow (src/audit/checks.ts, the hash-chained audit log) now opens
+// its own connection and transaction — BEGIN, the chain lock, a tip-read
+// SELECT, the INSERT, COMMIT — rather than one bare pool.query call. This
+// fake models that exact sequence on the connected client; pool.query itself
+// is never called by insertCheckRow any more, so it throws if reached at all.
+function fakeClient(): { query: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> } {
   return {
     query: vi.fn(async (sql: unknown) => {
-      if (typeof sql === 'string' && sql.includes('insert into checks')) {
+      if (typeof sql !== 'string') {
+        throw new Error(
+          `check-cache-wiring test's fake client got a non-string query: ${String(sql)}`,
+        );
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('pg_advisory_xact_lock')) {
+        return { rows: [] };
+      }
+      if (sql.includes('select row_hash from checks')) {
+        // Empty chain tip — insertCheckRow falls back to its own genesis
+        // constant, exactly like a fresh table. This file's own scope is
+        // cache wiring, not the hash chain itself (see checks-hash-chain.test.ts).
+        return { rows: [] };
+      }
+      if (sql.includes('insert into checks')) {
         return { rows: [] };
       }
       throw new Error(
-        `check-cache-wiring test's fake pool got an unexpected query: ${String(sql)}`,
+        `check-cache-wiring test's fake client got an unexpected query: ${String(sql)}`,
+      );
+    }),
+    release: vi.fn(),
+  };
+}
+
+function fakePool(): Pool {
+  return {
+    connect: vi.fn(async () => fakeClient()),
+    query: vi.fn(async (sql: unknown) => {
+      throw new Error(
+        `check-cache-wiring test's fake pool got an unexpected direct query (insertCheckRow ` +
+          `should only ever use pool.connect() now): ${String(sql)}`,
       );
     }),
   } as unknown as Pool;

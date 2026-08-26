@@ -46,6 +46,7 @@ const FULLY_POPULATED_VALID_ENV = {
   SOUNDNESS_FUZZ_QUERIES: '2000',
   SOUNDNESS_FUZZ_SEED: 'a-fixed-reproducible-seed',
   MAX_CONCURRENCY: '4',
+  PG_POOL_MAX: '20',
   ADMIN_API_KEY: 'a'.repeat(40),
 };
 
@@ -64,6 +65,7 @@ describe('EnvSchema.safeParse — a fully-populated, valid env object', () => {
       SOUNDNESS_FUZZ_QUERIES: 2000,
       SOUNDNESS_FUZZ_SEED: 'a-fixed-reproducible-seed',
       MAX_CONCURRENCY: 4,
+      PG_POOL_MAX: 20,
       ADMIN_API_KEY: 'a'.repeat(40),
     });
   });
@@ -84,6 +86,7 @@ describe('EnvSchema.safeParse({}) — nothing is genuinely required; every field
       SOUNDNESS_FUZZ_QUERIES: 5000,
       SOUNDNESS_FUZZ_SEED: undefined,
       MAX_CONCURRENCY: 8,
+      PG_POOL_MAX: 10,
       ADMIN_API_KEY: undefined,
     });
   });
@@ -110,6 +113,7 @@ describe('EnvSchema.safeParse — finding #12\'s fix: every defaulted field, not
     ['CHECK_CACHE_TTL_MS', 0],
     ['SOUNDNESS_FUZZ_QUERIES', 5000],
     ['MAX_CONCURRENCY', 8],
+    ['PG_POOL_MAX', 10],
   ] as const)(
     '%s: "" resolves to its documented default (%j), not a too_small/invalid_enum_value failure',
     (field, expectedDefault) => {
@@ -158,6 +162,28 @@ describe('EnvSchema.safeParse — a non-numeric or out-of-range PORT fails', () 
 
   it('a-non-integer-port-fails', () => {
     const result = EnvSchema.safeParse({ ...FULLY_POPULATED_VALID_ENV, PORT: '3000.5' });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('EnvSchema.safeParse — PG_POOL_MAX rejects the same shapes MAX_CONCURRENCY (the other optionalNumber().positive() field) rejects', () => {
+  it('a-non-numeric-value-fails', () => {
+    const result = EnvSchema.safeParse({ ...FULLY_POPULATED_VALID_ENV, PG_POOL_MAX: 'lots' });
+    expect(result.success).toBe(false);
+  });
+
+  it('a-zero-value-fails-positive-is-required-not-merely-non-negative', () => {
+    const result = EnvSchema.safeParse({ ...FULLY_POPULATED_VALID_ENV, PG_POOL_MAX: '0' });
+    expect(result.success).toBe(false);
+  });
+
+  it('a-negative-value-fails', () => {
+    const result = EnvSchema.safeParse({ ...FULLY_POPULATED_VALID_ENV, PG_POOL_MAX: '-5' });
+    expect(result.success).toBe(false);
+  });
+
+  it('a-non-integer-value-fails', () => {
+    const result = EnvSchema.safeParse({ ...FULLY_POPULATED_VALID_ENV, PG_POOL_MAX: '10.5' });
     expect(result.success).toBe(false);
   });
 });

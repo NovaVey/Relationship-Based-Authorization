@@ -62,7 +62,7 @@
  */
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import { writeTuple, type TupleKey } from '../../../src/store/tuples.js';
@@ -647,19 +647,46 @@ describe('a failed checks audit-log write fails the whole check operation (D-042
     const object = ref(ns, objectId);
 
     // Simulates an infrastructure fault on exactly one query — the
-    // `checks` insert — while every other query `productionCheck` issues
-    // underneath still runs for real against real Postgres. This is not
-    // mocking the thing under test; it's the same "vi.spyOn one specific
-    // failure mode" isolation `test/unit/cli/soundness.test.ts` already
-    // established for Phase 5.
-    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<unknown>;
-    const spy = vi.spyOn(pool, 'query').mockImplementation((async (...args: any[]) => {
-      const text: unknown = args[0];
-      if (typeof text === 'string' && text.trim().toLowerCase().startsWith('insert into checks')) {
-        throw new Error('simulated checks audit-log write failure');
-      }
-      return originalQuery(...args);
-    }) as any);
+    // `checks` insert — while every other query `productionCheck` and
+    // `insertCheckRow` issue underneath still run for real against real
+    // Postgres. insertCheckRow (src/audit/checks.ts, the hash-chained audit
+    // log) now opens its own connection via `pool.connect()` rather than a
+    // bare `pool.query`, so this spies on `connect` instead — and wraps a
+    // FRESH per-call object around the real client rather than mutating the
+    // real client's own `.query` method in place. Mutating it in place was
+    // tried first and found to be a real, live bug: `pg.Pool` can hand the
+    // same underlying client object back out on a later `connect()` call
+    // (including ones after `mockRestore()`), so a mutation on that shared
+    // object outlives the spy itself — the *next* test's own connect would
+    // silently inherit the always-throwing `.query`. A fresh wrapper avoids
+    // this entirely: the real client is never touched, only ever delegated
+    // to. This is not mocking the thing under test; it's the same
+    // "vi.spyOn one specific failure mode" isolation
+    // `test/unit/cli/soundness.test.ts` already established for Phase 5.
+    const originalConnect = pool.connect.bind(pool);
+    async function connectWithSimulatedInsertFailure(): Promise<PoolClient> {
+      const realClient = await originalConnect();
+      const wrapper: Pick<PoolClient, 'query' | 'release'> = {
+        query: ((text: unknown, ...rest: unknown[]) => {
+          if (
+            typeof text === 'string' &&
+            text.trim().toLowerCase().startsWith('insert into checks')
+          ) {
+            throw new Error('simulated checks audit-log write failure');
+          }
+          return (realClient.query as (...queryArgs: unknown[]) => unknown)(text, ...rest);
+        }) as PoolClient['query'],
+        release: (err?: boolean | Error) => realClient.release(err),
+      };
+      return wrapper as PoolClient;
+    }
+    // pool.connect is overloaded (a no-arg Promise form and a callback form)
+    // — insertCheckRow only ever uses the no-arg form, and that's the only
+    // one this mock implements. eslint's misused-promises/unnecessary-
+    // assertion checks both get confused by the overload union itself, not
+    // by anything actually unsafe here.
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    const spy = vi.spyOn(pool, 'connect').mockImplementation(connectWithSimulatedInsertFailure);
 
     await expect(performCheck(pool, subject, object, 'view')).rejects.toThrow(
       /simulated checks audit-log write failure/,

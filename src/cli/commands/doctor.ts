@@ -85,6 +85,26 @@ export async function doctor(): Promise<void> {
       return;
     }
 
+    // A soft, non-fatal warning, not a §7 exit-code-3 infrastructure
+    // failure — `MAX_CONCURRENCY >= PG_POOL_MAX` no longer risks the
+    // genuine connection-exhaustion deadlock it did before D-143 fixed
+    // `getConfig`'s own second-connection dependency (docs/DECISIONS.md
+    // D-140/D-143): every `productionCheck`/`expand()` call today needs
+    // exactly one pool connection for its whole life, so violating this
+    // just means excess concurrent checks (`runSoundnessFuzz`'s own
+    // `checkAllQueries`, `src/soundness/runner.ts`) queue for a free
+    // connection instead of running in parallel — worse throughput, not a
+    // hang. Still worth flagging at startup, cheaply: this exact numeric
+    // relationship is what made the pre-D-143 hazard possible in the first
+    // place, and a future call path could reintroduce a second-connection
+    // dependency the same way `getConfig` once did.
+    if (env.MAX_CONCURRENCY >= env.PG_POOL_MAX) {
+      console.warn(
+        `Warning: MAX_CONCURRENCY (${env.MAX_CONCURRENCY}) >= PG_POOL_MAX (${env.PG_POOL_MAX}) — ` +
+          'concurrent check batches (e.g. authz soundness run) may queue for pool connections instead of running in parallel; set MAX_CONCURRENCY well below PG_POOL_MAX.',
+      );
+    }
+
     console.log('doctor: OK');
   } finally {
     await closePool();

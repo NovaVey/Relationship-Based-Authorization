@@ -35,6 +35,32 @@
  * server's entire single-threaded event loop for every caller. Fixed by
  * extending the accumulated array in place instead of always copying it.
  *
+ * Bug D — found by continuous crash-fuzzing (`test/unit/schema/dsl/
+ * parser-crash-fuzz.test.ts`), not a manual audit: `flattenChildren` (Bug
+ * C, above) merges a flat, unparenthesized `|`/`&` chain into one flat
+ * n-ary node regardless of length, because union/intersection are
+ * associative. Exclusion (`-`) is not associative (`(a-b)-c != a-(b-c)` in
+ * general), so `parseExpression` never flattens it — each `-` genuinely
+ * nests a new `{kind:'exclusion', base:left, ...}` node one level deeper
+ * than the last, with *nothing* bounding that depth before this fix: Bug
+ * A's `MAX_EXPRESSION_NESTING_DEPTH` counter only charged for `(` nesting,
+ * never for this. A flat chain of ~5,000 `-` operators (`a - a - a - ...`,
+ * zero `(` characters, comfortably inside the real request-body byte cap)
+ * threw a raw, unhandled `RangeError` straight out of `checkCircular
+ * Permissions`'s `collectPermissionDeps` — confirmed live, with a captured
+ * stack trace showing the crash entirely inside that function's own
+ * `node.subtract`/`node.base` recursion, before any fix. `compileRewriteRule`
+ * has the identical structural recursion over the same tree and would
+ * crash the same way for the same input if `collectPermissionDeps` (which
+ * always runs first) didn't crash first. Fixed by charging exclusion-chain
+ * links against the *same* counter and ceiling `(` nesting already used
+ * (renamed `ParserState.parenDepth` -> `nestingDepth` to describe what it
+ * now actually tracks) — the two compose additively, so e.g. 60 levels of
+ * `(` wrapped around a 60-link `-` chain is rejected at the combined 100,
+ * never allowed to reach 120 real AST levels. See `ParserState.nestingDepth`'s
+ * and `MAX_EXPRESSION_NESTING_DEPTH`'s own doc comments for the full
+ * reasoning, and `docs/DECISIONS.md` for the audit this closes.
+ *
  * Per §14 delegation rule 5, these tests were written with only
  * `src/schema/dsl/types.ts` and `src/schema/dsl/errors.ts` read for their
  * public interface (`MAX_EXPRESSION_NESTING_DEPTH`, `SchemaErrorCode`) —
@@ -87,6 +113,33 @@ function longFlatOperatorChainSource(n: number, op: '&' | '|'): string {
   );
 }
 
+/** `n` terms joined by `n - 1` unparenthesized `-` (exclusion) operators — see Bug D below. */
+function longFlatExclusionChainSource(n: number): string {
+  const chain = Array.from({ length: n }, () => 'owner').join(' - ');
+  return ['namespace document {', '  relation owner: user', `  permission p = ${chain}`, '}'].join(
+    '\n',
+  );
+}
+
+/**
+ * `parenCount` levels of real `(` nesting wrapped around an inner flat
+ * exclusion chain of `exclusionOps` operators — Bug D's fix charges both
+ * against the same `nestingDepth` counter, so this is what proves the two
+ * compose additively rather than each getting an independent 100-deep
+ * budget.
+ */
+function nestedParenAroundExclusionChainSource(parenCount: number, exclusionOps: number): string {
+  const open = '('.repeat(parenCount);
+  const close = ')'.repeat(parenCount);
+  const inner = Array.from({ length: exclusionOps + 1 }, () => 'owner').join(' - ');
+  return [
+    'namespace document {',
+    '  relation owner: user',
+    `  permission p = ${open}${inner}${close}`,
+    '}',
+  ].join('\n');
+}
+
 describe('deeply-nested-parenthesized-permission-expressions-are-rejected-with-a-clean-schema-error-not-a-rangeerror', () => {
   it('an-expression-nested-exactly-to-the-documented-ceiling-is-accepted', () => {
     const result = compileSchema(nestedParenSource(MAX_EXPRESSION_NESTING_DEPTH));
@@ -117,6 +170,77 @@ describe('deeply-nested-parenthesized-permission-expressions-are-rejected-with-a
     expect(result!.ok).toBe(false);
     if (result!.ok) return;
     expect(result!.errors.every((e) => e.code === 'expression_nesting_too_deep')).toBe(true);
+  });
+});
+
+describe('a-long-flat-unparenthesized-exclusion-chain-is-rejected-with-a-clean-schema-error-not-a-rangeerror (Bug D)', () => {
+  // Deliberately no `(` anywhere — the structurally new thing Bug D found:
+  // `-` is the one expression-level operator `flattenChildren` never
+  // flattens (exclusion is not associative), so a flat chain of `-`
+  // operators builds a genuinely deep AST with zero paren nesting at all.
+  // Before this fix, nothing charged that depth against
+  // `MAX_EXPRESSION_NESTING_DEPTH` — only real `(` characters did.
+
+  it('a-chain-with-exactly-the-documented-ceiling-worth-of-exclusion-operators-is-accepted', () => {
+    // MAX_EXPRESSION_NESTING_DEPTH terms means MAX_EXPRESSION_NESTING_DEPTH - 1
+    // operators; +1 term gives exactly the ceiling's worth of operators.
+    const result = compileSchema(longFlatExclusionChainSource(MAX_EXPRESSION_NESTING_DEPTH + 1));
+    expect(result.ok).toBe(true);
+  });
+
+  it('one-more-exclusion-operator-past-the-ceiling-is-rejected-with-expression-nesting-too-deep-not-a-crash', () => {
+    const result = compileSchema(longFlatExclusionChainSource(MAX_EXPRESSION_NESTING_DEPTH + 2));
+    expect(result.ok).toBe(false);
+    if (result.ok) return; // narrows for TS; unreachable given the assertion above
+    expect(result.errors.length).toBe(1);
+    const [error] = result.errors;
+    expect(error).toBeDefined();
+    expect(error?.code).toBe('expression_nesting_too_deep');
+    expect(error?.message).toContain(String(MAX_EXPRESSION_NESTING_DEPTH));
+    expect(error?.line).toBe(3);
+  });
+
+  it('a-chain-of-thousands-of-exclusion-operators-well-past-the-confirmed-~5000-operator-live-crash-point-is-rejected-cleanly-rather-than-throwing-a-raw-rangeerror', () => {
+    // Confirmed live, before this fix: a ~5,000-term flat `-` chain threw
+    // `RangeError: Maximum call stack size exceeded` straight out of
+    // `checkCircularPermissions`'s `collectPermissionDeps` — with zero `(`
+    // characters anywhere in the source, so Bug A's own ceiling never saw
+    // it. 6,000 is chosen the same way Bug A's own "well past the crash
+    // range" case is (see above): comfortably past the confirmed live
+    // crash point.
+    let result: SchemaCompileResult | undefined;
+    expect(() => {
+      result = compileSchema(longFlatExclusionChainSource(6000));
+    }).not.toThrow();
+    expect(result!.ok).toBe(false);
+    if (result!.ok) return;
+    expect(result!.errors.every((e) => e.code === 'expression_nesting_too_deep')).toBe(true);
+  });
+
+  it('a-non-adversarial-real-world-shaped-exclusion-nested-a-handful-of-levels-deep-still-compiles-fine', () => {
+    // Sanity check in the other direction: the fix must not have made any
+    // ordinary, real-world exclusion usage stricter. `org.view = member -
+    // banned` (schema/example.authz) is one operator; this checks a few
+    // more still compile, since nothing about a legitimate schema's actual
+    // shape changed.
+    const result = compileSchema(longFlatExclusionChainSource(5));
+    expect(result.ok).toBe(true);
+  });
+
+  it('paren-nesting-depth-and-unparenthesized-exclusion-chain-depth-compose-additively-against-one-shared-ceiling', () => {
+    // The fix charges both `(` nesting and `-` chaining against the same
+    // `ParserState.nestingDepth` counter specifically so this composition
+    // holds — two independent 100-deep budgets (one per mechanism) would
+    // still let a schema reach ~200 real AST levels by combining both,
+    // which is not comfortably safe headroom below the confirmed ~5,000-
+    // level crash point the way a single, shared 100-level ceiling is.
+    const exactlyAtCeiling = compileSchema(nestedParenAroundExclusionChainSource(50, 50));
+    expect(exactlyAtCeiling.ok).toBe(true);
+
+    const onePastCeiling = compileSchema(nestedParenAroundExclusionChainSource(60, 60));
+    expect(onePastCeiling.ok).toBe(false);
+    if (onePastCeiling.ok) return;
+    expect(onePastCeiling.errors.every((e) => e.code === 'expression_nesting_too_deep')).toBe(true);
   });
 });
 

@@ -52,26 +52,53 @@ export const IDENTIFIER_PATTERN = /^[a-z][a-z0-9_]*$/;
 export const MAX_IDENTIFIER_LENGTH = 63;
 
 /**
- * The maximum number of nested `(` levels a single permission expression
- * may contain (`parser.ts`'s `parseAtom`/`parseTerm`/`parseExpression` are
- * mutually recursive on native JS call-stack frames, one frame per level of
- * `(` nesting — with no ceiling, a source string with a few thousand nested
- * parens around a trivial expression drives that recursion past Node's
- * default call-stack size and throws a raw, unhandled `RangeError` instead
- * of a clean, located `SchemaError`).
+ * The maximum depth a single permission expression's rewrite-rule AST may
+ * reach, from two structurally distinct sources that share this one
+ * ceiling because they pose the identical downstream risk —
+ * `checkCircularPermissions`/`collectPermissionDeps` and `compileRewriteRule`
+ * (both `compiler.ts`) recurse once per AST level with no bound of their
+ * own when they walk the finished tree:
+ *
+ * 1. Nested `(`: `parser.ts`'s `parseAtom`/`parseTerm`/`parseExpression` are
+ *    mutually recursive on native JS call-stack frames, one frame per level
+ *    of `(` nesting — with no ceiling, a source string with a few thousand
+ *    nested parens around a trivial expression drives that recursion past
+ *    Node's default call-stack size and throws a raw, unhandled
+ *    `RangeError` instead of a clean, located `SchemaError`, during parsing
+ *    itself.
+ * 2. A flat, unparenthesized `-` (exclusion) chain (`a - a - a - ... - a`,
+ *    zero `(` characters anywhere): `flattenChildren` merges a same-operator
+ *    `|`/`&` chain into one flat n-ary node regardless of length (union and
+ *    intersection are associative), but exclusion is not
+ *    (`(a-b)-c != a-(b-c)` in general), so each `-` genuinely nests a new
+ *    AST node one level deeper than the last. Building that chain is a
+ *    flat, non-recursive loop in `parseExpression` — parsing itself never
+ *    overflows — but the resulting *tree* is exactly as deep as the chain
+ *    is long, and it's that tree the two compiler-side walkers above
+ *    recurse over afterward. Confirmed live: a ~5,000-term flat `-` chain
+ *    (well inside the real request-body byte cap) threw a raw, unhandled
+ *    `RangeError` out of `collectPermissionDeps`, with no `(` anywhere in
+ *    the source, before this ceiling covered it too.
+ *
+ * `ParserState.nestingDepth` (`parser.ts`) is the one counter both sources
+ * charge against, incremented on `(` and on each `-` link and decremented
+ * symmetrically, so the two compose additively rather than each getting
+ * its own independent 100-deep budget — a schema nesting 60 levels of `(`
+ * around a 60-link `-` chain is rejected at the combined 100, not allowed to
+ * reach 120 real AST levels. See `docs/DECISIONS.md`.
  *
  * 100 is deliberately generous: every real schema this project has ever
  * written (see `schema/example.authz`, and every worked example in
  * `.claude/commands/build-authz-service.md` §5) nests at most 1-2 levels
  * deep — a human author has no reason to write a permission expression
- * nesting parentheses anywhere near this deep, and the compiler's own
- * paren-depth counter never counts toward this ceiling until an author (or
- * an attacker) actually writes that many literal `(` characters in a row.
+ * nesting parentheses, or chaining exclusion, anywhere near this deep, and
+ * `nestingDepth` never counts toward this ceiling until an author (or an
+ * attacker) actually writes that many `(` characters or `-` operators.
  * Nesting exactly `MAX_EXPRESSION_NESTING_DEPTH` levels deep still compiles;
  * one level past it is rejected with `expression_nesting_too_deep`
- * (`src/schema/dsl/errors.ts`) — see `docs/DECISIONS.md` for the audit this
- * closes and why 100 was chosen over the audit's own suggested 100-200
- * range.
+ * (`src/schema/dsl/errors.ts`) — see `docs/DECISIONS.md` for the audits this
+ * closes and why 100 was chosen over the original audit's own suggested
+ * 100-200 range.
  */
 export const MAX_EXPRESSION_NESTING_DEPTH = 100;
 
