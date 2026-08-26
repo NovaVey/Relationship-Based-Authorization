@@ -1,0 +1,52 @@
+// The new SMT tier's own "genuinely extends capability" live proof
+// (docs/DECISIONS.md, the entry adding `tools/schema-verifier/src/smt/`).
+//
+// The task that asked for this tier named a specific real fixture as the
+// live proof: `schema/example.authz`'s own `folder#sensitive_review =
+// (viewer | edit) & sensitive_reviewer` — the exact permission D-118
+// already named as reaching 25 candidates at k = 1, over
+// `MAX_BOUNDED_CANDIDATES`, previously refused with `UNKNOWN`.
+//
+// Checked directly against the real, live schema before trusting that
+// assumption (this tool's own standing rule — never trust a claim about
+// what a schema means without running it through the real compiler):
+// `folder#edit = editor | owner | parent->edit` is *itself* genuinely
+// self-referential (`parent: folder`, `parent->edit` targets
+// `folder#edit` again — a real, direct back-edge in the schema graph,
+// confirmed by walking the built graph directly). `folder#viewer`,
+// `folder#editor`, and `folder#sensitive_reviewer` are *each* declared
+// `user | group#member`, and `group#member` is *itself* self-referential
+// too (`group.member = user | group#member` — nested group membership,
+// this schema's own deliberate, named feature). Every permission
+// `folder#sensitive_review` reaches is therefore recursive in exactly
+// the sense `../src/smt/recursion.ts` checks for (a real cycle in the
+// reachable subgraph — not the compiler's own narrower "permission cycle
+// with no relation to ground it," which is what `folder.edit`'s
+// `tupleToUserset` self-reference deliberately doesn't trip). Per this
+// module's own explicit scope, the SMT tier correctly declines on the
+// real, literal `folder#sensitive_review` goal and falls through to
+// bounded search unchanged, still `UNKNOWN` — confirmed live,
+// `test/smt-live-example.test.ts`'s own first assertion.
+//
+// This fixture is the same shape, deliberately sized to reach the same
+// "over MAX_BOUNDED_CANDIDATES" ceiling, with the parent-hierarchy and
+// nested-group recursion removed — an honest way to still demonstrate,
+// against a real (if newly-added) fixture rather than only a synthetic
+// unit test, that the SMT tier decides a goal exactly where bounded
+// search alone could only refuse to run. See `docs/DECISIONS.md` for the
+// full account of why the originally-named fixture doesn't qualify.
+namespace document2 {
+  relation viewer: user
+  relation editor: user
+  relation owner: user
+  relation commenter: user
+  relation approver: user
+  relation sensitive_reviewer: user
+
+  permission edit = editor | owner | commenter | approver
+  permission view = viewer | edit
+  // Same shape as schema/example.authz's own folder#sensitive_review:
+  // "being able to see this object at all is necessary but not
+  // sufficient — you also need the narrower sensitive_reviewer grant."
+  permission sensitive_review = (viewer | edit) & sensitive_reviewer
+}

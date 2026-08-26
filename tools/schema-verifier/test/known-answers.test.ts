@@ -23,6 +23,7 @@ import { buildSchemaGraph } from '../src/ir/index.js';
 import { parseInvariants } from '../src/invariants/index.js';
 import type { Invariant } from '../src/invariants/index.js';
 import type { Fragment, Verdict } from '../src/reachability/index.js';
+import type { Proof } from '../src/reachability/types.js';
 import { checkAndValidate } from '../src/validate/index.js';
 
 const SCHEMA_FIXTURE_DIR = fileURLToPath(new URL('../fixtures/schemas/', import.meta.url));
@@ -53,7 +54,9 @@ interface KnownAnswer {
   readonly invariant: string;
   readonly verdict: Verdict;
   readonly fragment: Fragment;
-  /** Only meaningful — and only checked — for a non-monotone `HOLDS`/`VIOLATED`. */
+  /** Only meaningful, and only asserted, once `checkInvariant`/monotone rows are involved — see each row's own `proof`. */
+  readonly proof?: Proof;
+  /** Only meaningful — and only checked — for a `proof: 'bounded'` `HOLDS`. */
   readonly bound?: number;
   /** The `docs/DECISIONS.md` entry that reasoned out why this is the answer — this table asserts it, it doesn't re-derive it. */
   readonly why: string;
@@ -86,18 +89,29 @@ const CORPUS: readonly KnownAnswer[] = [
     invariant: 'intersection-approve.invariant',
     verdict: 'VIOLATED',
     fragment: 'non-monotone',
+    proof: 'exact',
     // No `bound` here — `CheckResult.bound` is only ever set alongside a
-    // non-monotone `HOLDS` (D-118); a `VIOLATED` witness needs no bound
-    // caveat, it's a real counterexample the real engine already confirmed.
-    why: 'D-118: approve = editor & reviewer, no constraints — nothing stops the same user from being both at once.',
+    // `proof: 'bounded'` `HOLDS` (D-118); a `VIOLATED` witness needs no
+    // bound caveat, it's a real counterexample the real engine already
+    // confirmed. `proof: 'exact'`, not `'bounded'`, since the new SMT
+    // tier (docs/DECISIONS.md) now decides this goal — a small,
+    // non-recursive intersection — before `checkAndValidate` ever
+    // reaches bounded search; it was `'bounded'` before that tier
+    // existed.
+    why: 'D-118: approve = editor & reviewer, no constraints — nothing stops the same user from being both at once. The new SMT tier proves this unconditionally (UNSAT of the negated goal is impossible, i.e. the goal formula itself is SAT with no constraints to block it), independently confirmed against the real engine.',
   },
   {
     schema: 'non-monotone.authz',
     invariant: 'exclusion-blocked-cannot-publish.invariant',
     verdict: 'HOLDS',
     fragment: 'non-monotone',
-    bound: 1,
-    why: 'D-118: publish = editor - blocked, blocked(o) = s given and held fixed — exclusion means a blocked subject stays blocked regardless of any other candidate tuple.',
+    proof: 'exact',
+    // No `bound` here either, for the same reason and the same new tier:
+    // this exclusion is small and non-recursive, so the SMT tier proves
+    // it unconditionally (a real UNSAT) rather than bounded search
+    // reporting "HOLDS up to k = 1" the way it did before that tier
+    // existed.
+    why: 'D-118 (bounded search discovered this fixture): publish = editor - blocked, blocked(o) = s given and held fixed — exclusion means a blocked subject stays blocked regardless of any other candidate tuple. The new SMT tier now proves this unconditionally rather than only up to k = 1 — see docs/DECISIONS.md.',
   },
   {
     schema: 'self-referential-folder.authz',
@@ -111,7 +125,7 @@ const CORPUS: readonly KnownAnswer[] = [
 describe('the known-answer corpus — every fixture this project ships, swept against its exact committed answer', () => {
   it.each(CORPUS)(
     '$invariant on $schema → $verdict (fragment: $fragment)',
-    async ({ schema, invariant, verdict, fragment, bound }) => {
+    async ({ schema, invariant, verdict, fragment, proof, bound }) => {
       const compiled = loadSchema(schema);
       const graph = buildSchemaGraph(compiled);
       const loaded = loadInvariant(invariant);
@@ -120,6 +134,7 @@ describe('the known-answer corpus — every fixture this project ships, swept ag
 
       expect(result.verdict).toBe(verdict);
       expect(result.fragment).toBe(fragment);
+      if (proof !== undefined) expect(result.proof).toBe(proof);
       if (bound !== undefined) expect(result.bound).toBe(bound);
     },
   );
