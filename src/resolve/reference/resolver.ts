@@ -13,7 +13,11 @@
  * planner, no index — every lookup below is a full linear scan of
  * `tuples`. Its only job is to be *obviously, checkably* correct; it is
  * verified against hand-derived examples (§9 Phase 3's exit criterion)
- * before it is trusted as an oracle for anything in Phase 5.
+ * before it is trusted as an oracle for anything in Phase 5. D-144's
+ * closed-form tuple expiry (`ReferenceTuple.expiresAt`) is walked here too,
+ * checked against `ReferenceCheckOptions.now` — a plain parameter, never a
+ * global clock read, per this file's own established purity discipline
+ * (see `maxDepth` below).
  *
  * **Isolation from the production resolver (Phase 4) is structural, not
  * just a promise.** Every helper below is module-private; the only things
@@ -93,6 +97,8 @@ export interface ReferenceTuple {
   subjectId: string;
   /** Present only for a tuple-to-userset subject ("group:eng#member"). */
   subjectRelation?: string;
+  /** Present only for a tuple with a validity window (D-144) — undefined means the tuple never expires. */
+  expiresAt?: Date;
 }
 
 export interface ReferenceCheckOptions {
@@ -106,6 +112,16 @@ export interface ReferenceCheckOptions {
    * `src/schema/dsl/compiler.ts` already holds itself to.
    */
   maxDepth?: number;
+  /**
+   * The instant to evaluate every tuple's expiry (D-144, `ReferenceTuple.
+   * expiresAt`) against. Defaults to `new Date()` if omitted. Exactly the
+   * same purity discipline `maxDepth` above already documents for itself:
+   * a plain parameter, never read from a global clock inside the walk
+   * itself — this resolver stays pure and env-independent, and this also
+   * lets a test pin an exact synthetic instant for a fully deterministic
+   * fixture instead of racing the real wall clock.
+   */
+  now?: Date;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,11 +317,22 @@ function assertNeverRewriteRule(node: never): never {
   throw new Error(`reference resolver: unhandled rewrite-rule kind ${JSON.stringify(node)}`);
 }
 
+/**
+ * D-144's closed-form time-window check: an expired tuple is treated as
+ * though it were never in the `tuples` array at all — no disproof entry
+ * recorded for it either, the same "this tuple simply isn't a current
+ * fact" semantic a real DELETE would have.
+ */
+function isTupleLive(tuple: ReferenceTuple, now: Date): boolean {
+  return tuple.expiresAt === undefined || tuple.expiresAt.getTime() > now.getTime();
+}
+
 interface WalkContext {
   readonly schema: CompiledSchema;
   readonly tuples: readonly ReferenceTuple[];
   readonly subject: EntityRef;
   readonly maxDepth: number;
+  readonly now: Date;
 }
 
 /** `{ allowed: true; proof }` or `{ allowed: false; disproof }` — the one return shape every recursive step below produces. */
@@ -413,6 +440,7 @@ function resolveRelation(
     if (tuple.objectNs !== ns || tuple.objectId !== id || tuple.relation !== relationName) {
       continue;
     }
+    if (!isTupleLive(tuple, ctx.now)) continue;
     if (tuple.subjectRelation === undefined) {
       const subject: EntityRef = { ns: tuple.subjectNs, id: tuple.subjectId };
       if (subject.ns === ctx.subject.ns && subject.id === ctx.subject.id) {
@@ -569,6 +597,7 @@ function evalRewrite(
         if (tuple.objectNs !== ns || tuple.objectId !== id || tuple.relation !== node.relation) {
           continue;
         }
+        if (!isTupleLive(tuple, ctx.now)) continue;
         const through: EntityRef = { ns: tuple.subjectNs, id: tuple.subjectId };
         const outcome = resolveMembership(
           ctx,
@@ -631,6 +660,7 @@ export function referenceCheck(
   options: ReferenceCheckOptions = {},
 ): ReferenceCheckResult {
   const maxDepth = options.maxDepth ?? DEFAULT_REFERENCE_MAX_DEPTH;
+  const now = options.now ?? new Date();
   // Full-repo audit finding #6 (MEDIUM, `docs/DECISIONS.md` D-092), the
   // same bug class D-074 already found and fixed once for
   // `assertTokenObserved`: `depth > maxDepth` (below, in `resolveMembership`)
@@ -654,7 +684,7 @@ export function referenceCheck(
       `referenceCheck: maxDepth must be a non-negative finite number, got ${String(options.maxDepth)}`,
     );
   }
-  const ctx: WalkContext = { schema, tuples, subject, maxDepth };
+  const ctx: WalkContext = { schema, tuples, subject, maxDepth, now };
   const outcome = resolveMembership(ctx, object.ns, object.id, relationOrPermission, new Set(), 0);
   return outcome.allowed ? { allowed: true, path: outcome.proof } : { allowed: false };
 }

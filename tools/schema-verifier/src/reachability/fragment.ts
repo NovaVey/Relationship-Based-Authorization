@@ -17,8 +17,17 @@ interface ReachabilityScan {
   readonly relations: readonly NodeId[];
 }
 
-/** Every child a graph edge can lead to, regardless of kind — walking this is deliberately edge-kind-agnostic: unlike §5's search, this never stops at an intersection/exclusion edge, it just keeps going. */
-function childrenOf(edge: GraphEdge): readonly NodeId[] {
+/**
+ * Every child a graph edge can lead to, regardless of kind — walking this
+ * is deliberately edge-kind-agnostic: unlike §5's search, this never stops
+ * at an intersection/exclusion edge, it just keeps going. Exported for
+ * `../smt/recursion.ts`, which needs the identical edge-kind-agnostic
+ * child function to walk the exact same reachable subgraph this scan
+ * does, for a different question (is there a real cycle, not just "what's
+ * reachable") — reusing this rather than re-deriving a second "what does
+ * this edge lead to" mapping that could quietly drift from this one.
+ */
+export function childrenOf(edge: GraphEdge): readonly NodeId[] {
   switch (edge.kind) {
     case 'direct':
       return edge.subjectTypes.flatMap((st) => (st.target !== undefined ? [st.target] : []));

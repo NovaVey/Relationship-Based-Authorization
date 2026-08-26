@@ -218,10 +218,24 @@ reachable from the invariant's own goal permission:
   first, and two narrow short-circuits (`docs/DECISIONS.md`, the entry
   adding them) can decide some cases exactly even here — an
   intersection with a structurally type-mismatched operand, or an
-  exclusion whose subtracted branch is structurally unreachable. Only
-  when neither can decide does the verifier fall back to a **bounded**
-  search — every type-valid tuple set up to `k` objects per type,
-  checked through the real engine directly. `CheckResult.proof`
+  exclusion whose subtracted branch is structurally unreachable. If
+  neither can decide, and the goal's own reachable relation/permission
+  set is **non-recursive** (no relation refers back to itself, directly
+  or via a cycle through other relations — checked directly, not
+  assumed: `../src/smt/recursion.ts`), a real SMT tier (`src/smt/`,
+  `docs/DECISIONS.md` D-151, `z3-solver`) tries next — a genuine,
+  unbounded decision procedure, not "up to k," for exactly the fragment
+  D-118's own SMT sketch names as tractable. A `sat` result is only ever
+  a candidate, reconstructed into concrete tuples and independently
+  confirmed against the real engine before ever being reported
+  `VIOLATED` — the same discipline `HOLDS`/`VIOLATED` already follow
+  everywhere else in this tool; anything short of that confirmation
+  (recursion detected, z3 itself can't decide, the reconstructed witness
+  doesn't replay) makes this tier decline entirely, not report a weaker
+  claim. Only once _that_ tier also doesn't apply does the verifier fall
+  back to **bounded** search — every type-valid tuple set up to `k`
+  objects per type, checked through the real engine directly.
+  `CheckResult.proof`
   (`'exact' | 'bounded'`) is what actually distinguishes the two, always
   independent of `fragment`: a structurally non-monotone schema can
   still get `proof: 'exact'`. A `VIOLATED` verdict from bounded search
@@ -305,7 +319,24 @@ Tracked, explicit future work — not silently missing:
 
 - Explicitly out of scope for this tool entirely (build spec §13): no
   edits to the schema parser, engine, or storage layer; no consistency
-  tokens; no SMT solver; no performance work; no web UI.
+  tokens; no performance work; no web UI. (§13 also said "no SMT
+  solver" — that boundary was for build spec v1 specifically; the SMT
+  tier above is new scope added after v1 closed, per `docs/DECISIONS.md`
+  D-151, not a quiet reversal of that line.)
+- **The SMT tier's own real, disclosed boundary: recursion.** A goal
+  whose reachable relation/permission set contains a genuine cycle (a
+  relation referring back to itself, directly or through others) is
+  explicitly out of scope for the SMT tier — the sketch's own named
+  obstacle (a least-fixpoint construction that isn't sound the moment
+  exclusion sits in the same cycle, or a dedicated Horn-clause/CHC
+  solver such as Z3's own PDR/Spacer) is real v2 work, not attempted
+  here. This is not a narrow corner case in practice: checked directly
+  against this repo's own real `schema/example.authz`, _every_ permission
+  in it is recursive (nested group membership, folder/document parent
+  hierarchies), including `folder#sensitive_review` — the exact fixture
+  originally proposed as this tier's own live proof. See D-151 for the
+  full account and `fixtures/schemas/sensitive-review-non-recursive.authz`
+  for the same shape with recursion removed, used instead.
 
 ## Further reading
 

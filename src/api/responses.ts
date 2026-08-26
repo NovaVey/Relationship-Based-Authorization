@@ -1,12 +1,14 @@
 /**
  * Pure, DB-free response shaping for the five operations §9 Phase 8 exposes
  * over HTTP: `check`, `expand`, `tuple write`/`delete`, `schema
- * compile`/`publish`, and `health` — plus two post-audit-improvement
- * additions, `list-objects`/`list-users` (§2b below; `src/audit/list.ts`),
- * the bulk reverse-lookup counterparts to `check`/`expand` — API-only, with
- * no CLI command of their own (unlike every operation named in the previous
- * sentence, each of which has a `src/cli/commands/*.ts` sibling this file's
- * response shapes deliberately mirror). Every function here takes an
+ * compile`/`publish`, and `health` — plus three post-audit-improvement
+ * additions: `list-objects`/`list-users` (§2b below; `src/audit/list.ts`),
+ * the bulk reverse-lookup counterparts to `check`/`expand`, and
+ * `check/batch` (§1b below; `checkBatchResponse`), N `/check` calls folded
+ * into one HTTP round trip — all API-only, with no CLI command of their own
+ * (unlike every operation named in the previous sentence, each of which has
+ * a `src/cli/commands/*.ts` sibling this file's response shapes
+ * deliberately mirror). Every function here takes an
  * already-computed domain result and returns
  * `{ status, body }` ready for a Fastify route handler to send verbatim
  * (`reply.code(result.status).send(result.body)`). Nothing in this file
@@ -165,6 +167,55 @@ export function checkResponse(
       depth: result.depth,
       ...(atToken !== undefined ? { atToken: encodeToken(atToken) } : {}),
       ...(result.allowed ? { path: result.path } : {}),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 1b. check/batch — POST /check/batch (new feature). Gated, scope-checked,
+// and rate-limited exactly like /check itself (see src/api/server.ts's own
+// route comment); the only thing new at the response-shaping layer is
+// wrapping N single-check answers into one `{ results: [...] }` envelope.
+// ---------------------------------------------------------------------------
+
+export interface CheckBatchResponseBody {
+  results: CheckResponseBody[];
+}
+
+export interface CheckBatchApiResponse {
+  status: 200;
+  body: CheckBatchResponseBody;
+}
+
+/**
+ * One `CheckResponseBody` per input check, in the same order the caller
+ * supplied them — built by calling `checkResponse` for each item exactly as
+ * `/check` itself would for a single call, never a parallel, hand-rolled
+ * shape (this file's own top-of-file doc comment: every response this API
+ * sends is built here, never assembled by hand in `src/api/server.ts`).
+ * `outcomes` carries each item's own echo fields (`subject`/`relation`/
+ * `object`/`atToken`) alongside the `PerformCheckResult` `performCheck`
+ * produced for it — the same four values `/check`'s own route handler
+ * already threads through to `checkResponse` today, just N of them,
+ * pre-zipped by `src/api/server.ts`'s own batching loop rather than
+ * unzipped again here.
+ */
+export function checkBatchResponse(
+  outcomes: readonly {
+    subject: ApiEntityRef;
+    relation: string;
+    object: ApiEntityRef;
+    result: PerformCheckResult;
+    atToken?: number;
+  }[],
+): CheckBatchApiResponse {
+  return {
+    status: 200,
+    body: {
+      results: outcomes.map(
+        (item) =>
+          checkResponse(item.subject, item.relation, item.object, item.result, item.atToken).body,
+      ),
     },
   };
 }

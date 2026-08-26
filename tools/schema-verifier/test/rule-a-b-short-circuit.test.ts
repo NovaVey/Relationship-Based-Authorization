@@ -187,12 +187,22 @@ describe('Regression — the existing same-type-operand non-monotone fixtures ar
   // intersection-approve and exclusion-blocked-cannot-publish
   // (fixtures/schemas/non-monotone.authz) both use same-type operands —
   // no structural type-unreachability anywhere — so neither rule can
-  // fire on them; both must still route through §7's bounded search
-  // exactly as before, `proof: 'bounded'` now made explicit.
+  // fire on them: `checkInvariant` called directly must still return
+  // `UNKNOWN`, exactly as before Rule A/B existed. That claim is checked
+  // directly below, at the `checkInvariant` layer these tests actually
+  // care about — bypassing `checkAndValidate`'s own routing entirely,
+  // since `docs/DECISIONS.md`'s new SMT tier now sits between
+  // `checkInvariant` and bounded search and decides both of these goals
+  // exactly (small, non-recursive intersection/exclusion — precisely its
+  // own target fragment), so the *end-to-end* verdict via
+  // `checkAndValidate` is no longer `proof: 'bounded'` the way it was
+  // before that tier existed. Both layers are asserted here so neither
+  // regression (Rule A/B firing where it shouldn't, or the SMT tier
+  // silently stopping applying here) goes unnoticed.
   const FIXTURE_SCHEMA_DIR = fileURLToPath(new URL('../fixtures/schemas/', import.meta.url));
   const FIXTURE_INVARIANT_DIR = fileURLToPath(new URL('../fixtures/invariants/', import.meta.url));
 
-  it('intersection-approve stays VIOLATED via bounded search, proof: bounded', async () => {
+  it('intersection-approve: checkInvariant alone still returns UNKNOWN (Rule A does not fire); checkAndValidate now resolves it exactly via the SMT tier, not bounded search', async () => {
     const compiled = compileSchema(readFileSync(FIXTURE_SCHEMA_DIR + 'non-monotone.authz', 'utf8'));
     if (!compiled.ok) throw new Error('non-monotone.authz failed to compile');
     const graph = buildSchemaGraph(compiled.schema);
@@ -200,15 +210,19 @@ describe('Regression — the existing same-type-operand non-monotone fixtures ar
       readFileSync(FIXTURE_INVARIANT_DIR + 'intersection-approve.invariant', 'utf8'),
     );
     if (!parsed.ok) throw new Error('fixture invariant failed to parse');
+    const invariant = parsed.invariants[0]!;
 
-    const { result } = await checkAndValidate(graph, compiled.schema, parsed.invariants[0]!);
+    const exact = checkInvariant(graph, compiled.schema, invariant);
+    expect(exact.verdict).toBe('UNKNOWN');
+
+    const { result } = await checkAndValidate(graph, compiled.schema, invariant);
     expect(result.verdict).toBe('VIOLATED');
     expect(result.fragment).toBe('non-monotone');
-    expect(result.proof).toBe('bounded');
+    expect(result.proof).toBe('exact');
     expect(result.witness).toBeDefined();
   });
 
-  it('exclusion-blocked-cannot-publish stays HOLDS up to k = 1, proof: bounded, never promoted to exact', async () => {
+  it('exclusion-blocked-cannot-publish: checkInvariant alone still returns UNKNOWN (Rule B does not fire); checkAndValidate now resolves it exactly via the SMT tier, not bounded search', async () => {
     const compiled = compileSchema(readFileSync(FIXTURE_SCHEMA_DIR + 'non-monotone.authz', 'utf8'));
     if (!compiled.ok) throw new Error('non-monotone.authz failed to compile');
     const graph = buildSchemaGraph(compiled.schema);
@@ -216,11 +230,15 @@ describe('Regression — the existing same-type-operand non-monotone fixtures ar
       readFileSync(FIXTURE_INVARIANT_DIR + 'exclusion-blocked-cannot-publish.invariant', 'utf8'),
     );
     if (!parsed.ok) throw new Error('fixture invariant failed to parse');
+    const invariant = parsed.invariants[0]!;
 
-    const { result } = await checkAndValidate(graph, compiled.schema, parsed.invariants[0]!);
+    const exact = checkInvariant(graph, compiled.schema, invariant);
+    expect(exact.verdict).toBe('UNKNOWN');
+
+    const { result } = await checkAndValidate(graph, compiled.schema, invariant);
     expect(result.verdict).toBe('HOLDS');
     expect(result.fragment).toBe('non-monotone');
-    expect(result.proof).toBe('bounded');
-    expect(result.bound).toBe(1);
+    expect(result.proof).toBe('exact');
+    expect(result.bound).toBeUndefined();
   });
 });

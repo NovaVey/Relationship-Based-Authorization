@@ -83,6 +83,32 @@
  * the disclosed cross-process gap above; it happens within one process,
  * through the very `clear()` hook this design relies on.
  *
+ * **A second, distinct staleness source this file's own machinery cannot
+ * see at all: a tuple's `expires_at` (D-144's own follow-up work, its own
+ * new decision entry once complete).** Every mechanism above — `clear()`,
+ * the TTL backstop, the epoch fence — bounds staleness caused by a *write*
+ * reaching this process. D-144 flagged the one case none of them cover: a
+ * relation tuple with a non-null `expiresAt` can leave the live tuple graph
+ * purely because time advanced, with no write, no `clear()` call, and no
+ * epoch bump ever happening. A result cached while that tuple was still live
+ * would otherwise be served unchanged, indefinitely, past its real expiry.
+ * This file does not — and structurally cannot — fix that itself: `CheckCache`
+ * has no notion of what "expiring" means, and giving it one would mean
+ * teaching a plain LRU store domain knowledge about tuple semantics, exactly
+ * the separation this file's own top-of-file framing (a "plain, dumb LRU
+ * store with no domain knowledge of what its values mean") exists to avoid.
+ * The fix instead lives entirely in the one caller that already has that
+ * domain knowledge — `performCheck` (`src/audit/checks.ts`) — which simply
+ * never calls `trySet` at all for a result that is `allowed: true` and
+ * reports `touchedExpiringTuple: true` (`ProductionCheckResult`,
+ * `resolver.ts`). This is deliberately asymmetric, not a blanket "never
+ * cache anything expiry-adjacent": expiry only ever removes a tuple as time
+ * advances, which can only push an answer toward DENIED, never manufacture
+ * an ALLOW — so a cached DENIED result stays correct forever whether or not
+ * it touched an expiring tuple along the way, and this file keeps caching
+ * every DENIED result exactly as it does today. See `src/audit/checks.ts`'s
+ * own doc comment for the guard itself and the fuller reasoning.
+ *
  * The fix: `beginMiss()`/`trySet(epoch, ...)`. A caller on a cache miss
  * calls `beginMiss()` to snapshot the current epoch *before* starting its
  * own expensive, uncached computation, and later calls `trySet` with that

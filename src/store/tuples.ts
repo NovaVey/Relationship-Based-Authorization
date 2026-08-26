@@ -18,6 +18,8 @@ export interface TupleKey {
   subjectId: string;
   /** Present only for a tuple-to-userset subject ("group:eng#member"). */
   subjectRelation?: string;
+  /** Present only for a tuple with a validity window (D-144) — undefined means the tuple never expires. */
+  expiresAt?: Date;
 }
 
 export interface TupleRow extends TupleKey {
@@ -33,7 +35,8 @@ export interface TupleError {
     | 'relation_is_a_permission'
     | 'subject_type_not_allowed'
     | 'subject_relation_is_a_permission'
-    | 'undeclared_subject_relation';
+    | 'undeclared_subject_relation'
+    | 'expires_at_not_in_future';
   message: string;
 }
 
@@ -92,6 +95,33 @@ export function validateIdentifiers(tuple: TupleKey): TupleError[] {
   for (const [key, label] of FIELDS) check(tuple[key] as string, label);
   if (tuple.subjectRelation !== undefined) check(tuple.subjectRelation, 'subject relation');
   return errors;
+}
+
+/**
+ * Validates a tuple's optional `expiresAt` (D-144's approved, closed-form
+ * time-window condition — see `src/store/migrations/0007_relation_tuples_
+ * expiry.sql`'s own doc comment for the scope this implements). Pure,
+ * DB-free, same shape as `validateIdentifiers`: an `expiresAt` at or in the
+ * past is rejected as a write-time argument error, not silently accepted
+ * and left to expire before its own write ever takes effect — a tuple
+ * whose validity window is already closed the moment it's written could
+ * never have been observably true, which is not what a caller asking to
+ * write a time-boxed grant actually means.
+ *
+ * `undefined` (no `expiresAt` at all) is always valid — see `TupleKey`'s
+ * own doc comment: it means "this tuple never expires," the same
+ * behavior every tuple in this store had before this field existed.
+ */
+export function validateExpiresAt(tuple: TupleKey): TupleError[] {
+  if (tuple.expiresAt !== undefined && tuple.expiresAt.getTime() <= Date.now()) {
+    return [
+      {
+        code: 'expires_at_not_in_future',
+        message: `expiresAt '${tuple.expiresAt.toISOString()}' must be in the future — a tuple cannot be written already expired`,
+      },
+    ];
+  }
+  return [];
 }
 
 /**
@@ -357,6 +387,11 @@ export async function writeTuple(
     return { ok: false, errors: identifierErrors };
   }
 
+  const expiresAtErrors = validateExpiresAt(tuple);
+  if (expiresAtErrors.length > 0) {
+    return { ok: false, errors: expiresAtErrors };
+  }
+
   const schemaErrors = await validateAgainstSchema(pool, tuple);
   if (schemaErrors.length > 0) {
     return { ok: false, errors: schemaErrors };
@@ -370,9 +405,19 @@ export async function writeTuple(
     // comment for the race this closes.
     await acquireWriteLogLock(client);
     const { rowCount } = await client.query(
+      // `on conflict ... do nothing` deliberately stays exactly as it was
+      // before `expires_at` existed — a scope limit disclosed here, not
+      // silently introduced: re-writing an already-existing tuple is
+      // still a true no-op, even when this call's own `expiresAt` differs
+      // from whatever the existing row already has (including differing
+      // in whether either side has one at all). This means `writeTuple`
+      // cannot extend, shorten, or add/remove an expiry on a fact that's
+      // already stored — doing that today needs an explicit
+      // `deleteTuple` followed by a fresh `writeTuple`, not a second call
+      // to this function with a new `expiresAt`.
       `insert into relation_tuples
-         (object_ns, object_id, relation, subject_ns, subject_id, subject_relation)
-       values ($1, $2, $3, $4, $5, $6)
+         (object_ns, object_id, relation, subject_ns, subject_id, subject_relation, expires_at)
+       values ($1, $2, $3, $4, $5, $6, $7)
        on conflict (object_ns, object_id, relation, subject_ns, subject_id, coalesce(subject_relation, ''))
        do nothing`,
       [
@@ -382,6 +427,7 @@ export async function writeTuple(
         tuple.subjectNs,
         tuple.subjectId,
         tuple.subjectRelation ?? null,
+        tuple.expiresAt ?? null,
       ],
     );
     const token = await insertWriteLog(client, 'write', tuple);
@@ -489,6 +535,7 @@ interface RawTupleRow {
   subject_id: string;
   subject_relation: string | null;
   created_at: Date;
+  expires_at: Date | null;
 }
 
 /** Every stored tuple on one object, optionally narrowed to one relation — "who has R on O". */
@@ -503,7 +550,7 @@ export async function listTuplesByObject(
     params.push(filter.relation);
   }
   const { rows } = await pool.query<RawTupleRow>(
-    `select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at
+    `select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at, expires_at
      from relation_tuples where ${conditions.join(' and ')}
      order by id`,
     params,
@@ -518,7 +565,7 @@ export async function listTuplesBySubject(
   subjectId: string,
 ): Promise<TupleRow[]> {
   const { rows } = await pool.query<RawTupleRow>(
-    `select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at
+    `select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at, expires_at
      from relation_tuples where subject_ns = $1 and subject_id = $2
      order by id`,
     [subjectNs, subjectId],
@@ -536,5 +583,6 @@ function rowToTuple(row: RawTupleRow): TupleRow {
     subjectId: row.subject_id,
     ...(row.subject_relation !== null ? { subjectRelation: row.subject_relation } : {}),
     createdAt: row.created_at,
+    ...(row.expires_at !== null ? { expiresAt: row.expires_at } : {}),
   };
 }

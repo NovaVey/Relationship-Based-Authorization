@@ -57,6 +57,21 @@ export interface FakeConnectionSource extends ConnectionSource {
    * detected, not a timeout here.
    */
   armNextConnectionPause(afterStatements: number): { resume: () => void; fired: Promise<void> };
+  /**
+   * D-144 (expiring tuples), test-only: sets the fake store's own
+   * controllable "current time" (`FakeStoreState.now`) — the ONLY clock
+   * every expiry filter (`shapes.ts`, `frontier.ts`) ever consults. Takes
+   * effect immediately and for every connection sharing this state,
+   * including one already mid-transaction: matches real Postgres's own
+   * `REPEATABLE READ` semantics, where `now()` is fixed per-transaction at
+   * its own snapshot anchor (`connection.ts`'s `snapshotNow`), not
+   * globally — a transaction already anchored keeps its own frozen instant
+   * regardless of a later `setNow` call; only a transaction that anchors
+   * *after* this call observes the new value. See `state.ts`'s own
+   * `FakeStoreState.now` doc comment for why this exists at all rather than
+   * a real wall-clock read.
+   */
+  setNow(now: Date): void;
 }
 
 /** One armed pause, fully self-contained — see `armNextConnectionPause`'s own doc comment for why this is a dedicated object per arming rather than a single shared field. */
@@ -132,6 +147,10 @@ class FakeConnectionSourceImpl implements FakeConnectionSource {
       },
       fired,
     };
+  }
+
+  setNow(now: Date): void {
+    this.state.now = now;
   }
 }
 

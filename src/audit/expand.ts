@@ -195,6 +195,19 @@ interface RelationTupleRow {
   subject_relation: string | null;
 }
 
+/**
+ * D-144 (expiring tuples): `and (expires_at is null or expires_at > now())`
+ * excludes an expired tuple exactly as if it had already been deleted —
+ * `expand()`'s own resolved subject tree must agree with `authz check`'s
+ * own answer about which tuples are currently live, or the two would
+ * silently disagree about a fact this project's whole audit-trail pitch
+ * depends on being consistent (an expired grant still shown in `expand`'s
+ * tree while `check` correctly denies it would be exactly that kind of
+ * silent, undetected divergence). Real Postgres's `now()` is fixed at this
+ * walk's own `REPEATABLE READ` transaction start (see this file's own
+ * top-of-file doc comment on the transaction every read here runs inside),
+ * matching `src/resolve/production/resolver.ts`'s identical reasoning.
+ */
 async function fetchTuplesOn(
   client: QueryExecutor,
   object: EntityRef,
@@ -203,7 +216,8 @@ async function fetchTuplesOn(
   const { rows } = await client.query<RelationTupleRow>(
     `select subject_ns, subject_id, subject_relation
      from relation_tuples
-     where object_ns = $1 and object_id = $2 and relation = $3`,
+     where object_ns = $1 and object_id = $2 and relation = $3
+       and (expires_at is null or expires_at > now())`,
     [object.ns, object.id, relation],
   );
   return rows;

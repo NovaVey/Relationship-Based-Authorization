@@ -82,9 +82,13 @@ async function beginAndHoldWriteLogLock(
   ]);
   if (operation === 'write') {
     await conn.query(
+      // D-144 — expires_at appended as a 7th column/param; must match
+      // src/store/tuples.ts's own writeTuple insert exactly, since this
+      // helper deliberately bypasses writeTuple to hold the lock across a
+      // manually-controlled transaction boundary.
       `insert into relation_tuples
-         (object_ns, object_id, relation, subject_ns, subject_id, subject_relation)
-       values ($1, $2, $3, $4, $5, $6)
+         (object_ns, object_id, relation, subject_ns, subject_id, subject_relation, expires_at)
+       values ($1, $2, $3, $4, $5, $6, $7)
        on conflict (object_ns, object_id, relation, subject_ns, subject_id, coalesce(subject_relation, ''))
        do nothing`,
       [
@@ -94,6 +98,7 @@ async function beginAndHoldWriteLogLock(
         tuple.subjectNs,
         tuple.subjectId,
         tuple.subjectRelation ?? null,
+        tuple.expiresAt ?? null,
       ],
     );
   } else {

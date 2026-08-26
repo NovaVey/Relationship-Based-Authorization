@@ -75,11 +75,18 @@ export interface ShapeContext {
   bufferOp: (op: PendingOp) => void;
   /** D2 (`docs/DECISIONS.md` D-099) — see this file's own top-of-file doc comment. `undefined` outside a snapshot transaction; a real `commitSeq` ceiling inside one. */
   visibleAsOf: number | undefined;
+  /** D-144 (expiring tuples) — the instant every expiry filter below compares a tuple's own `expiresAt` against. Always a concrete `Date` (never `undefined` the way `visibleAsOf` can be "no boundary") — see `connection.ts`'s own doc comment on `snapshotNow` for how this is anchored inside a snapshot transaction. */
+  now: Date;
 }
 
 /** A committed row is visible to a read carrying `visibleAsOf` iff it committed at or before that snapshot boundary — `undefined` means "no boundary, see everything currently committed." Shared by every snapshot-aware read handler below so the rule is stated once, not re-derived per handler. */
 function isVisible(commitSeq: number, visibleAsOf: number | undefined): boolean {
   return visibleAsOf === undefined || commitSeq <= visibleAsOf;
+}
+
+/** D-144 (expiring tuples) — a tuple with a `null` `expiresAt` never expires; one with a real `expiresAt` is live only up to (exclusive of) that instant, mirroring the real SQL predicate `expires_at is null or expires_at > now()` exactly. Shared by every expiry-aware read handler below, the same "state the rule once" discipline `isVisible` already established for commit-order visibility. */
+function isTupleLive(expiresAt: Date | null, now: Date): boolean {
+  return expiresAt === null || expiresAt.getTime() > now.getTime();
 }
 
 export type ShapeHandler = (ctx: ShapeContext) => FakeQueryResult;
@@ -115,6 +122,11 @@ function tupleRowToApiShape(row: RelationTupleRow): Record<string, unknown> {
     subject_id: row.subjectId,
     subject_relation: row.subjectRelation,
     created_at: row.createdAt,
+    // D-144 — added for row-shape fidelity with the real `listTuplesByObject`/
+    // `listTuplesBySubject` selects once those queries add this column too;
+    // the corresponding registered SQL keys below are reconciled against
+    // the real, shipped tuples.ts SQL text separately.
+    expires_at: row.expiresAt,
   };
 }
 
@@ -133,15 +145,13 @@ function tupleRowToApiShape(row: RelationTupleRow): Record<string, unknown> {
 // `lookupShape` — never registered here.
 
 const tupleInsertHandler: ShapeHandler = ({ state, params, bufferOp }) => {
-  const [objectNs, objectId, relation, subjectNs, subjectId, subjectRelationParam] = params as [
-    string,
-    string,
-    string,
-    string,
-    string,
-    string | null,
-  ];
+  // D-144 (expiring tuples) — a 7th, optional param appended after
+  // subjectRelation, mirroring tuples.ts's own real insert column order
+  // exactly; reconciled once that file's final SQL text is known.
+  const [objectNs, objectId, relation, subjectNs, subjectId, subjectRelationParam, expiresAtParam] =
+    params as [string, string, string, string, string, string | null, Date | null | undefined];
   const subjectRelation = subjectRelationParam ?? null;
+  const expiresAt = expiresAtParam ?? null;
   const key = relationTupleKey({
     objectNs,
     objectId,
@@ -175,6 +185,7 @@ const tupleInsertHandler: ShapeHandler = ({ state, params, bufferOp }) => {
       subjectNs,
       subjectId,
       subjectRelation,
+      expiresAt,
       createdAt: new Date(0), // DST is deterministic — no wall-clock reads; see docs/DST-PROPOSAL.md's own nondeterminism-sources note.
       commitSeq,
     });
@@ -362,7 +373,7 @@ const namespaceConfigInsertHandler: ShapeHandler = ({ params, bufferOp }) => {
 // and reuse elsewhere.
 // ---------------------------------------------------------------------------
 
-const listTupleSubjectsHandler: ShapeHandler = ({ state, params, visibleAsOf }) => {
+const listTupleSubjectsHandler: ShapeHandler = ({ state, params, visibleAsOf, now }) => {
   const [objectNs, objectId, relation] = params as [string, string, string];
   const rows = state.relationTuples
     .filter(
@@ -370,10 +381,15 @@ const listTupleSubjectsHandler: ShapeHandler = ({ state, params, visibleAsOf }) 
         row.objectNs === objectNs &&
         row.objectId === objectId &&
         row.relation === relation &&
-        isVisible(row.commitSeq, visibleAsOf),
+        isVisible(row.commitSeq, visibleAsOf) &&
+        isTupleLive(row.expiresAt, now), // D-144
     )
     .sort((a, b) => Number(a.id) - Number(b.id))
-    .map((row) => ({ subject_ns: row.subjectNs, subject_id: row.subjectId }));
+    .map((row) => ({
+      subject_ns: row.subjectNs,
+      subject_id: row.subjectId,
+      expires_at: row.expiresAt, // D-144 — matches the real query's own added column
+    }));
   return { rows, rowCount: rows.length };
 };
 
@@ -390,9 +406,12 @@ const listTupleSubjectsHandler: ShapeHandler = ({ state, params, visibleAsOf }) 
  * stopgap carried is gone: this handler now genuinely answers every case,
  * not just the no-recursion-needed one.
  */
-const fetchReachableFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf }) => {
+const fetchReachableFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf, now }) => {
   const [ns, id, relation, maxDepth] = params as [string, string, string, number];
-  const rows = fetchReachableFrontierVia(state, ns, id, relation, maxDepth, visibleAsOf);
+  // D-144 — `now` excludes an expired edge from traversal exactly like the
+  // real recursive CTE's own added `where` clause; see `fetchReachableFrontierVia`'s
+  // own doc comment.
+  const rows = fetchReachableFrontierVia(state, ns, id, relation, maxDepth, visibleAsOf, now);
   // A plain-data map, matching this file's own tupleRowToApiShape idiom —
   // `DstFrontierRow` is a nominally-declared interface, which TypeScript
   // does not treat as assignable to `Record<string, unknown>` even with
@@ -409,7 +428,7 @@ const fetchReachableFrontierHandler: ShapeHandler = ({ state, params, visibleAsO
 };
 
 /** Real Postgres's `unnest($1::text[]), unnest($2::text[]), unnest($3::text[])` join is positional — one join row per array index. Mirrors that exactly rather than, say, a cross product. */
-const fetchTuplesOnFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf }) => {
+const fetchTuplesOnFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf, now }) => {
   const [nsArr, idArr, relArr] = params as [string[], string[], string[]];
   const frontierKeys = new Set<string>();
   for (let i = 0; i < nsArr.length; i += 1) {
@@ -419,7 +438,8 @@ const fetchTuplesOnFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf
     .filter(
       (row) =>
         frontierKeys.has(`${row.objectNs}:${row.objectId}#${row.relation}`) &&
-        isVisible(row.commitSeq, visibleAsOf),
+        isVisible(row.commitSeq, visibleAsOf) &&
+        isTupleLive(row.expiresAt, now), // D-144
     )
     .map((row) => ({
       object_ns: row.objectNs,
@@ -428,6 +448,7 @@ const fetchTuplesOnFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf
       subject_ns: row.subjectNs,
       subject_id: row.subjectId,
       subject_relation: row.subjectRelation,
+      expires_at: row.expiresAt, // D-144 — matches the real query's own added column
     }));
   return { rows, rowCount: rows.length };
 };
@@ -438,9 +459,13 @@ const fetchTuplesOnFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf
 
 const SHAPES = new Map<string, ShapeHandler>([
   [
+    // D-144 — `expires_at` appended as a 7th column/param; see
+    // src/store/tuples.ts's own writeTuple insert statement, which this
+    // key must match exactly (normalizeSql collapses whitespace only, not
+    // column order or text).
     normalizeSql(`insert into relation_tuples
-         (object_ns, object_id, relation, subject_ns, subject_id, subject_relation)
-       values ($1, $2, $3, $4, $5, $6)
+         (object_ns, object_id, relation, subject_ns, subject_id, subject_relation, expires_at)
+       values ($1, $2, $3, $4, $5, $6, $7)
        on conflict (object_ns, object_id, relation, subject_ns, subject_id, coalesce(subject_relation, ''))
        do nothing`),
     tupleInsertHandler,
@@ -457,19 +482,22 @@ const SHAPES = new Map<string, ShapeHandler>([
     writeLogInsertHandler,
   ],
   [
-    normalizeSql(`select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at
+    // D-144 — `expires_at` appended to the select list; must match
+    // src/store/tuples.ts's own listTuplesByObject exactly.
+    normalizeSql(`select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at, expires_at
      from relation_tuples where object_ns = $1 and object_id = $2
      order by id`),
     listByObjectHandler(false),
   ],
   [
-    normalizeSql(`select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at
+    normalizeSql(`select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at, expires_at
      from relation_tuples where object_ns = $1 and object_id = $2 and relation = $3
      order by id`),
     listByObjectHandler(true),
   ],
   [
-    normalizeSql(`select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at
+    // D-144 — `expires_at` appended; must match listTuplesBySubject exactly.
+    normalizeSql(`select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at, expires_at
      from relation_tuples where subject_ns = $1 and subject_id = $2
      order by id`),
     listBySubjectHandler,
@@ -493,12 +521,19 @@ const SHAPES = new Map<string, ShapeHandler>([
     namespaceConfigInsertHandler,
   ],
   [
-    normalizeSql(`select subject_ns, subject_id
+    // D-144 — expires_at added to the select list and a liveness filter
+    // added to the where clause; must match resolver.ts's listTupleSubjects
+    // exactly.
+    normalizeSql(`select subject_ns, subject_id, expires_at
      from relation_tuples
-     where object_ns = $1 and object_id = $2 and relation = $3`),
+     where object_ns = $1 and object_id = $2 and relation = $3
+       and (expires_at is null or expires_at > now())`),
     listTupleSubjectsHandler,
   ],
   [
+    // D-144 — a liveness filter added to the recursive term's where clause
+    // (no new column here — see fetchReachableFrontier's own doc comment
+    // for why); must match resolver.ts's fetchReachableFrontier exactly.
     normalizeSql(`with recursive membership(ns, id, relation, depth, path) as (
        select
          $1::text as ns,
@@ -517,6 +552,7 @@ const SHAPES = new Map<string, ShapeHandler>([
        join membership m
          on rt.object_ns = m.ns and rt.object_id = m.id and rt.relation = m.relation
        where rt.subject_relation is not null
+         and (rt.expires_at is null or rt.expires_at > now())
          and m.depth < $4
          and not (
            (rt.subject_ns || ':' || rt.subject_id || '#' || rt.subject_relation) = any (m.path)
@@ -526,12 +562,16 @@ const SHAPES = new Map<string, ShapeHandler>([
     fetchReachableFrontierHandler,
   ],
   [
-    normalizeSql(`select rt.object_ns, rt.object_id, rt.relation, rt.subject_ns, rt.subject_id, rt.subject_relation
+    // D-144 — expires_at added to the select list and a liveness filter
+    // added as a where clause; must match resolver.ts's
+    // fetchTuplesOnFrontier exactly.
+    normalizeSql(`select rt.object_ns, rt.object_id, rt.relation, rt.subject_ns, rt.subject_id, rt.subject_relation, rt.expires_at
      from relation_tuples rt
      join (
        select unnest($1::text[]) as ns, unnest($2::text[]) as id, unnest($3::text[]) as relation
      ) as frontier
-       on rt.object_ns = frontier.ns and rt.object_id = frontier.id and rt.relation = frontier.relation`),
+       on rt.object_ns = frontier.ns and rt.object_id = frontier.id and rt.relation = frontier.relation
+     where rt.expires_at is null or rt.expires_at > now()`),
     fetchTuplesOnFrontierHandler,
   ],
 ]);

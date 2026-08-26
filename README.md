@@ -29,6 +29,8 @@ to try the DSL compiler itself against your own source.
 - [A third proof: the static schema verifier](#a-third-proof-the-static-schema-verifier)
 - [A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed](#a-fourth-proof-metamorphic-and-mutation-testing--plus-a-real-deadlock-found-reproduced-and-fixed)
 - [A scope decision, two proof extensions, a tamper-evident audit log, and a schema safety net](#a-scope-decision-two-proof-extensions-a-tamper-evident-audit-log-and-a-schema-safety-net)
+- [Expiring tuples: D-144's own caveat, built](#expiring-tuples-d-144s-own-caveat-built)
+- [Four bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec](#four-bigger-bets-built-in-parallel-scoped-api-keys-a-batch-endpoint-a-privilege-escalation-scanner-an-smt-tier-and-a-machine-checked-api-spec)
 - [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
 - [How it works](#how-it-works)
 - [Latency](#latency)
@@ -263,8 +265,13 @@ commit where the original ten-item checklist closed; the verifier's own
 soundness and expressiveness kept improving past that tag, disclosed here
 rather than left for the tag to imply otherwise. The nightly k=3
 differential test the verifier's own test suite always had was only
-actually wired into a scheduled CI job later (D-134). Track real, current
-status in [`PROGRESS.md`](PROGRESS.md).
+actually wired into a scheduled CI job later (D-134). The SMT encoding
+sketch above stopped being just a sketch (D-151): a real `z3-solver`-backed
+tier now decides the **non-recursive** fragment exactly — one uninterpreted
+sort per namespace, one predicate per relation, satisfiability asked
+directly, every `SAT` result replayed through the real engine before ever
+being trusted, recursion detected and declined rather than risked. Track
+real, current status in [`PROGRESS.md`](PROGRESS.md).
 
 ## A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed
 
@@ -383,8 +390,9 @@ check on a tuple (an `expires_at` comparison against the current clock,
 provable the same way `atToken`'s floor comparison already is). **What
 stays out, unchanged:** a general attribute/context-evaluation engine
 (CEL/Rego/Cedar-style) — the "What this is not" section below still holds
-that line. This entry is a decision only; no code shipped. Building the
-narrow form is separate, tracked follow-up work.
+that line. This entry was a decision only, with no code — the narrow form
+itself, expiring/time-boxed tuples, shipped separately afterward (see
+below).
 
 Five further items shipped, built in parallel as independent, isolated
 pieces of work:
@@ -443,6 +451,52 @@ checking the merged file's real content directly, then fixed by hand and
 reconfirmed with real, un-mocked CLI invocations of both command groups.
 Full account of both problems, and every decision above:
 [`docs/DECISIONS.md`](docs/DECISIONS.md) D-144 through D-149.
+
+## Expiring tuples: D-144's own caveat, built
+
+A tuple can now optionally carry a validity window — `authz tuple write ...
+--expires-at 2026-09-01T00:00:00Z` (CLI) or `expiresAt` (API body) — the
+closed form D-144 scoped in above, not a general attribute engine. Once
+that instant passes, the tuple is treated as though it had been deleted:
+both resolvers stop granting through it independently (D-022's isolation
+preserved), `authz expand`'s own resolved tree agrees, and — the one place
+this needed care beyond "just filter by a timestamp" — the opt-in
+check-result cache never serves a stale `ALLOW` past a real expiry, since
+an expiry produces no write for the cache's own invalidation to react to.
+Proven, not assumed: a new deterministic simulation-testing fault shows an
+expiry crossing mid-check is invisible to a `REPEATABLE READ` snapshot
+already anchored before it — the identical composition already proven for
+a concurrent write landing mid-check, applied here to a concurrent clock
+advance — and a real-Postgres integration test shows a live grant flip to
+denied from nothing but a raw `UPDATE` simulating time passing, with the
+cache immediately reflecting it rather than masking it for its own TTL.
+
+Built via four independent, fully disjoint-file pieces (storage, the
+reference resolver, cache safety, CLI/API), each agent handed an exact,
+pinned interface contract rather than left to design any shared piece —
+directly applying the previous batch's own two lessons above: no two
+agents ever touched the same file, and every agent's own summary was
+independently re-verified against its real files before being trusted. A
+second real, distinct cross-cutting gap surfaced anyway and was disclosed,
+not hidden: DST's fake store matches every query by exact SQL text, so a
+real query's own SQL changing (a new column, a new filter) silently
+invalidates whatever the fake had registered for the old text — found by
+one agent running the full suite beyond its own assigned task and naming
+the exact failure, fixed by reconciling every affected shape once every
+piece had merged. Full account, including every fail-check:
+[`docs/DECISIONS.md`](docs/DECISIONS.md) D-150.
+
+## Four bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec
+
+The same feature-ideation pass that produced D-144 through D-150 above named a second, bigger tier of ideas. Five were built next, dispatched as five independent, isolated-worktree agents in one parallel batch: a third, optional DB-backed API-key credential tier that can be scoped to a namespace set and/or given an expiry (`authz apikey create/revoke/list`) — the two existing static env-var keys stay completely unchanged; `POST /check/batch`, up to 50 independent checks in one call, order-preserving; `authz audit privesc`, a privilege-escalation scanner built entirely on the existing `productionCheck` primitive, flagging drift against an `--expected` allow-list; a hand-maintained OpenAPI 3.0.3 document (`GET /openapi.json`, zero new dependency); and a real SMT-backed exact tier for the schema verifier's non-recursive fragment (`z3-solver`, a new dependency approved specifically for this task), closing part of the gap this project's own SMT encoding sketch left open since the verifier first shipped.
+
+Every SAT result the SMT tier reports is reconstructed into a concrete witness and replayed through the real, unmodified production engine before ever being called `VIOLATED` — never trusted on the solver's word alone, the same discipline the exact monotone prover already holds itself to. A real, disclosed finding surfaced while grounding the work: the task's own named "live proof" fixture is itself graph-recursive (via this schema's own deliberate parent-hierarchy and nested-group-membership features), so per the tier's own explicit scope it correctly declines on it — a same-shape non-recursive fixture delivers the genuine capability proof instead.
+
+**Two real numbering collisions, both a direct consequence of dispatching from a moving base, caught before shipping.** These five worktrees were branched at different points relative to D-150 (some before it existed at all, some before its own README writeup landed) — since none of the agents could see D-150's own migration or decision number while working, one new migration collided on its number (`0007`→`0008`) and two of the five agents' own `docs/DECISIONS.md` additions both independently chose `D-150` for themselves, requiring renumbering to `D-151`/`D-152` once every piece merged.
+
+**A real file-set collision, anticipated this time, but not prevented by anticipating it — unlike D-150's own batch, where zero file overlap was verified before dispatch.** Two agents were both instructed to add a new route to `src/api/server.ts`. Caught immediately after dispatch, resolved the same way D-148/D-149's own shared-file collision was: real `git merge` conflict resolution per worktree, reading and reconciling each actual conflict by hand.
+
+**Two more cross-cutting gaps, both closed once every piece had merged together — the OpenAPI document couldn't describe a route that didn't exist yet in its own author's worktree, and one integration test's own fixture used ids invalid under this project's identifier grammar, found only by live-verifying against a real database rather than trusting a green DB-free suite.** Full account of every collision and every fail-check: [`docs/DECISIONS.md`](docs/DECISIONS.md) D-151, D-152.
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
@@ -599,37 +653,48 @@ of this project has.
 | `authz schema publish <file>`                                                          | Compile and publish a new `namespace_configs` version                                                                                      |
 | `authz schema diff <file>`                                                             | Compare a candidate against each namespace's currently-published version; warns (exit 1) on any change that isn't a provable widen (D-149) |
 | `authz schema rollback <namespace> <version>`                                          | Republish an earlier published version's exact original source as a new version (D-149)                                                    |
-| `authz tuple write <object> <relation> <subject>`                                      | Write a tuple, prints the returned consistency token                                                                                       |
+| `authz tuple write <object> <relation> <subject> [--expires-at T]`                     | Write a tuple, prints the returned consistency token; `--expires-at` (ISO-8601) makes it live only until then (D-150)                      |
 | `authz tuple delete <object> <relation> <subject>`                                     | Delete a tuple, prints the returned consistency token                                                                                      |
 | `authz check <subject> <relation> <object> [--at-token T] [--path]`                    | Is `subject` related to `object` via `relation`? `--path` prints the real resolution path (see "What an `allow`..." above)                 |
 | `authz expand <object> <relation>`                                                     | Print the resolved subject tree for `object`#`relation`                                                                                    |
 | `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]` | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr)         |
 | `authz audit verify`                                                                   | Walk the `checks` hash chain; reports every row verified intact or names the exact first tampered row (D-148)                              |
+| `authz audit privesc <object> <relation> [--expected s1,s2,...]`                       | Every real subject currently able to reach a relation/permission, each with its own path; `--expected` flags UNEXPECTED/MISSING drift      |
+| `authz apikey create --role <admin\|readonly> [--scope ns1,ns2] [--expires-at T]`      | Mint a real, DB-backed API key; prints the raw key exactly once (D-152)                                                                    |
+| `authz apikey revoke <id>`                                                             | Revoke a DB-backed API key by id; rejected immediately on every future use (D-152)                                                         |
+| `authz apikey list`                                                                    | List every DB-backed API key (id, name, role, scopes, timestamps) — never a hash or raw key (D-152)                                        |
 | `authz serve`                                                                          | Start the Fastify API server                                                                                                               |
 
 `authz serve` exposes the same operations over HTTP, plus two bulk
 reverse-lookup operations with no CLI command of their own:
 
-| Method   | Route             | Auth                                  | Rate limit | Does                                                                    |
-| -------- | ----------------- | ------------------------------------- | ---------- | ----------------------------------------------------------------------- |
-| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                        |
-| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                           |
-| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                      |
-| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                    |
-| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple                                                  |
-| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                 |
-| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)       |
-| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                   |
-| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version |
+| Method   | Route             | Auth                                  | Rate limit | Does                                                                       |
+| -------- | ----------------- | ------------------------------------- | ---------- | -------------------------------------------------------------------------- |
+| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                           |
+| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-152) |
+| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                              |
+| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                         |
+| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                       |
+| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                       |
+| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                    |
+| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)          |
+| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                      |
+| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version    |
+| `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                    |
 
 `READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
 the four read/list routes above without also granting write access.
 `ADMIN_API_KEY` alone still authorizes every route, exactly as before that
-credential existed. Every rate/flood-guard budget above can be backed by
-Redis instead of one process's own memory via the optional `REDIS_URL`
-(D-137) — unset by default, a single-instance deployment needs nothing
-new. See `src/api/server.ts`'s own doc comments for the exact route
-shapes.
+credential existed. A third, optional credential tier (D-152) mints real,
+DB-backed keys (`authz apikey create/revoke/list`) that can additionally be
+scoped to a fixed set of namespaces and/or given an expiry — every gated
+route above rejects an out-of-scope namespace with `403`, and neither
+static env-var key is affected: a deployment that never mints a DB-backed
+key keeps behaving exactly as it always has. Every rate/flood-guard budget
+above can be backed by Redis instead of one process's own memory via the
+optional `REDIS_URL` (D-137) — unset by default, a single-instance
+deployment needs nothing new. See `src/api/server.ts`'s own doc comments
+for the exact route shapes.
 
 Static mockups of what a real UI over this would look like —
 Namespaces, Tuple browser, Check playground, Soundness runs, Expand
@@ -649,13 +714,14 @@ src/
     production/  the real, SQL-backed check engine, plus the opt-in check-result cache (cache.ts)
   metamorphic/ classifyMonotone()/findFlippableExclusion() — the monotonicity classifier backing test/metamorphic/'s property tests (D-140, D-147)
   soundness/   the differential-fuzz generator, classifier, runner
-  audit/       expand(), listObjects()/listUsers(), and the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148)
+  audit/       expand(), listObjects()/listUsers(), privesc.ts (privilege-escalation scanner, D-152), and the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148)
   report/      markdown/JSON soundness reporters, exit codes, PR-comment logic
-  api/         the Fastify server, plus the opt-in Redis-backed rate-limit store (redis-store.ts)
+  api/         the Fastify server, db-api-keys.ts (DB-backed API-key tier, D-152), openapi-document.ts (GET /openapi.json's own document, D-152), plus the opt-in Redis-backed rate-limit store (redis-store.ts)
   cli/         the authz CLI — index.ts, plus commands/ (one file per subcommand)
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
-tools/schema-verifier/  the static schema verifier — see "A third proof" above
+scripts/generate-openapi.ts writes docs/openapi.json (D-152)
+tools/schema-verifier/  the static schema verifier — see "A third proof" above; src/smt/ is the z3-backed exact tier for the non-recursive fragment (D-151)
 docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, INVARIANTS.md, FINDINGS.md,
              DST-PROPOSAL.md, github-governance.md, dst-regression-corpus.json, screens/
 test/

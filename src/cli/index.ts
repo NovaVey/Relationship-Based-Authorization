@@ -21,6 +21,8 @@ import { soundnessRun } from './commands/soundness.js';
 import { expandCli } from './commands/expand.js';
 import { serve } from './commands/serve.js';
 import { auditVerify } from './commands/audit.js';
+import { apikeyCreate, apikeyRevoke, apikeyList } from './commands/apikey.js';
+import { privescCli } from './commands/privesc.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -93,9 +95,15 @@ tuple
     '<subject>',
     "namespace:id or namespace:id#relation, e.g. 'user:alice' or 'group:eng#member'",
   )
-  .action(async (object: string, relation: string, subject: string) => {
-    await tupleWrite(object, relation, subject);
-  });
+  .option(
+    '--expires-at <iso8601>',
+    'optional validity-window expiry (ISO-8601) — the tuple is treated as absent once this instant passes (D-144)',
+  )
+  .action(
+    async (object: string, relation: string, subject: string, options: { expiresAt?: string }) => {
+      await tupleWrite(object, relation, subject, options);
+    },
+  );
 
 tuple
   .command('delete')
@@ -181,6 +189,66 @@ audit
   )
   .action(async () => {
     await auditVerify();
+  });
+
+// Real, mintable, DB-backed API keys (src/api/db-api-keys.ts) — a third
+// credential tier alongside the two static env-var keys (ADMIN_API_KEY/
+// READONLY_API_KEY). See src/cli/commands/apikey.ts's own top-of-file doc
+// comment for the full CLI contract and exit-code table.
+const apikey = program
+  .command('apikey')
+  .description(
+    'Real, DB-backed API key operations — a third credential tier alongside ADMIN_API_KEY/READONLY_API_KEY',
+  );
+
+apikey
+  .command('create')
+  .description('Create a new API key; prints the raw key exactly once')
+  .requiredOption('--role <admin|readonly>', 'the role this key authorizes')
+  .option(
+    '--scope <ns1,ns2>',
+    'comma-separated namespace names this key is restricted to (omit for unscoped — every namespace)',
+  )
+  .option(
+    '--expires-at <iso8601>',
+    'an ISO 8601 timestamp this key stops working at (omit for never-expiring)',
+  )
+  .option('--name <label>', 'a human-readable label for this key (defaults to a generated name)')
+  .action(async (options: { role: string; scope?: string; expiresAt?: string; name?: string }) => {
+    await apikeyCreate(options);
+  });
+
+apikey
+  .command('revoke')
+  .description('Revoke an API key by id; the key is rejected immediately on every future use')
+  .argument('<id>', 'the numeric id printed by `authz apikey list`/`create`')
+  .action(async (id: string) => {
+    await apikeyRevoke(id);
+  });
+
+apikey
+  .command('list')
+  .description('List every API key (id, name, role, scopes, timestamps) — never a hash or raw key')
+  .action(async () => {
+    await apikeyList();
+  });
+
+audit
+  .command('privesc')
+  .description(
+    'Report every real subject currently able to reach a relation or permission on an ' +
+      'object, each with its own real resolution path — a policy-drift detector for a ' +
+      'security reviewer',
+  )
+  .argument('<object>', "namespace:id, e.g. 'document:sensitive-doc'")
+  .argument('<relation>', 'relation or permission name')
+  .option(
+    '--expected <subjects>',
+    "comma-separated 'namespace:id' allow-list; flags any other subject found as " +
+      'UNEXPECTED and any listed subject not found as MISSING',
+  )
+  .action(async (object: string, relation: string, options: { expected?: string }) => {
+    await privescCli(object, relation, options);
   });
 
 program

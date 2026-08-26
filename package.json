@@ -35,6 +35,7 @@
     "cli": "tsx src/cli/index.ts",
     "seed:example": "tsx scripts/seed-example.ts",
     "benchmark": "tsx scripts/benchmark-check-depth.ts",
+    "generate:openapi": "tsx scripts/generate-openapi.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -54,6 +55,7 @@
     "ioredis": "^6.0.0",
     "pg": "^8.23.0",
     "toad-cache": "^3.7.4",
+    "z3-solver": "^5.2.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

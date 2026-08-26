@@ -85,27 +85,47 @@ describe('checkAndValidate — §7 routes the non-monotone fragment to bounded s
   const nonMonotone = loadSchema(SCHEMA_FIXTURE_DIR, 'non-monotone.authz');
   const graph = buildSchemaGraph(nonMonotone);
 
-  it('approve_reachable_via_intersection — VIOLATED up to k = 1: the real engine allows the same user as both editor and reviewer', async () => {
+  // Both goals below (`document#approve`, `document#publish`) are small
+  // and non-recursive — exactly the fragment the new SMT tier
+  // (`../src/smt/`, docs/DECISIONS.md) now decides *before* `checkAndValidate`
+  // ever reaches bounded search, so both are now `proof: 'exact'`, not
+  // `'bounded'`, and the `HOLDS` case no longer carries a `bound` (only
+  // ever set for `proof: 'bounded'`). This is the SMT tier doing its job,
+  // not a regression in bounded search itself — `boundedSearch` is still
+  // directly, separately exercised below (bypassing `checkAndValidate`'s
+  // own routing entirely) and unchanged. See `test/smt.test.ts` for the
+  // encoder's own dedicated coverage.
+
+  it('approve_reachable_via_intersection — exact VIOLATED via the new SMT tier: the real engine allows the same user as both editor and reviewer', async () => {
     const invariant = loadInvariant('intersection-approve.invariant');
     const { result, validation } = await checkAndValidate(graph, nonMonotone, invariant);
 
     expect(result.fragment).toBe('non-monotone');
     expect(result.verdict).toBe('VIOLATED');
+    expect(result.proof).toBe('exact');
     expect(result.witness).toBeDefined();
     expect(result.witness!.length).toBeGreaterThan(0);
-    // Every verdict boundedSearch returns already came from the real
-    // engine directly — no separate replay/fuzz step to run.
-    expect(validation).toEqual({ kind: 'not-applicable' });
+    // Unlike a bounded-search VIOLATED (already self-validated by
+    // construction), the SMT tier's own SAT result is only ever reported
+    // once independently replayed against the real engine — this is that
+    // confirmation, not a no-op.
+    expect(validation.kind).toBe('confirmed');
   });
 
-  it('blocked_user_cannot_publish — HOLDS up to k = 1: exclusion keeps a blocked subject blocked regardless of any other candidate tuple', async () => {
+  it('blocked_user_cannot_publish — exact HOLDS via the new SMT tier: exclusion keeps a blocked subject blocked regardless of any other candidate tuple', async () => {
     const invariant = loadInvariant('exclusion-blocked-cannot-publish.invariant');
     const { result, validation } = await checkAndValidate(graph, nonMonotone, invariant);
 
     expect(result.fragment).toBe('non-monotone');
     expect(result.verdict).toBe('HOLDS');
-    expect(result.bound).toBe(1);
-    expect(validation).toEqual({ kind: 'not-applicable' });
+    expect(result.proof).toBe('exact');
+    expect(result.bound).toBeUndefined();
+    // The SMT tier's own HOLDS still gets the same empirical
+    // belt-and-suspenders fuzz check the exact monotone prover's HOLDS
+    // gets (docs/DECISIONS.md) — not "not-applicable" the way a bounded
+    // verdict is (bounded search needs no further validation; this tier's
+    // own soundness argument is new and hasn't earned the same pass yet).
+    expect(validation.kind).toBe('empirically-clean');
   });
 
   it("blocked_user_cannot_publish's blocked(o) = s is honored as a fixed given fact, not merely one enumerable candidate — proven by a candidate set that would otherwise force VIOLATED", async () => {

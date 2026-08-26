@@ -65,26 +65,36 @@ const grantPath: ResolutionStep = {
 
 describe('checkResponse — status is always 200, whether allowed or denied', () => {
   it('checkresponse-status-is-200-when-allowed-is-true', () => {
-    const result: PerformCheckResult = { allowed: true, path: grantPath, depth: 1 };
+    const result: PerformCheckResult = {
+      allowed: true,
+      path: grantPath,
+      depth: 1,
+      touchedExpiringTuple: false,
+    };
     expect(checkResponse(subject, 'viewer', object, result).status).toBe(200);
   });
 
   it('checkresponse-status-is-200-when-allowed-is-false', () => {
-    const result: PerformCheckResult = { allowed: false, depth: 0 };
+    const result: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
     expect(checkResponse(subject, 'viewer', object, result).status).toBe(200);
   });
 });
 
 describe('checkResponse — path is present, and equal to result.path, if and only if allowed is true', () => {
   it('checkresponse-includes-a-path-key-equal-to-result-path-when-allowed-is-true', () => {
-    const result: PerformCheckResult = { allowed: true, path: grantPath, depth: 1 };
+    const result: PerformCheckResult = {
+      allowed: true,
+      path: grantPath,
+      depth: 1,
+      touchedExpiringTuple: false,
+    };
     const response = checkResponse(subject, 'viewer', object, result);
     expect(response.body.path).toEqual(grantPath);
     expect(Object.prototype.hasOwnProperty.call(response.body, 'path')).toBe(true);
   });
 
   it('checkresponse-omits-the-path-key-entirely-when-allowed-is-false-not-a-present-but-undefined-key', () => {
-    const result: PerformCheckResult = { allowed: false, depth: 4 };
+    const result: PerformCheckResult = { allowed: false, depth: 4, touchedExpiringTuple: false };
     const response = checkResponse(subject, 'viewer', object, result);
     expect(response.body.path).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(response.body, 'path')).toBe(false);
@@ -93,7 +103,7 @@ describe('checkResponse — path is present, and equal to result.path, if and on
 
 describe('checkResponse — atToken is present, opaque-encoded, and decodes back to the caller-supplied value, if and only if a token was passed', () => {
   it('checkresponse-includes-an-attoken-key-that-decodes-back-to-the-supplied-token-when-a-token-was-passed', () => {
-    const result: PerformCheckResult = { allowed: false, depth: 0 };
+    const result: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
     const response = checkResponse(subject, 'viewer', object, result, 987654);
     expect(response.body.atToken).toBe(encodeToken(987654));
     expect(decodeToken(response.body.atToken as string)).toBe(987654);
@@ -101,7 +111,7 @@ describe('checkResponse — atToken is present, opaque-encoded, and decodes back
   });
 
   it('checkresponse-omits-the-attoken-key-entirely-when-no-token-was-passed-not-a-present-but-undefined-key', () => {
-    const result: PerformCheckResult = { allowed: false, depth: 0 };
+    const result: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
     const response = checkResponse(subject, 'viewer', object, result);
     expect(response.body.atToken).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(response.body, 'atToken')).toBe(false);
@@ -111,7 +121,7 @@ describe('checkResponse — atToken is present, opaque-encoded, and decodes back
     // 0 is a legitimate token value — a `atToken !== undefined` check
     // (correct) vs. a falsy check (`atToken ?` — a bug) would only diverge
     // at exactly this value.
-    const result: PerformCheckResult = { allowed: false, depth: 0 };
+    const result: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
     const response = checkResponse(subject, 'viewer', object, result, 0);
     expect(response.body.atToken).toBe(encodeToken(0));
     expect(decodeToken(response.body.atToken as string)).toBe(0);
@@ -121,7 +131,7 @@ describe('checkResponse — atToken is present, opaque-encoded, and decodes back
   it('checkresponse-attoken-is-not-parseable-as-a-plain-integer-the-opacity-property', () => {
     // The whole point of encodeToken: a caller must not be able to treat
     // this as a raw number to compare/increment/decrement.
-    const result: PerformCheckResult = { allowed: false, depth: 0 };
+    const result: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
     const response = checkResponse(subject, 'viewer', object, result, 42);
     expect(Number.isNaN(Number(response.body.atToken))).toBe(true);
   });
@@ -129,12 +139,17 @@ describe('checkResponse — atToken is present, opaque-encoded, and decodes back
 
 describe('checkResponse — depth is passed through verbatim', () => {
   it('checkresponse-depth-equals-result-depth-verbatim-for-a-nonzero-depth', () => {
-    const result: PerformCheckResult = { allowed: true, path: grantPath, depth: 6 };
+    const result: PerformCheckResult = {
+      allowed: true,
+      path: grantPath,
+      depth: 6,
+      touchedExpiringTuple: false,
+    };
     expect(checkResponse(subject, 'viewer', object, result).body.depth).toBe(6);
   });
 
   it('checkresponse-depth-equals-result-depth-verbatim-for-a-zero-depth', () => {
-    const result: PerformCheckResult = { allowed: false, depth: 0 };
+    const result: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
     expect(checkResponse(subject, 'viewer', object, result).body.depth).toBe(0);
   });
 });

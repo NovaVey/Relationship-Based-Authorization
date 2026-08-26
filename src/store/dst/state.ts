@@ -30,6 +30,15 @@ export interface RelationTupleRow {
   subjectRelation: string | null;
   createdAt: Date;
   commitSeq: number;
+  /**
+   * D-144 (expiring tuples) — mirrors `relation_tuples.expires_at` exactly:
+   * `null` means this tuple never expires. Filtered by every snapshot-aware
+   * read handler (`shapes.ts`) the same way `isVisible`/`visibleAsOf`
+   * already filters by commit-order visibility, except this dimension is
+   * anchored against `FakeStoreState.now` (a fake, test-controlled clock),
+   * never the real wall clock — see that field's own doc comment for why.
+   */
+  expiresAt: Date | null;
 }
 
 export interface WriteLogRow {
@@ -72,6 +81,22 @@ export interface FakeStoreState {
   nextCommitSeq: number;
   /** DST D1 (`docs/DECISIONS.md` D-098) — the shared advisory-lock table every connection on this state contends against. See `locks.ts`'s own top-of-file doc comment. */
   locks: LocksState;
+  /**
+   * D-144 (expiring tuples) — the fake's own controllable "current time,"
+   * used ONLY to decide whether a tuple's `expiresAt` has passed. Defaults
+   * to the epoch (`new Date(0)`), matching this file's own established "DST
+   * is deterministic — no wall-clock reads" convention (see
+   * `tupleInsertHandler`'s identical `createdAt: new Date(0)` precedent in
+   * `shapes.ts`) — a test that never sets an `expiresAt` or never advances
+   * this field is completely unaffected, since every tuple with a `null`
+   * `expiresAt` is live regardless of what this holds. A test proving the
+   * expiry mechanic itself advances this explicitly (`FakeConnectionSource
+   * .setNow`, `source.ts`) to simulate real time passing, with zero actual
+   * waiting and zero real nondeterminism — the same "construct the race,
+   * don't wait for it" philosophy `armNextConnectionPause` already
+   * established for concurrency, applied here to time instead.
+   */
+  now: Date;
 }
 
 export function createFakeStoreState(): FakeStoreState {
@@ -83,6 +108,7 @@ export function createFakeStoreState(): FakeStoreState {
     nextToken: 1,
     nextCommitSeq: 1,
     locks: createLocksState(),
+    now: new Date(0),
   };
 }
 

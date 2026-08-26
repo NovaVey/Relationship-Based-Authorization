@@ -1,0 +1,12 @@
+// Companion to `fixtures/schemas/smt-mismatch-deep-intersection.authz` —
+// see that file's own header comment. No constraints: this asks whether
+// `level0#view` is reachable at all — the SMT tier finds a genuine,
+// unbounded-in-depth witness (30 tuples), but the real engine's own
+// `CHECK_MAX_DEPTH` (default 25) denies it, so self-validation correctly
+// reports a mismatch and the tier must not report VIOLATED.
+invariant smt_mismatch_deep_intersection {
+  s: user
+  o: level0
+
+  goal: view(s, o)
+}

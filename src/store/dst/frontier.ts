@@ -114,6 +114,16 @@ function identityKey(ns: string, id: string, relation: string): string {
  * other D2 snapshot-aware read (`shapes.ts`'s own `isVisible` rule):
  * `undefined` sees every currently-committed edge, a real `commitSeq`
  * ceiling sees only edges committed at or before that snapshot boundary.
+ *
+ * `now` (D-144, expiring tuples) mirrors the real `fetchReachableFrontier`'s
+ * own added `where (rt.expires_at is null or rt.expires_at > now())`
+ * clause: an edge whose tuple has already expired as of `now` is excluded
+ * from traversal exactly as if it had been deleted. Defaults to the epoch
+ * (`new Date(0)`) — matching this codebase's own "DST is deterministic, no
+ * wall-clock reads" convention — so every existing call site that predates
+ * this parameter and never sets any tuple's `expiresAt` is completely
+ * unaffected: with no non-null `expiresAt` anywhere in their fixtures, the
+ * filter is a no-op regardless of what `now` happens to be.
  */
 export function fetchReachableFrontierVia(
   state: FakeStoreState,
@@ -122,6 +132,7 @@ export function fetchReachableFrontierVia(
   relation: string,
   maxDepth: number,
   visibleAsOf: number | undefined,
+  now: Date = new Date(0),
 ): DstFrontierRow[] {
   const seedRow: DstFrontierRow = {
     ns,
@@ -145,7 +156,8 @@ export function fetchReachableFrontierVia(
           t.objectId === row.id &&
           t.relation === row.relation &&
           t.subjectRelation !== null &&
-          (visibleAsOf === undefined || t.commitSeq <= visibleAsOf),
+          (visibleAsOf === undefined || t.commitSeq <= visibleAsOf) &&
+          (t.expiresAt === null || t.expiresAt.getTime() > now.getTime()), // D-144
       );
       for (const edge of edges) {
         // subjectRelation is checked !== null above, so this cast is safe

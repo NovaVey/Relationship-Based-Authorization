@@ -849,6 +849,69 @@ describe('listTuplesByObject and listTuplesBySubject return exactly the rows a s
   });
 });
 
+/**
+ * D-144's storage-layer half: `relation_tuples.expires_at`
+ * (`src/store/migrations/0007_relation_tuples_expiry.sql`) round-trips a
+ * real `Date` through a real Postgres `timestamptz` column and back out
+ * through `listTuplesByObject`/`rowToTuple` (`src/store/tuples.ts`)
+ * unchanged, within the tolerance a real column type (millisecond
+ * precision, not JS's own sub-millisecond `Date` internals) can actually
+ * promise. This is only the storage layer — nothing here claims a resolver
+ * honors this column yet; see D-144's "What 'in scope' requires before it
+ * ships" for what's still outstanding.
+ */
+describe('a real future expiresAt round-trips through a write and a listTuplesByObject read — D-144 storage layer', () => {
+  it('a-tuple-written-with-a-future-expiresAt-is-read-back-with-the-same-expiresAt-within-tolerance', async () => {
+    const ns = uniqueName('doc');
+    await publishDocumentSchema(ns);
+    const objectId = uniqueName('obj');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // one hour from now
+
+    const writeResult = await writeTuple(pool, {
+      objectNs: ns,
+      objectId,
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+      expiresAt,
+    });
+    expect(writeResult.ok).toBe(true);
+    if (!writeResult.ok) return;
+    expect(writeResult.created).toBe(true);
+
+    const rows = await listTuplesByObject(pool, { objectNs: ns, objectId });
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row?.expiresAt).toBeInstanceOf(Date);
+    // Millisecond-level tolerance, not exact equality: `timestamptz` stores
+    // microsecond precision but `pg` decodes it back into a JS `Date`
+    // (millisecond precision) — a real, expected narrowing, not a bug —
+    // so comparing via `.getTime()` with a generous tolerance is the
+    // correct round-trip proof, not `toEqual(expiresAt)` on the two `Date`
+    // objects directly.
+    expect(Math.abs((row?.expiresAt?.getTime() ?? NaN) - expiresAt.getTime())).toBeLessThan(1000);
+
+    // Control: a tuple written with no expiresAt at all still reports none
+    // on read — NULL round-trips as "absent," per TupleRow's own
+    // conditional-spread contract, not as some other falsy sentinel.
+    const noExpiryObjectId = uniqueName('obj');
+    const noExpiryWrite = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: noExpiryObjectId,
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'bob',
+    });
+    expect(noExpiryWrite.ok).toBe(true);
+    const noExpiryRows = await listTuplesByObject(pool, {
+      objectNs: ns,
+      objectId: noExpiryObjectId,
+    });
+    expect(noExpiryRows).toHaveLength(1);
+    expect(noExpiryRows[0]).not.toHaveProperty('expiresAt');
+  });
+});
+
 describe('a token pinned beyond what this database has observed is rejected, not silently treated as satisfied — §6.3', () => {
   it('assert-token-observed-throws-for-a-token-higher-than-any-write-this-database-has-seen', async () => {
     const highest = await currentToken(pool);

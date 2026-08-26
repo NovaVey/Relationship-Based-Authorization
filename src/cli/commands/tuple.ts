@@ -75,12 +75,30 @@ export async function tupleWrite(
   objectRaw: string,
   relation: string,
   subjectRaw: string,
+  options: { expiresAt?: string } = {},
 ): Promise<void> {
   const tuple = buildTupleKey(objectRaw, relation, subjectRaw);
   if (!tuple) {
     console.error(`invalid object/subject reference — ${REF_USAGE}`);
     process.exitCode = 2;
     return;
+  }
+  // Optional validity-window expiry (D-144). Parsed and range-checked here,
+  // before the identifier/DATABASE_URL checks below, for the same reason
+  // those run in this order: an immediately-decidable argument error (a
+  // malformed `--expires-at` string) must never be masked behind a later,
+  // unrelated infrastructure message just because no database happens to be
+  // configured.
+  if (options.expiresAt !== undefined) {
+    const expiresAt = new Date(options.expiresAt);
+    if (Number.isNaN(expiresAt.getTime())) {
+      console.error(
+        `invalid --expires-at value '${options.expiresAt}' — must be a valid ISO-8601 date string`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    tuple.expiresAt = expiresAt;
   }
   // Pure, DB-free identifier-pattern check — run before the DATABASE_URL
   // check below so a malformed identifier (e.g. an id containing a space)

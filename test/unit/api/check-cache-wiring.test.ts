@@ -63,6 +63,7 @@ const ALLOWED: ProductionCheckResult = {
   allowed: true,
   path: { kind: 'directGrant', object: README, relation: 'view', subject: ALICE },
   depth: 1,
+  touchedExpiringTuple: false,
 };
 
 const validCheckBody = { subject: ALICE, relation: 'view', object: README };

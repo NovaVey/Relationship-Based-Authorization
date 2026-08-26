@@ -31,9 +31,23 @@ import type { Invariant } from '../invariants/types.js';
 import { checkInvariant, scanReachability } from '../reachability/index.js';
 import type { CheckResult } from '../reachability/types.js';
 import type { SchemaGraph } from '../ir/types.js';
+import { trySmtTier } from '../smt/index.js';
 import { fuzzHolds, type FuzzHoldsOptions } from './fuzz.js';
 import { replayWitness } from './replay.js';
 import type { ValidationOutcome } from './types.js';
+
+// New tier (`../smt/index.ts`) — not part of the build spec's own five
+// phases; see `docs/DECISIONS.md` for the SMT sketch this closes part of.
+// Tried after `checkInvariant` and its short-circuits leave `UNKNOWN` on a
+// structurally non-monotone schema, before falling back to bounded search.
+// Applies only to a non-recursive goal (the sketch's own named obstacle)
+// and only ever returns a decisive verdict once its own reconstructed
+// witness has been independently confirmed against the real engine, for
+// `VIOLATED` — see that module's own header comment for the exact three
+// outcomes. `undefined` from it means "this tier does not apply," and
+// `checkAndValidate` falls through to bounded search exactly as it did
+// before this tier existed — the bounded-search branch itself is
+// untouched.
 
 export interface CheckAndValidateOptions {
   readonly fuzz?: FuzzHoldsOptions;
@@ -81,8 +95,13 @@ export async function checkAndValidate(
 
   // scan.fragment === 'non-monotone' and checkInvariant itself couldn't
   // decide — the exact search genuinely reached an intersection/exclusion
-  // edge neither short-circuit above could resolve. §7's bounded search
-  // is the fallback for that residual case.
+  // edge neither short-circuit above could resolve. Try the new SMT tier
+  // next (non-recursive goals only, self-validated internally before it
+  // ever returns a decisive verdict — see `../smt/index.ts`); only if it
+  // doesn't apply does this fall back to §7's bounded search, unchanged.
+  const smt = await trySmtTier(graph, schema, invariant, options?.fuzz);
+  if (smt !== undefined) return smt;
+
   const k = options?.bound ?? 1;
   const candidates = generateCandidateTuples(schema, scan.relations, invariant, k);
   const result = await boundedSearch(schema, invariant, candidates, k);
