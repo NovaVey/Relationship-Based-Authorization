@@ -117,7 +117,13 @@
  * cache is strictly a performance optimization, never an observable part of
  * the answer.
  */
-import type { CompiledRelation, CompiledSchema, RewriteRule } from '../schema/dsl/types.js';
+import type {
+  CompiledRelation,
+  CompiledSchema,
+  ExclusionRule,
+  NamespaceConfig,
+  RewriteRule,
+} from '../schema/dsl/types.js';
 
 /**
  * `undefined` (absent from the map) means white/unvisited — matching this
@@ -381,4 +387,195 @@ export function classifyMonotone(schema: CompiledSchema, ns: string, name: strin
   const cache = getOrCreateCache(schema);
   const colors = new Map<string, NodeColor>();
   return classifyNodeInternal(schema, ns, name, cache, colors);
+}
+
+/**
+ * A real `ExclusionRule` `findFlippableExclusion` (below) can reach from
+ * `(ns, name)` by crossing only edges that leave "what a caller needs to
+ * check to observe this exclusion's own truth value" unchanged — a `union`
+ * branch (safe: with no tuples written anywhere for a fresh subject/object
+ * pair except the two this shape asks its caller to write, every OTHER
+ * union sibling evaluates `false` by construction, so checking `(ns, name)`
+ * directly reflects this exclusion's own base/subtract state) and a
+ * same-namespace `computedUserset` pass-through (safe: `ComputedUsersetRule`
+ * never changes which object is being evaluated — see that type's own doc
+ * comment in `src/schema/dsl/types.ts`). Deliberately does NOT cross an
+ * `intersection` child (a sibling conjunct could itself need tuples this
+ * function has no way to know about, so satisfying only this exclusion says
+ * nothing about the intersection's own overall truth) or a `tupleToUserset`
+ * target (crossing to a different object needs an additional "hop" tuple
+ * this function never constructs) — see `findFlippableExclusion`'s own doc
+ * comment for the same reasoning stated once, and
+ * `test/metamorphic/monotonicity.integration.test.ts`'s general-sweep
+ * Property 5 for the one caller that turns this into real tuples and a real
+ * check today.
+ */
+export interface LocatedExclusion {
+  /**
+   * Always the exact `(ns, name)` pair `findFlippableExclusion` was called
+   * with, never some node found partway down the walk — every edge this
+   * walk crosses (see this interface's own doc comment) leaves the
+   * checked object/subject unchanged, so a real check against THIS `(ns,
+   * name)` pair, not the exclusion node's own position in the tree,
+   * directly reflects the located exclusion's base/subtract truth values.
+   */
+  ns: string;
+  name: string;
+  /**
+   * The relation a caller must write a tuple against to satisfy the
+   * located exclusion's own `base` branch. Always a real `CompiledRelation`
+   * name declared on `ns` — never a permission (see `findFlippableExclusion`'s
+   * own doc comment on why a further `computedUserset` resolution isn't
+   * attempted here) — so a single `writeTuple` call is always sufficient.
+   */
+  baseRelation: string;
+  /**
+   * The relation a caller must write a tuple against to satisfy the
+   * exclusion's `subtract` branch — the ONE additional write that must flip
+   * a check on `(ns, name)` from allowed to denied. Guaranteed distinct
+   * from `baseRelation` (see `findFlippableExclusion`'s own degenerate-case
+   * rejection, below) — a tuple graph where `baseRelation === subtractRelation`
+   * cannot ever satisfy `base` without also satisfying `subtract`, so no
+   * `LocatedExclusion` this function returns is ever unwitnessable that way.
+   */
+  subtractRelation: string;
+}
+
+/**
+ * Walks `(ns, name)`'s own rewrite tree — reusing the exact same
+ * switch-on-`kind` shape `classifyRewriteRule` (above) already uses to
+ * classify monotonicity — looking for the first real `ExclusionRule`
+ * reachable through the "transparent" edges `LocatedExclusion`'s own doc
+ * comment names (`union`, same-namespace `computedUserset`). Returns
+ * `undefined` if none is found, or if the first one found doesn't meet the
+ * additional "both sides are directly tuple-writable" requirement
+ * `LocatedExclusion` promises its own caller (see below) — this function
+ * never widens its own search to look for a SECOND candidate once the
+ * first found exclusion fails that check; a caller wanting to try another
+ * `(ns, name)` starting point does so by calling this function again with
+ * a different one, exactly like every other caller of a `classifyMonotone`
+ * -shaped function in this file already does per-pair, not per-schema.
+ * Throws only for a malformed `(schema, ns)` pair — an undeclared
+ * namespace — matching `classifyMonotone`'s own error contract for the
+ * same condition; an unrecognized `name` (neither a relation nor a
+ * permission on `ns`) is treated as "nothing to walk" and returns
+ * `undefined` rather than throwing, since a caller of this function
+ * legitimately scans every member name a schema declares without first
+ * filtering to permissions only (see this function's own caller in
+ * `test/metamorphic/monotonicity.integration.test.ts`).
+ *
+ * **Why this exists, and why it is deliberately narrower than
+ * `classifyMonotone`'s own boolean answer.** `classifyMonotone` already
+ * answers "does this rewrite tree contain an `ExclusionRule` ANYWHERE" —
+ * but only as a boolean, with no notion of WHERE, and every edge it
+ * crosses (including `intersection` and `tupleToUserset`) is fair game for
+ * THAT question, since it never needs to construct a real tuple-graph
+ * witness afterward (see this file's own top doc comment). Turning
+ * "somewhere, non-monotone" into "here is a real (subject, object) tuple
+ * graph that flips a real check" needs to know exactly which relation to
+ * write a tuple against for `base` and which for `subtract`, and needs
+ * every edge crossed on the way there to be one a caller can build real
+ * tuples for cheaply and correctly, with no need to independently
+ * re-derive resolver behavior (e.g. following a userset-subject chain, or
+ * constructing an intermediate tupleToUserset "hop" object) — hence this
+ * function's own narrower walk, and its own additional base/subtract
+ * shape requirement below. This is exactly the gap PROPERTY 5's own
+ * original scope note in `test/metamorphic/monotonicity.integration
+ * .test.ts` named as unbuilt machinery when it restricted itself to one
+ * hand-verified `generateFixture` shape; this function is what closes it,
+ * deliberately kept this narrow rather than growing into a general
+ * tuple-graph solver for arbitrary rewrite trees.
+ */
+export function findFlippableExclusion(
+  schema: CompiledSchema,
+  ns: string,
+  name: string,
+): LocatedExclusion | undefined {
+  const maybeNamespaceConfig = schema.namespaces[ns];
+  if (!maybeNamespaceConfig) {
+    throw new Error(`findFlippableExclusion: namespace '${ns}' is not declared in this schema`);
+  }
+  // Explicitly typed (not just narrowed) so this survives capture by the
+  // nested closures below — TS's control-flow narrowing of the throw-guard
+  // above does not, by itself, propagate into a nested function body (the
+  // nested function could in principle run later, after further
+  // reassignment); an explicit annotation on an otherwise-never-reassigned
+  // `const` sidesteps that without a non-null assertion at every use site.
+  const namespaceConfig: NamespaceConfig = maybeNamespaceConfig;
+
+  // A local, tiny cycle guard — a `computedUserset` chain can loop back on
+  // itself (`perm_a = perm_b`, `perm_b = perm_a`) exactly like
+  // `classifyNodeInternal`'s own grey-node case, above; unlike that
+  // function, this walk has no reason to memoize anything across calls (it
+  // only ever runs once, for one `(ns, name)` starting point), so a plain
+  // per-call `Set<string>` of permission names already visited on THIS
+  // walk is sufficient — no black/grey color distinction needed here.
+  function walkPermission(currentName: string, visited: Set<string>): ExclusionRule | undefined {
+    if (visited.has(currentName)) return undefined;
+    visited.add(currentName);
+    const permission = namespaceConfig.permissions[currentName];
+    if (!permission) return undefined; // a relation (or an unrecognized name) has no rewrite tree to walk
+    return walkRule(permission.rewrite, visited);
+  }
+
+  function walkRule(rule: RewriteRule, visited: Set<string>): ExclusionRule | undefined {
+    switch (rule.kind) {
+      case 'exclusion':
+        return rule;
+      case 'union':
+        // Every child is tried, in order, stopping at the first exclusion
+        // found — unlike `classifyRewriteRule`'s own union/intersection
+        // case, this is a SEARCH (not an aggregate boolean every caller
+        // depends on being complete), so short-circuiting on the first hit
+        // is correct here, not merely convenient.
+        for (const child of rule.children) {
+          const found = walkRule(child, visited);
+          if (found) return found;
+        }
+        return undefined;
+      case 'computedUserset':
+        return walkPermission(rule.name, visited);
+      case 'intersection':
+      case 'tupleToUserset':
+        // Deliberately not walked — see this function's own top doc
+        // comment and `LocatedExclusion`'s doc comment for why crossing
+        // either edge would need tuples this function has no way to
+        // construct.
+        return undefined;
+      default:
+        return assertNeverRewriteRule(rule);
+    }
+  }
+
+  const found = walkPermission(name, new Set());
+  if (!found) return undefined;
+
+  // Both sides must be a bare `computedUserset` naming a REAL RELATION —
+  // never a permission, which would need this function to recurse further
+  // to find something tuple-writable (exactly the unbuilt machinery
+  // PROPERTY 5's own original scope note names — see this function's own
+  // top doc comment). Rejecting here, rather than recursing, keeps this
+  // function's own contract simple: every `LocatedExclusion` it returns is
+  // directly satisfiable, or directly deniable, by exactly one tuple write
+  // per side.
+  if (found.base.kind !== 'computedUserset' || found.subtract.kind !== 'computedUserset') {
+    return undefined;
+  }
+  const baseRelation = found.base.name;
+  const subtractRelation = found.subtract.name;
+  if (!namespaceConfig.relations[baseRelation] || !namespaceConfig.relations[subtractRelation]) {
+    return undefined;
+  }
+  if (baseRelation === subtractRelation) {
+    // The degenerate, unwitnessable case — see `LocatedExclusion`'s own
+    // doc comment on `subtractRelation`: base and subtract name the exact
+    // same relation, so a tuple write satisfying `base` also, unavoidably,
+    // satisfies `subtract`. Nothing stops a schema author (or this
+    // project's own random generator) from writing `viewer - viewer`; it
+    // just isn't a shape this function can hand its caller a real witness
+    // for.
+    return undefined;
+  }
+
+  return { ns, name, baseRelation, subtractRelation };
 }

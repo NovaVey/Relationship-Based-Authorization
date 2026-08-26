@@ -41,10 +41,24 @@
  * this file exercises the classifier against the same `CompiledSchema`
  * shape the rest of this project's own machinery actually produces, not
  * only hand-built stand-ins.
+ *
+ * **A second block, below, tests `findFlippableExclusion`** — the small,
+ * focused extension of this same file's own AST-walk shape that locates a
+ * real `ExclusionRule` (and its base/subtract relation names) rather than
+ * only classifying monotonicity as a boolean. This is what
+ * `test/metamorphic/monotonicity.integration.test.ts`'s general Property 5
+ * sweep uses to generalize its own witness construction across whichever
+ * arbitrary, randomly-generated exclusion shape a given schema happens to
+ * contain, instead of the narrow, single hand-verified shape the ORIGINAL
+ * Property 5 (also in that file) is deliberately scoped to. Every case here
+ * is DB-free and hand-built, same reasoning as cases 1-4/6 above — this
+ * function's own contract is a pure schema-shape question, with no
+ * dependency on real tuples or Postgres at all (constructing a real tuple
+ * graph from what it finds is entirely the integration test's own job).
  */
 import { describe, expect, it } from 'vitest';
 
-import { classifyMonotone } from '../../../src/metamorphic/monotonicity.js';
+import { classifyMonotone, findFlippableExclusion } from '../../../src/metamorphic/monotonicity.js';
 import { compileSchema } from '../../../src/schema/dsl/compiler.js';
 import { formatSchemaError } from '../../../src/schema/dsl/errors.js';
 import { generateFixture } from '../../../src/soundness/generators.js';
@@ -424,5 +438,274 @@ describe('classifyMonotone — memoization does not change the answer across rep
     expect(secondMember).toBe(firstMember);
     expect(firstView).toBe(false);
     expect(firstMember).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findFlippableExclusion — the AST-walk extension backing the general
+// Property 5 sweep. See this file's own top doc comment for why every case
+// below is hand-built and DB-free.
+// ---------------------------------------------------------------------------
+
+/** `{ kind: 'exclusion', base: computedUserset(baseName), subtract: computedUserset(subtractName) }` — built once, used across several cases below. */
+function exclusionOf(
+  baseName: string,
+  subtractName: string,
+): NamespaceConfig['permissions'][string]['rewrite'] {
+  return {
+    kind: 'exclusion',
+    base: { kind: 'computedUserset', name: baseName },
+    subtract: { kind: 'computedUserset', name: subtractName },
+  };
+}
+
+describe('findFlippableExclusion — case A: a top-level exclusion of two plain relations is located directly', () => {
+  it("unbanned_view = viewer - banned locates {baseRelation: 'viewer', subtractRelation: 'banned'}", () => {
+    const schema = schemaOf(
+      namespaceConfig(
+        'doc',
+        { viewer: userRelation('viewer'), banned: userRelation('banned') },
+        {
+          unbanned_view: {
+            kind: 'permission',
+            name: 'unbanned_view',
+            rewrite: exclusionOf('viewer', 'banned'),
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'unbanned_view')).toEqual({
+      ns: 'doc',
+      name: 'unbanned_view',
+      baseRelation: 'viewer',
+      subtractRelation: 'banned',
+    });
+  });
+});
+
+describe('findFlippableExclusion — case B: a same-namespace computedUserset pass-through is transparent', () => {
+  it('perm_outer = perm_inner, perm_inner = viewer - banned: locates the exclusion, but reports the ORIGINAL (ns, name) it was called with, not perm_inner', () => {
+    // This is the specific claim LocatedExclusion's own doc comment makes:
+    // every edge this walk crosses leaves the checked object/subject
+    // unchanged, so `name` in the returned LocatedExclusion is always the
+    // caller's own starting point — checking perm_outer directly must
+    // reflect perm_inner's own base/subtract state with no further tuples
+    // needed for the pass-through itself.
+    const schema = schemaOf(
+      namespaceConfig(
+        'doc',
+        { viewer: userRelation('viewer'), banned: userRelation('banned') },
+        {
+          perm_inner: {
+            kind: 'permission',
+            name: 'perm_inner',
+            rewrite: exclusionOf('viewer', 'banned'),
+          },
+          perm_outer: {
+            kind: 'permission',
+            name: 'perm_outer',
+            rewrite: { kind: 'computedUserset', name: 'perm_inner' },
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'perm_outer')).toEqual({
+      ns: 'doc',
+      name: 'perm_outer',
+      baseRelation: 'viewer',
+      subtractRelation: 'banned',
+    });
+  });
+});
+
+describe('findFlippableExclusion — case C: an exclusion nested inside a union is located via its child walk', () => {
+  it('view = editor | (viewer - banned) locates the exclusion inside the union', () => {
+    const schema = schemaOf(
+      namespaceConfig(
+        'doc',
+        {
+          editor: userRelation('editor'),
+          viewer: userRelation('viewer'),
+          banned: userRelation('banned'),
+        },
+        {
+          view: {
+            kind: 'permission',
+            name: 'view',
+            rewrite: {
+              kind: 'union',
+              children: [
+                { kind: 'computedUserset', name: 'editor' },
+                exclusionOf('viewer', 'banned'),
+              ],
+            },
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'view')).toEqual({
+      ns: 'doc',
+      name: 'view',
+      baseRelation: 'viewer',
+      subtractRelation: 'banned',
+    });
+  });
+});
+
+describe('findFlippableExclusion — case D: an exclusion nested inside an intersection is NOT walked', () => {
+  it('trusted = editor & (viewer - banned) returns undefined — an intersection sibling could need tuples this function never constructs', () => {
+    const schema = schemaOf(
+      namespaceConfig(
+        'doc',
+        {
+          editor: userRelation('editor'),
+          viewer: userRelation('viewer'),
+          banned: userRelation('banned'),
+        },
+        {
+          trusted: {
+            kind: 'permission',
+            name: 'trusted',
+            rewrite: {
+              kind: 'intersection',
+              children: [
+                { kind: 'computedUserset', name: 'editor' },
+                exclusionOf('viewer', 'banned'),
+              ],
+            },
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'trusted')).toBeUndefined();
+  });
+});
+
+describe('findFlippableExclusion — case E: an exclusion behind a tupleToUserset hop is NOT walked', () => {
+  it("doc.via_parent = parent->excl, folder.excl = a - b: returns undefined for 'doc' (crossing objects needs a hop tuple this function never constructs) but locates it directly for 'folder'", () => {
+    const schema = schemaOf(
+      namespaceConfig(
+        'folder',
+        { a: userRelation('a'), b: userRelation('b') },
+        {
+          excl: { kind: 'permission', name: 'excl', rewrite: exclusionOf('a', 'b') },
+        },
+      ),
+      namespaceConfig(
+        'doc',
+        { parent: { kind: 'relation', name: 'parent', subjectTypes: [{ namespace: 'folder' }] } },
+        {
+          via_parent: {
+            kind: 'permission',
+            name: 'via_parent',
+            rewrite: { kind: 'tupleToUserset', relation: 'parent', computedUserset: 'excl' },
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'via_parent')).toBeUndefined();
+    expect(findFlippableExclusion(schema, 'folder', 'excl')).toEqual({
+      ns: 'folder',
+      name: 'excl',
+      baseRelation: 'a',
+      subtractRelation: 'b',
+    });
+  });
+});
+
+describe('findFlippableExclusion — case F: a base/subtract referencing a PERMISSION (not a relation) is rejected', () => {
+  it('bad_excl = helper - banned, helper = computedUserset(banned): returns undefined — base resolves to a permission, not something directly tuple-writable', () => {
+    const schema = schemaOf(
+      namespaceConfig(
+        'doc',
+        { banned: userRelation('banned') },
+        {
+          helper: {
+            kind: 'permission',
+            name: 'helper',
+            rewrite: { kind: 'computedUserset', name: 'banned' },
+          },
+          bad_excl: {
+            kind: 'permission',
+            name: 'bad_excl',
+            rewrite: exclusionOf('helper', 'banned'),
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'bad_excl')).toBeUndefined();
+  });
+});
+
+describe('findFlippableExclusion — case G: base and subtract naming the SAME relation is rejected as unwitnessable', () => {
+  it('degenerate = viewer - viewer: returns undefined — no tuple graph can satisfy base without also satisfying subtract', () => {
+    const schema = schemaOf(
+      namespaceConfig(
+        'doc',
+        { viewer: userRelation('viewer') },
+        {
+          degenerate: {
+            kind: 'permission',
+            name: 'degenerate',
+            rewrite: exclusionOf('viewer', 'viewer'),
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'degenerate')).toBeUndefined();
+  });
+});
+
+describe('findFlippableExclusion — case H: a computedUserset cycle with no exclusion anywhere terminates and returns undefined', () => {
+  it('loop_a -> loop_b -> loop_a, no ExclusionRule anywhere: returns undefined rather than looping forever', () => {
+    const schema = schemaOf(
+      namespaceConfig(
+        'doc',
+        {},
+        {
+          loop_a: {
+            kind: 'permission',
+            name: 'loop_a',
+            rewrite: { kind: 'computedUserset', name: 'loop_b' },
+          },
+          loop_b: {
+            kind: 'permission',
+            name: 'loop_b',
+            rewrite: { kind: 'computedUserset', name: 'loop_a' },
+          },
+        },
+      ),
+    );
+    expect(findFlippableExclusion(schema, 'doc', 'loop_a')).toBeUndefined();
+  });
+});
+
+describe('findFlippableExclusion — case I: a plain relation name has no rewrite tree to walk', () => {
+  it("doc's own 'viewer' relation (not a permission) returns undefined, not a throw", () => {
+    const schema = schemaOf(namespaceConfig('doc', { viewer: userRelation('viewer') }, {}));
+    expect(findFlippableExclusion(schema, 'doc', 'viewer')).toBeUndefined();
+  });
+});
+
+describe('findFlippableExclusion — case J: an undeclared namespace throws, matching classifyMonotone', () => {
+  it('calling with a namespace absent from schema.namespaces throws, rather than returning undefined', () => {
+    const schema = schemaOf(namespaceConfig('doc', { viewer: userRelation('viewer') }, {}));
+    expect(() => findFlippableExclusion(schema, 'nonexistent_ns', 'anything')).toThrow(
+      /not declared in this schema/,
+    );
+  });
+});
+
+describe("findFlippableExclusion — case K: generateFixture's own real, compiled unbanned_view shape", () => {
+  it("locates {baseRelation: 'viewer', subtractRelation: 'banned'} against a real compiler-produced schema, not only hand-built ones", () => {
+    const fixture = generateFixture('locator-unit-test-seed-1', 5);
+    const schema = compileOk(fixture.schemaSource);
+    const { resourceNs } = locateGuaranteedNamespaces(schema);
+    expect(findFlippableExclusion(schema, resourceNs, 'unbanned_view')).toEqual({
+      ns: resourceNs,
+      name: 'unbanned_view',
+      baseRelation: 'viewer',
+      subtractRelation: 'banned',
+    });
   });
 });

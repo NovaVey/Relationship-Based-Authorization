@@ -30,6 +30,34 @@
  * demonstration of the anti-monotone case the classifier is why 4 doesn't
  * naively claim to cover.
  *
+ * **PROPERTY 5 now ships as TWO describe blocks, not one — a later addition,
+ * not a rewrite of the original.** The original, narrow `describe` block
+ * below (title: "…scoped narrowly to generateFixture's own guaranteed
+ * 'unbanned_view = viewer - banned'…") is unchanged and still a real,
+ * valuable direct case — its own doc comment already explained exactly why
+ * it stopped at one hand-verified shape: generalizing would mean either
+ * duplicating `classifyMonotone`'s own AST walk badly, inline, or building
+ * unbuilt machinery to reason about which subject types satisfy an
+ * ARBITRARY base/subtract branch and about existing tuple state, not just
+ * schema shape. `src/metamorphic/monotonicity.ts`'s `findFlippableExclusion`
+ * — a small, focused extension of `classifyMonotone`'s own AST-walk shape,
+ * added specifically to close this gap — is what makes the second,
+ * GENERAL describe block below possible without either of those costs: it
+ * locates a real `ExclusionRule` (and names its base/subtract relations)
+ * inside an arbitrary, randomly-generated schema from `src/schema/dsl
+ * /random.ts` (D-114), scoped to shapes it can hand back a directly
+ * tuple-writable witness for (see that function's own doc comment for
+ * exactly which edges it walks and which it deliberately doesn't). The two
+ * blocks are complementary, not redundant: the narrow one is a single,
+ * fully hand-derivable example anyone can read start to finish with no
+ * generator involved; the general one is a real sweep across whichever
+ * relation names, namespace, and subject types each of many random schemas
+ * happens to produce, catching a bug the narrow block's own fixed shape
+ * structurally cannot (e.g. a resolver bug specific to how `evalRewrite`
+ * resolves a `computedUserset` pass-through into an exclusion, or specific
+ * to a particular relation-name/namespace pairing the fixed
+ * `viewer`/`banned` shape never varies).
+ *
  * **On atToken: it is a floor, never an exact snapshot pin (see
  * `docs/CONSISTENCY.md` and `src/store/tokens.ts`'s own doc comment).**
  * Every property below that pins to a token relies on ordinary real-time
@@ -97,7 +125,8 @@ import {
   type GeneratedQuery,
   type GeneratedTuple,
 } from '../../src/soundness/generators.js';
-import { classifyMonotone } from '../../src/metamorphic/monotonicity.js';
+import { classifyMonotone, findFlippableExclusion } from '../../src/metamorphic/monotonicity.js';
+import { generateRandomSchema } from '../../src/schema/dsl/random.js';
 import { runMigrations } from '../../src/store/migrate.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../src/store/migrations', import.meta.url));
@@ -440,6 +469,17 @@ describe("Property 5 — exclusion-subtract-anti-monotonicity, scoped narrowly t
    * random tuple-graph instances (so it's not a single brittle example) but
    * never across a randomly varying SCHEMA shape.
    *
+   * **This scope boundary is now closed, in a separate describe block
+   * below ("Property 5b"), by `findFlippableExclusion`** — see this file's
+   * own top-of-file doc comment for exactly what that function does and
+   * why it doesn't require the "substantially different, unbuilt piece of
+   * machinery" this comment describes above (short version: it stays
+   * narrow enough to always hand back a directly tuple-writable witness,
+   * rather than solving the general case). This describe block is
+   * unchanged and still runs — it's a real, valuable, fully
+   * hand-derivable direct case in its own right, not superseded by the
+   * more general one.
+   *
    * **What this catches that Property 4 structurally cannot.** Property 4
    * only ever asserts on classifier-certified-monotone pairs — by
    * construction, it skips every exclusion-containing permission, including
@@ -660,5 +700,225 @@ describe("Property 5 — exclusion-subtract-anti-monotonicity, scoped narrowly t
     // must always equal SEED_COUNT, since every seed either finds or
     // constructs exactly one witness, unconditionally.
     expect(totalFoundWitnesses + totalConstructedWitnesses).toBe(SEED_COUNT);
+  }, 600_000);
+});
+
+// ---------------------------------------------------------------------------
+// PROPERTY 5b — exclusion-subtract-anti-monotonicity, GENERAL sweep across
+// arbitrary randomly-generated exclusion shapes.
+// ---------------------------------------------------------------------------
+
+describe('Property 5b — exclusion-subtract-anti-monotonicity, GENERALIZED across arbitrary randomly-generated exclusion shapes (closes the scope gap Property 5, above, explicitly disclosed)', () => {
+  /**
+   * **What "generalized" means here, precisely — and what it still doesn't
+   * cover.** Property 5 above proves the flip for exactly ONE hand-verified
+   * shape: `generateFixture`'s guaranteed resource namespace's
+   * `unbanned_view = viewer - banned`. This block proves the SAME flip —
+   * grant `base`, confirm allowed, add ONE tuple satisfying `subtract`,
+   * confirm denied — for a real `ExclusionRule` `findFlippableExclusion`
+   * (`src/metamorphic/monotonicity.ts`) locates inside a schema
+   * `generateRandomSchema` (`src/schema/dsl/random.ts`, D-114) builds fresh
+   * per seed: a different namespace name, different relation names,
+   * different subject types, and — since `findFlippableExclusion` also
+   * walks through a `union` branch or a same-namespace `computedUserset`
+   * pass-through, not only a permission's own bare top-level rewrite — a
+   * genuinely varying STRUCTURAL position for the exclusion too, not just
+   * varying names inside a fixed structural template. This is real
+   * additional coverage the narrow Property 5 above cannot provide by
+   * construction (it never varies the SCHEMA, only the tuple graph over
+   * one fixed schema).
+   *
+   * What it still does NOT cover, disclosed exactly as honestly as
+   * `findFlippableExclusion`'s own doc comment discloses it: an exclusion
+   * reachable only through an `intersection` sibling or a `tupleToUserset`
+   * hop (both require tuples this locator has no way to construct — see
+   * that function's own doc comment), and a `base`/`subtract` branch that
+   * is itself anything other than a bare `computedUserset` naming a
+   * relation (e.g. a further nested union/intersection/exclusion, or a
+   * reference to another permission). Closing those would mean building
+   * the "substantially different, unbuilt piece of machinery" the ORIGINAL
+   * Property 5's own scope note already named — still out of scope here,
+   * same as there.
+   *
+   * **Generator options, and why each one is set the way it is (real,
+   * measured yield — see this describe block's own console.log — not
+   * guessed).** `principalCount: 1` maximizes the chance that whenever a
+   * relation on either side of a located exclusion happens to declare a
+   * PLAIN (non-userset) subject type at all, it's the identical one on
+   * both sides — required so this test can write both the `base` and
+   * `subtract` tuples for the exact same (subject, object) pair without
+   * needing to resolve a userset-subject chain itself (exactly the same
+   * "direct, never group-mediated" restriction the narrow Property 5 above
+   * already applies, generalized to "whichever plain subject type this
+   * random schema happens to share," not hardcoded to `user`).
+   * `operators: { union: false, intersection: false, exclusion: true,
+   * tupleToUserset: false }` with `maxRewriteDepth: 1` forces every
+   * permission that combines at all into EXACTLY `leaf - leaf` (`canCombine`
+   * is true only for `exclusion`, and depth-1 children are themselves
+   * forced to be bare leaves — see `random.ts`'s own `buildRewriteExpr`) —
+   * maximizing the fraction of generated permissions `findFlippableExclusion`
+   * can actually use, without hand-tuning `random.ts` itself (which would
+   * risk narrowing what `random.ts`'s OTHER callers, the schema verifier's
+   * own differential tests, rely on it for). Measured directly against this
+   * exact configuration before this test was written: ~40% of random
+   * schemas produce a usable, directly-witnessable exclusion (25/60 in one
+   * real run) — comfortably enough, across `SEED_COUNT` seeds below, to
+   * exercise the property many times over without inflating the seed count
+   * needlessly.
+   */
+  const SEED_COUNT = 40;
+
+  /** A plain (non-userset) subject-type namespace both `baseRelation` and `subtractRelation` declare — the one this test can write both tuples against without resolving a userset-subject chain itself. `undefined` if no such shared plain subject type exists (this candidate is then skipped, not force-used). */
+  function findSharedPlainSubjectNamespace(
+    baseRelation: { subjectTypes: { namespace: string; relation?: string }[] },
+    subtractRelation: { subjectTypes: { namespace: string; relation?: string }[] },
+  ): string | undefined {
+    return baseRelation.subjectTypes.find(
+      (baseSubjectType) =>
+        baseSubjectType.relation === undefined &&
+        subtractRelation.subjectTypes.some(
+          (subtractSubjectType) =>
+            subtractSubjectType.relation === undefined &&
+            subtractSubjectType.namespace === baseSubjectType.namespace,
+        ),
+    )?.namespace;
+  }
+
+  it(`across ${SEED_COUNT} random schemas from generateRandomSchema (src/schema/dsl/random.ts, D-114), locates a real, directly-witnessable ExclusionRule via findFlippableExclusion (src/metamorphic/monotonicity.ts — a small, focused extension of classifyMonotone's own AST walk) and proves the same base-granted/subtract-added flip Property 5 above proves for ONE hardcoded shape, generalized across whichever relation names, namespace, and subject type each random schema happens to produce`, async () => {
+    let schemasWithUsableExclusion = 0;
+    let schemasSkipped = 0;
+
+    for (let seedIndex = 0; seedIndex < SEED_COUNT; seedIndex += 1) {
+      const seed = uniqueName(`prop5bseed${seedIndex}`);
+      const random = generateRandomSchema(seed, {
+        principalCount: 1,
+        namespaceCount: 4,
+        maxRelationsPerNamespace: 3,
+        maxPermissionsPerNamespace: 3,
+        maxRewriteDepth: 1,
+        operators: { union: false, intersection: false, exclusion: true, tupleToUserset: false },
+      });
+      const schema = random.schema;
+
+      // Scan EVERY (ns, permission) pair in this schema for the first
+      // directly-witnessable exclusion — `findFlippableExclusion` itself
+      // only ever looks at ONE starting `(ns, name)` pair per call (see its
+      // own doc comment on why it doesn't widen its own search), so this
+      // loop is what turns that into a schema-wide scan.
+      let locatedNs: string | undefined;
+      let locatedName: string | undefined;
+      let baseRelationName: string | undefined;
+      let subtractRelationName: string | undefined;
+      let commonSubjectNamespace: string | undefined;
+
+      outer: for (const [nsName, nsConfig] of Object.entries(schema.namespaces)) {
+        for (const permissionName of Object.keys(nsConfig.permissions)) {
+          const candidate = findFlippableExclusion(schema, nsName, permissionName);
+          if (!candidate) continue;
+          const baseRelationConfig = nsConfig.relations[candidate.baseRelation];
+          const subtractRelationConfig = nsConfig.relations[candidate.subtractRelation];
+          if (!baseRelationConfig || !subtractRelationConfig) {
+            // Unreachable given findFlippableExclusion's own contract
+            // (both names are guaranteed real relations on this exact
+            // namespace) — defensive only, never expected to trigger.
+            throw new Error(
+              `seed=${seed}: findFlippableExclusion returned a relation name absent from ` +
+                `namespace '${nsName}'s own relations — a contract violation in ` +
+                `findFlippableExclusion, not a property finding`,
+            );
+          }
+          const sharedNamespace = findSharedPlainSubjectNamespace(
+            baseRelationConfig,
+            subtractRelationConfig,
+          );
+          if (!sharedNamespace) continue; // no shared plain subject type — see this describe block's own doc comment on why that's required
+          locatedNs = nsName;
+          locatedName = permissionName;
+          baseRelationName = candidate.baseRelation;
+          subtractRelationName = candidate.subtractRelation;
+          commonSubjectNamespace = sharedNamespace;
+          break outer;
+        }
+      }
+
+      if (
+        !locatedNs ||
+        !locatedName ||
+        !baseRelationName ||
+        !subtractRelationName ||
+        !commonSubjectNamespace
+      ) {
+        schemasSkipped += 1;
+        continue; // this random schema's shape didn't happen to produce a directly-witnessable exclusion — not every seed needs to; see this describe block's own doc comment and the health-check assertion below
+      }
+      schemasWithUsableExclusion += 1;
+
+      await publishOk(random.source);
+
+      const witnessSubject = uniqueName('flipsubj');
+      const witnessObject = uniqueName('flipobj');
+
+      // The base-branch tuple — LAST write before the first check, per
+      // this file's own established happens-before-ordering discipline
+      // (see this file's top doc comment, "On atToken").
+      const baseWrite = await writeOk(
+        tuple(locatedNs, witnessObject, baseRelationName, commonSubjectNamespace, witnessSubject),
+      );
+      const T0 = baseWrite.token;
+
+      const beforeCheck = await productionCheck(
+        pool,
+        ref(commonSubjectNamespace, witnessSubject),
+        ref(locatedNs, witnessObject),
+        locatedName,
+        { atToken: T0 },
+      );
+      expect(
+        beforeCheck.allowed,
+        `seed=${seed}: expected '${locatedName}' on '${locatedNs}' allowed at T0 for a fresh subject granted only '${baseRelationName}' (the located exclusion's own base branch) and nothing on '${subtractRelationName}' (its subtract branch) — generated schema:\n${random.source}`,
+      ).toBe(true);
+
+      // The one additional tuple this property is actually about — the
+      // subtract-branch grant for the EXACT SAME (subject, object) pair.
+      // LAST write for this seed, per this file's own established
+      // convention.
+      const subtractWrite = await writeOk(
+        tuple(
+          locatedNs,
+          witnessObject,
+          subtractRelationName,
+          commonSubjectNamespace,
+          witnessSubject,
+        ),
+      );
+      const T1 = subtractWrite.token;
+
+      const afterCheck = await productionCheck(
+        pool,
+        ref(commonSubjectNamespace, witnessSubject),
+        ref(locatedNs, witnessObject),
+        locatedName,
+        { atToken: T1 },
+      );
+      expect(
+        afterCheck.allowed,
+        `seed=${seed}: '${locatedName}' on '${locatedNs}' remained ALLOWED at T1=${T1} for the exact same (subject, object) pair after adding a '${subtractRelationName}' tuple (this exclusion's own subtract branch) — an exclusion rule that fails to exclude, for a randomly-generated shape the narrow Property 5 above never exercises. Generated schema:\n${random.source}`,
+      ).toBe(false);
+    }
+
+    console.log(
+      `[Property 5b] ${schemasWithUsableExclusion}/${SEED_COUNT} random schemas produced a ` +
+        `directly-witnessable exclusion and were exercised (${schemasSkipped} skipped — no ` +
+        'top-level-reachable, tuple-writable exclusion with a shared plain subject type in that ' +
+        'particular random schema; not every random shape needs to produce one, see this describe ' +
+        "block's own doc comment)",
+    );
+
+    // Same "never silently report a property that exercised nothing as
+    // passing" discipline as Property 4 and the narrow Property 5 above.
+    expect(
+      schemasWithUsableExclusion,
+      'Property 5b (general exclusion sweep) found ZERO usable exclusions across all seeds — this property never actually exercised the flip it exists to test; either the generator options above need retuning or findFlippableExclusion has a real bug',
+    ).toBeGreaterThan(0);
   }, 600_000);
 });
