@@ -2512,3 +2512,39 @@ Asked to build D-144's own narrow, closed-form time-window caveat now that the s
 **Verification:** `npx tsc --noEmit`, `npx eslint . --max-warnings=0`, `npx prettier --check .` all clean across the full combined change set. Root fast suite: 62 files, 905 tests (up from 59/882). Every real-Postgres integration test this batch touched or added (4 files) independently re-run live via LOCALVERIFY, each restored to its exact committed form and confirmed byte-clean.
 
 Full account: `docs/DECISIONS.md` D-150.
+
+## A real SMT tier for the schema verifier's non-recursive fragment (D-151)
+
+**Owner:** a soundness-engineer agent in an isolated worktree, dispatched alongside D-152's four agents in the same "bigger bets" batch, with the one new dependency it needed (`z3-solver`) explicitly asked about and approved beforehand.
+
+Closes part of the gap D-118/D-125's own SMT encoding sketch left open since the schema verifier first shipped: one uninterpreted z3 sort per namespace, one uninterpreted predicate per relation, the rewrite tree compiled to a first-order formula, satisfiability asked directly. `SAT` is never trusted on z3's word alone — every witness is reconstructed and replayed through the real, unmodified production engine before ever being reported `VIOLATED`; anything else falls through to bounded search unchanged. Recursion (a relation whose rewrite tree cycles back to itself) is out of scope, exactly as the original sketch named — that's a Horn-clause/CHC fixpoint-solver v2 phase, a materially different problem.
+
+**A real, disclosed finding, not an implementation shortfall:** the task's own named "live proof" fixture (`schema/example.authz`'s `folder#sensitive_review`) turned out to be recursive — in fact every permission in that real schema is, via `folder`'s own parent hierarchy and `group`'s own nested membership, both deliberate features of that schema. Per this tier's own explicit scope, it correctly declines on the real, literal goal; a same-shape non-recursive companion fixture delivers the genuine "was UNKNOWN, now decided exactly" proof instead.
+
+**Fail-checked live:** a deliberately non-monotone 30-level chain exceeding the real engine's own depth ceiling (which this encoder has no notion of) produces a genuine `sat` the real engine would deny — with the self-verification gate disabled, this was wrongly reported `VIOLATED`; reverted, confirmed correct, and kept as a permanent regression test.
+
+**Verification:** `npx tsc --noEmit` (both root and `tools/schema-verifier` configs), `npx eslint .`, `npx prettier --check .` all clean. `tools/schema-verifier`'s own suite: 18 files, 170 tests (up from 15/151).
+
+**A real numbering collision, caught during the merge:** this entry's own `docs/DECISIONS.md` addition was originally written as D-150, colliding with the already-shipped expiring-tuples entry of the same number — a direct consequence of this agent's own worktree predating that entry, not a design error. Renumbered to D-151 throughout, including its own `tools/schema-verifier/README.md` cross-references.
+
+Full account: `docs/DECISIONS.md` D-151.
+
+## Three more independent "bigger bets," built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, a machine-checked API spec (D-152)
+
+**Owner:** the main agent, dispatching four more isolated-worktree agents in parallel (alongside D-151's own agent, five total in one batch) for the "bigger bets" tier of the same feature-ideation list D-145–D-149 drew its "start here" tier from.
+
+Shipped: a third, optional DB-backed API-key credential tier (`authz apikey create/revoke/list`) — scoped to a namespace set and/or an expiry, sitting alongside the two existing static env-var keys, which stay completely unchanged; `POST /check/batch`, up to 50 independent checks in one call reusing `list.ts`'s own batching pattern; `authz audit privesc`, a privilege-escalation scanner built entirely on `productionCheck`, flagging UNEXPECTED/MISSING drift against an `--expected` allow-list; and a hand-maintained OpenAPI 3.0.3 document (`GET /openapi.json`), zero new dependency, covering every real route.
+
+**Two real numbering collisions, both a direct consequence of dispatching from a moving base rather than a design error — caught before shipping, not after.** This batch's worktrees predated D-150 (expiring tuples) by varying amounts, so a new migration (renumbered `0007`→`0008`) and this entry's own decision number (D-152, after D-151's own collision required renumbering first) both had to be reconciled once every piece merged.
+
+**A real file-set collision, anticipated ahead of dispatch this time but not prevented by it — unlike D-150's batch, where zero overlap was verified beforehand.** Two agents were both instructed to add to `src/api/server.ts`. Caught immediately after dispatch and resolved via real `git merge` conflict resolution per worktree, not blind concatenation — the one substantive conflict (ordering of a new scope check against D-150's own `expiresAt` parsing in the `/tuples` route) resolved by running the scope check first, matching every other gated route's convention.
+
+**A second cross-cutting gap, distinct in kind from D-150's: the OpenAPI document couldn't describe a route that didn't exist yet in its own author's worktree** (`POST /check/batch`, added by a different agent in the same batch). Disclosed plainly in the agent's own summary; closed once merged by adding the missing operation, reusing the existing `/check` operation's own schemas rather than re-transcribing them.
+
+**A real test bug, found only by live-verifying against a real database:** `db-api-keys.integration.test.ts`'s own regression-guard fixture used hyphenated ids, invalid per this project's own identifier grammar — every `/check` call in that test was getting a genuine `400` the test never checked for. Not a bug in the route; the fixture was wrong. Found via LOCALVERIFY, fixed, re-confirmed passing.
+
+**A second live-verification finding, an artifact of LOCALVERIFY's own persistent-database reuse rather than a real bug:** `privescScan`'s deliberately unscoped candidate query returned 39,515 accumulated subjects from this session's own prior real-Postgres test runs on first attempt — a real ephemeral Testcontainers run (this repo's actual committed/CI form) would instead start empty every time. Truncating the accumulated tables let the same test pass correctly in under a second. Both integration test files restored to their exact committed form and confirmed byte-clean afterward.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean across the full combined change set (this entry plus D-151). Root fast suite: 68 files, 1015 tests (up from 62/905). Both real-Postgres integration tests this entry touched independently re-run live via LOCALVERIFY and confirmed passing.
+
+Full account: `docs/DECISIONS.md` D-152.

@@ -30,6 +30,7 @@ to try the DSL compiler itself against your own source.
 - [A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed](#a-fourth-proof-metamorphic-and-mutation-testing--plus-a-real-deadlock-found-reproduced-and-fixed)
 - [A scope decision, two proof extensions, a tamper-evident audit log, and a schema safety net](#a-scope-decision-two-proof-extensions-a-tamper-evident-audit-log-and-a-schema-safety-net)
 - [Expiring tuples: D-144's own caveat, built](#expiring-tuples-d-144s-own-caveat-built)
+- [Four bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec](#four-bigger-bets-built-in-parallel-scoped-api-keys-a-batch-endpoint-a-privilege-escalation-scanner-an-smt-tier-and-a-machine-checked-api-spec)
 - [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
 - [How it works](#how-it-works)
 - [Latency](#latency)
@@ -264,8 +265,13 @@ commit where the original ten-item checklist closed; the verifier's own
 soundness and expressiveness kept improving past that tag, disclosed here
 rather than left for the tag to imply otherwise. The nightly k=3
 differential test the verifier's own test suite always had was only
-actually wired into a scheduled CI job later (D-134). Track real, current
-status in [`PROGRESS.md`](PROGRESS.md).
+actually wired into a scheduled CI job later (D-134). The SMT encoding
+sketch above stopped being just a sketch (D-151): a real `z3-solver`-backed
+tier now decides the **non-recursive** fragment exactly — one uninterpreted
+sort per namespace, one predicate per relation, satisfiability asked
+directly, every `SAT` result replayed through the real engine before ever
+being trusted, recursion detected and declined rather than risked. Track
+real, current status in [`PROGRESS.md`](PROGRESS.md).
 
 ## A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed
 
@@ -479,6 +485,18 @@ one agent running the full suite beyond its own assigned task and naming
 the exact failure, fixed by reconciling every affected shape once every
 piece had merged. Full account, including every fail-check:
 [`docs/DECISIONS.md`](docs/DECISIONS.md) D-150.
+
+## Four bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec
+
+The same feature-ideation pass that produced D-144 through D-150 above named a second, bigger tier of ideas. Five were built next, dispatched as five independent, isolated-worktree agents in one parallel batch: a third, optional DB-backed API-key credential tier that can be scoped to a namespace set and/or given an expiry (`authz apikey create/revoke/list`) — the two existing static env-var keys stay completely unchanged; `POST /check/batch`, up to 50 independent checks in one call, order-preserving; `authz audit privesc`, a privilege-escalation scanner built entirely on the existing `productionCheck` primitive, flagging drift against an `--expected` allow-list; a hand-maintained OpenAPI 3.0.3 document (`GET /openapi.json`, zero new dependency); and a real SMT-backed exact tier for the schema verifier's non-recursive fragment (`z3-solver`, a new dependency approved specifically for this task), closing part of the gap this project's own SMT encoding sketch left open since the verifier first shipped.
+
+Every SAT result the SMT tier reports is reconstructed into a concrete witness and replayed through the real, unmodified production engine before ever being called `VIOLATED` — never trusted on the solver's word alone, the same discipline the exact monotone prover already holds itself to. A real, disclosed finding surfaced while grounding the work: the task's own named "live proof" fixture is itself graph-recursive (via this schema's own deliberate parent-hierarchy and nested-group-membership features), so per the tier's own explicit scope it correctly declines on it — a same-shape non-recursive fixture delivers the genuine capability proof instead.
+
+**Two real numbering collisions, both a direct consequence of dispatching from a moving base, caught before shipping.** These five worktrees were branched at different points relative to D-150 (some before it existed at all, some before its own README writeup landed) — since none of the agents could see D-150's own migration or decision number while working, one new migration collided on its number (`0007`→`0008`) and two of the five agents' own `docs/DECISIONS.md` additions both independently chose `D-150` for themselves, requiring renumbering to `D-151`/`D-152` once every piece merged.
+
+**A real file-set collision, anticipated this time, but not prevented by anticipating it — unlike D-150's own batch, where zero file overlap was verified before dispatch.** Two agents were both instructed to add a new route to `src/api/server.ts`. Caught immediately after dispatch, resolved the same way D-148/D-149's own shared-file collision was: real `git merge` conflict resolution per worktree, reading and reconciling each actual conflict by hand.
+
+**Two more cross-cutting gaps, both closed once every piece had merged together — the OpenAPI document couldn't describe a route that didn't exist yet in its own author's worktree, and one integration test's own fixture used ids invalid under this project's identifier grammar, found only by live-verifying against a real database rather than trusting a green DB-free suite.** Full account of every collision and every fail-check: [`docs/DECISIONS.md`](docs/DECISIONS.md) D-151, D-152.
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
@@ -696,13 +714,14 @@ src/
     production/  the real, SQL-backed check engine, plus the opt-in check-result cache (cache.ts)
   metamorphic/ classifyMonotone()/findFlippableExclusion() — the monotonicity classifier backing test/metamorphic/'s property tests (D-140, D-147)
   soundness/   the differential-fuzz generator, classifier, runner
-  audit/       expand(), listObjects()/listUsers(), and the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148)
+  audit/       expand(), listObjects()/listUsers(), privesc.ts (privilege-escalation scanner, D-152), and the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148)
   report/      markdown/JSON soundness reporters, exit codes, PR-comment logic
-  api/         the Fastify server, plus the opt-in Redis-backed rate-limit store (redis-store.ts)
+  api/         the Fastify server, db-api-keys.ts (DB-backed API-key tier, D-152), openapi-document.ts (GET /openapi.json's own document, D-152), plus the opt-in Redis-backed rate-limit store (redis-store.ts)
   cli/         the authz CLI — index.ts, plus commands/ (one file per subcommand)
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
-tools/schema-verifier/  the static schema verifier — see "A third proof" above
+scripts/generate-openapi.ts writes docs/openapi.json (D-152)
+tools/schema-verifier/  the static schema verifier — see "A third proof" above; src/smt/ is the z3-backed exact tier for the non-recursive fragment (D-151)
 docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, INVARIANTS.md, FINDINGS.md,
              DST-PROPOSAL.md, github-governance.md, dst-regression-corpus.json, screens/
 test/
