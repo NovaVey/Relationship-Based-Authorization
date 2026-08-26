@@ -1,0 +1,1115 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Relationship-Based Authorization API",
+    "version": "0.1.0",
+    "description": "Fine-grained, relationship-based authorization service (Zanzibar-style) exposed over HTTP — the same check/expand/write/schema operations `authz` (the CLI) already exposes, plus two bulk reverse-lookup operations with no CLI command of their own. This document is hand-written and hand-maintained (src/api/openapi-document.ts) — not derived by introspecting the real Zod schemas at build time — so it can drift from the live server if a route changes without a matching update here; GET /openapi.json always serves whatever this document currently says, straight from the same buildOpenApiDocument() function scripts/generate-openapi.ts uses to write docs/openapi.json."
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Authorization: Bearer <key>. The four read/list routes (/check, /expand, /list-objects, /list-users) accept either ADMIN_API_KEY or READONLY_API_KEY; the three write routes (POST/DELETE /tuples, /schema/publish) accept ADMIN_API_KEY only (see each operation's own description). Compared with node:crypto timingSafeEqual, not ===. If the relevant key(s) are unset for a deployment, every request to a gated route is rejected — never silently allowed."
+      }
+    },
+    "schemas": {
+      "EntityRef": {
+        "type": "object",
+        "properties": {
+          "ns": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          }
+        },
+        "required": ["ns", "id"],
+        "additionalProperties": false
+      },
+      "ApiEntityRef": {
+        "type": "object",
+        "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+        "required": ["ns", "id"]
+      },
+      "PublishedNamespace": {
+        "type": "object",
+        "properties": { "namespace": { "type": "string" }, "version": { "type": "number" } },
+        "required": ["namespace", "version"]
+      },
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_request",
+                  "tuple_validation_failed",
+                  "schema_compile_failed",
+                  "unauthorized",
+                  "not_found",
+                  "rate_limited",
+                  "infrastructure_unavailable",
+                  "internal_error"
+                ]
+              },
+              "message": { "type": "string" },
+              "details": {}
+            },
+            "required": ["code", "message"]
+          }
+        },
+        "required": ["error"]
+      }
+    }
+  },
+  "paths": {
+    "/check": {
+      "post": {
+        "summary": "Is subject related to object via relation?",
+        "description": "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 200 requests/minute per client (gatedReadRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "object",
+                    "properties": {
+                      "ns": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      }
+                    },
+                    "required": ["ns", "id"],
+                    "additionalProperties": false
+                  },
+                  "relation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z][a-z0-9_]*$"
+                  },
+                  "object": {
+                    "type": "object",
+                    "properties": {
+                      "ns": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      }
+                    },
+                    "required": ["ns", "id"],
+                    "additionalProperties": false
+                  },
+                  "atToken": {
+                    "type": "string",
+                    "description": "An opaque, encoded consistency token from a prior write/delete response's own `token` field (src/store/tokens.ts). Optional — omit to check against the latest committed state."
+                  }
+                },
+                "required": ["subject", "relation", "object"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The check result — always a complete answer, never a 404.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "allowed": { "type": "boolean" },
+                    "subject": {
+                      "type": "object",
+                      "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                      "required": ["ns", "id"]
+                    },
+                    "relation": { "type": "string" },
+                    "object": {
+                      "type": "object",
+                      "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                      "required": ["ns", "id"]
+                    },
+                    "depth": { "type": "number" },
+                    "atToken": {
+                      "type": "string",
+                      "description": "Present only when the request supplied atToken."
+                    },
+                    "path": {
+                      "type": "object",
+                      "description": "A real, recursive evidence node — ResolutionStep (src/resolve/production/resolver.ts) for a check `path`, ExpandNode (src/audit/expand.ts) for an expand `tree`. Structure intentionally not modeled field-by-field here; read the cited source type for the authoritative shape. Present if and only if `allowed` is true."
+                    }
+                  },
+                  "required": ["allowed", "subject", "relation", "object", "depth"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/check/batch": {
+      "post": {
+        "summary": "Up to 50 independent checks in one call, order-preserving.",
+        "description": "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 20 requests/minute per client — lower than /check itself because each item is a full, independent graph walk, not a cheap lookup.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "checks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "subject": {
+                          "type": "object",
+                          "properties": {
+                            "ns": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 63,
+                              "pattern": "^[a-z][a-z0-9_]*$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 63,
+                              "pattern": "^[a-z][a-z0-9_]*$"
+                            }
+                          },
+                          "required": ["ns", "id"],
+                          "additionalProperties": false
+                        },
+                        "relation": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 63,
+                          "pattern": "^[a-z][a-z0-9_]*$"
+                        },
+                        "object": {
+                          "type": "object",
+                          "properties": {
+                            "ns": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 63,
+                              "pattern": "^[a-z][a-z0-9_]*$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 63,
+                              "pattern": "^[a-z][a-z0-9_]*$"
+                            }
+                          },
+                          "required": ["ns", "id"],
+                          "additionalProperties": false
+                        },
+                        "atToken": {
+                          "type": "string",
+                          "description": "An opaque, encoded consistency token from a prior write/delete response's own `token` field (src/store/tokens.ts). Optional — omit to check against the latest committed state."
+                        }
+                      },
+                      "required": ["subject", "relation", "object"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "description": "Each item is exactly one /check request body. Rejected outright (400), never silently truncated, past 50 items."
+                  }
+                },
+                "required": ["checks"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One result per input item, same order as the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "allowed": { "type": "boolean" },
+                          "subject": {
+                            "type": "object",
+                            "properties": {
+                              "ns": { "type": "string" },
+                              "id": { "type": "string" }
+                            },
+                            "required": ["ns", "id"]
+                          },
+                          "relation": { "type": "string" },
+                          "object": {
+                            "type": "object",
+                            "properties": {
+                              "ns": { "type": "string" },
+                              "id": { "type": "string" }
+                            },
+                            "required": ["ns", "id"]
+                          },
+                          "depth": { "type": "number" },
+                          "atToken": {
+                            "type": "string",
+                            "description": "Present only when the request supplied atToken."
+                          },
+                          "path": {
+                            "type": "object",
+                            "description": "A real, recursive evidence node — ResolutionStep (src/resolve/production/resolver.ts) for a check `path`, ExpandNode (src/audit/expand.ts) for an expand `tree`. Structure intentionally not modeled field-by-field here; read the cited source type for the authoritative shape. Present if and only if `allowed` is true."
+                          }
+                        },
+                        "required": ["allowed", "subject", "relation", "object", "depth"]
+                      },
+                      "description": "One entry per input item, same order as the request — never reordered by however the underlying checks actually resolve."
+                    }
+                  },
+                  "required": ["results"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/expand": {
+      "post": {
+        "summary": "The resolved subject tree for object#relation.",
+        "description": "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 200 requests/minute per client (gatedReadRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "object": {
+                    "type": "object",
+                    "properties": {
+                      "ns": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      }
+                    },
+                    "required": ["ns", "id"],
+                    "additionalProperties": false
+                  },
+                  "relation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z][a-z0-9_]*$"
+                  }
+                },
+                "required": ["object", "relation"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The full resolved subject tree — always a complete answer, never a 404.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "object",
+                      "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                      "required": ["ns", "id"]
+                    },
+                    "relation": { "type": "string" },
+                    "tree": {
+                      "type": "object",
+                      "description": "A real, recursive evidence node — ResolutionStep (src/resolve/production/resolver.ts) for a check `path`, ExpandNode (src/audit/expand.ts) for an expand `tree`. Structure intentionally not modeled field-by-field here; read the cited source type for the authoritative shape."
+                    }
+                  },
+                  "required": ["object", "relation", "tree"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/list-objects": {
+      "post": {
+        "summary": "Every object of a given namespace that subject has relation on (bulk reverse lookup).",
+        "description": "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 200 requests/minute per client (gatedReadRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked. Not logged to the checks audit table (see src/audit/list.ts).",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "object",
+                    "properties": {
+                      "ns": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      }
+                    },
+                    "required": ["ns", "id"],
+                    "additionalProperties": false
+                  },
+                  "relation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z][a-z0-9_]*$"
+                  },
+                  "objectNs": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z][a-z0-9_]*$"
+                  },
+                  "atToken": {
+                    "type": "string",
+                    "description": "An opaque, encoded consistency token from a prior write/delete response's own `token` field (src/store/tokens.ts). Optional."
+                  }
+                },
+                "required": ["subject", "relation", "objectNs"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Every object confirmed via a real, live check.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "subject": {
+                      "type": "object",
+                      "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                      "required": ["ns", "id"]
+                    },
+                    "relation": { "type": "string" },
+                    "objectNs": { "type": "string" },
+                    "objects": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                        "required": ["ns", "id"]
+                      }
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "true means this is a possibly-incomplete answer, not \"the real answer happens to be small.\""
+                    },
+                    "atToken": {
+                      "type": "string",
+                      "description": "Present only when the request supplied atToken."
+                    }
+                  },
+                  "required": ["subject", "relation", "objectNs", "objects", "truncated"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/list-users": {
+      "post": {
+        "summary": "Every concrete subject with relation on object (bulk reverse lookup). No atToken support.",
+        "description": "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 200 requests/minute per client (gatedReadRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked. Not logged to the checks audit table (see src/audit/list.ts).",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "object": {
+                    "type": "object",
+                    "properties": {
+                      "ns": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      }
+                    },
+                    "required": ["ns", "id"],
+                    "additionalProperties": false
+                  },
+                  "relation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 63,
+                    "pattern": "^[a-z][a-z0-9_]*$"
+                  }
+                },
+                "required": ["object", "relation"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Every concrete subject resolved down to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "object",
+                      "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                      "required": ["ns", "id"]
+                    },
+                    "relation": { "type": "string" },
+                    "subjects": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                        "required": ["ns", "id"]
+                      }
+                    }
+                  },
+                  "required": ["object", "relation", "subjects"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/tuples": {
+      "post": {
+        "summary": "Write a relation tuple.",
+        "description": "Gated by requireAdminAuth (ADMIN_API_KEY only). Rate limit: 20 requests/minute per client (writeRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "objectNs": { "type": "string", "minLength": 1 },
+                  "objectId": { "type": "string", "minLength": 1 },
+                  "relation": { "type": "string", "minLength": 1 },
+                  "subjectNs": { "type": "string", "minLength": 1 },
+                  "subjectId": { "type": "string", "minLength": 1 },
+                  "subjectRelation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Present only for a userset-subject tuple (e.g. group:eng#member). Optional."
+                  }
+                },
+                "required": ["objectNs", "objectId", "relation", "subjectNs", "subjectId"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The tuple write succeeded (idempotently, if it already existed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "token": {
+                      "type": "string",
+                      "description": "Opaque, encoded consistency token — pass verbatim as a later atToken."
+                    },
+                    "created": {
+                      "type": "boolean",
+                      "description": "false when the tuple already existed — still a successful write."
+                    }
+                  },
+                  "required": ["token", "created"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a relation tuple.",
+        "description": "Gated by requireAdminAuth (ADMIN_API_KEY only). Rate limit: 20 requests/minute per client (writeRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "objectNs": { "type": "string", "minLength": 1 },
+                  "objectId": { "type": "string", "minLength": 1 },
+                  "relation": { "type": "string", "minLength": 1 },
+                  "subjectNs": { "type": "string", "minLength": 1 },
+                  "subjectId": { "type": "string", "minLength": 1 },
+                  "subjectRelation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Present only for a userset-subject tuple (e.g. group:eng#member). Optional."
+                  }
+                },
+                "required": ["objectNs", "objectId", "relation", "subjectNs", "subjectId"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The tuple delete succeeded (idempotently, if there was nothing to delete).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "token": {
+                      "type": "string",
+                      "description": "Opaque, encoded consistency token — pass verbatim as a later atToken."
+                    },
+                    "deleted": {
+                      "type": "boolean",
+                      "description": "false when there was no such tuple — still a successful, idempotent no-op."
+                    }
+                  },
+                  "required": ["token", "deleted"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/schema/compile": {
+      "post": {
+        "summary": "Parse + compile a namespace DSL source string. Pure dry run — no I/O, nothing stored.",
+        "description": "Unauthenticated — see docs/DECISIONS.md. Rate limit: 100 requests/minute per client, the server-wide default budget (no per-route override), on top of the 1000 requests/minute per-IP authFloodGuard that does NOT apply here since this route has no auth gate to guard.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536,
+                    "description": "One or more `namespace { ... }` DSL blocks. 64 KiB ceiling, tighter than the server-wide 256 KiB body limit."
+                  }
+                },
+                "required": ["source"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Compiled successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schema": {
+                      "type": "object",
+                      "description": "CompiledSchema (src/schema/dsl/types.ts) — { namespaces: Record<string, NamespaceConfig> }. Structure intentionally not modeled field-by-field here; read the cited source type for the authoritative shape."
+                    }
+                  },
+                  "required": ["schema"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/schema/publish": {
+      "post": {
+        "summary": "Compile and publish a new namespace_configs version for every namespace block in source.",
+        "description": "Gated by requireAdminAuth (ADMIN_API_KEY only). Rate limit: 20 requests/minute per client (writeRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536,
+                    "description": "One or more `namespace { ... }` DSL blocks. 64 KiB ceiling, tighter than the server-wide 256 KiB body limit."
+                  }
+                },
+                "required": ["source"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Published successfully — one entry per namespace block in source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "published": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "namespace": { "type": "string" },
+                          "version": { "type": "number" }
+                        },
+                        "required": ["namespace", "version"]
+                      }
+                    }
+                  },
+                  "required": ["published"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Database connectivity and every currently-published namespace version.",
+        "description": "Unauthenticated — load-balancer/uptime-monitor convention, no permission decision or secret in the response (docs/DECISIONS.md). Rate limit: 300 requests/minute per client, a higher-than-default per-route override for legitimate load-balancer polling headroom.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "database.reachable and the namespace-listing query both succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "enum": ["ok", "unavailable"] },
+                    "database": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": { "reachable": { "const": true } },
+                          "required": ["reachable"]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "reachable": { "const": false },
+                            "error": { "type": "string" }
+                          },
+                          "required": ["reachable", "error"]
+                        }
+                      ]
+                    },
+                    "namespaces": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "ok": { "const": true },
+                            "namespaces": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "namespace": { "type": "string" },
+                                  "version": { "type": "number" }
+                                },
+                                "required": ["namespace", "version"]
+                              }
+                            }
+                          },
+                          "required": ["ok", "namespaces"]
+                        },
+                        {
+                          "type": "object",
+                          "properties": { "ok": { "const": false }, "error": { "type": "string" } },
+                          "required": ["ok", "error"]
+                        }
+                      ]
+                    }
+                  },
+                  "required": ["status", "database", "namespaces"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "503": {
+            "description": "Either database.reachable is false, or the namespace-listing query itself failed — the two are independently diagnosed (see src/api/responses.ts healthResponse). Same body shape as 200.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "enum": ["ok", "unavailable"] },
+                    "database": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": { "reachable": { "const": true } },
+                          "required": ["reachable"]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "reachable": { "const": false },
+                            "error": { "type": "string" }
+                          },
+                          "required": ["reachable", "error"]
+                        }
+                      ]
+                    },
+                    "namespaces": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "ok": { "const": true },
+                            "namespaces": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "namespace": { "type": "string" },
+                                  "version": { "type": "number" }
+                                },
+                                "required": ["namespace", "version"]
+                              }
+                            }
+                          },
+                          "required": ["ok", "namespaces"]
+                        },
+                        {
+                          "type": "object",
+                          "properties": { "ok": { "const": false }, "error": { "type": "string" } },
+                          "required": ["ok", "error"]
+                        }
+                      ]
+                    }
+                  },
+                  "required": ["status", "database", "namespaces"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "This OpenAPI 3.0.3 document, as JSON.",
+        "description": "Unauthenticated, like /health and /schema/compile — nothing in this document is a secret or a permission decision. Rate limit: 100 requests/minute per client, the server-wide default budget (no per-route override, the same convention /schema/compile already uses for a route with no external dependency and no reason for extra polling headroom).",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The exact document buildOpenApiDocument() produces.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

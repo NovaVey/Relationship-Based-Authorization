@@ -641,31 +641,42 @@ of this project has.
 | `authz expand <object> <relation>`                                                     | Print the resolved subject tree for `object`#`relation`                                                                                    |
 | `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]` | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr)         |
 | `authz audit verify`                                                                   | Walk the `checks` hash chain; reports every row verified intact or names the exact first tampered row (D-148)                              |
+| `authz audit privesc <object> <relation> [--expected s1,s2,...]`                       | Every real subject currently able to reach a relation/permission, each with its own path; `--expected` flags UNEXPECTED/MISSING drift      |
+| `authz apikey create --role <admin\|readonly> [--scope ns1,ns2] [--expires-at T]`      | Mint a real, DB-backed API key; prints the raw key exactly once (D-151)                                                                    |
+| `authz apikey revoke <id>`                                                             | Revoke a DB-backed API key by id; rejected immediately on every future use (D-151)                                                         |
+| `authz apikey list`                                                                    | List every DB-backed API key (id, name, role, scopes, timestamps) — never a hash or raw key (D-151)                                        |
 | `authz serve`                                                                          | Start the Fastify API server                                                                                                               |
 
 `authz serve` exposes the same operations over HTTP, plus two bulk
 reverse-lookup operations with no CLI command of their own:
 
-| Method   | Route             | Auth                                  | Rate limit | Does                                                                    |
-| -------- | ----------------- | ------------------------------------- | ---------- | ----------------------------------------------------------------------- |
-| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                        |
-| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                           |
-| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                      |
-| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                    |
-| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                    |
-| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                 |
-| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)       |
-| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                   |
-| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version |
+| Method   | Route             | Auth                                  | Rate limit | Does                                                                       |
+| -------- | ----------------- | ------------------------------------- | ---------- | -------------------------------------------------------------------------- |
+| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                           |
+| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-151) |
+| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                              |
+| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                         |
+| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                       |
+| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                       |
+| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                    |
+| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)          |
+| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                      |
+| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version    |
+| `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                    |
 
 `READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
 the four read/list routes above without also granting write access.
 `ADMIN_API_KEY` alone still authorizes every route, exactly as before that
-credential existed. Every rate/flood-guard budget above can be backed by
-Redis instead of one process's own memory via the optional `REDIS_URL`
-(D-137) — unset by default, a single-instance deployment needs nothing
-new. See `src/api/server.ts`'s own doc comments for the exact route
-shapes.
+credential existed. A third, optional credential tier (D-151) mints real,
+DB-backed keys (`authz apikey create/revoke/list`) that can additionally be
+scoped to a fixed set of namespaces and/or given an expiry — every gated
+route above rejects an out-of-scope namespace with `403`, and neither
+static env-var key is affected: a deployment that never mints a DB-backed
+key keeps behaving exactly as it always has. Every rate/flood-guard budget
+above can be backed by Redis instead of one process's own memory via the
+optional `REDIS_URL` (D-137) — unset by default, a single-instance
+deployment needs nothing new. See `src/api/server.ts`'s own doc comments
+for the exact route shapes.
 
 Static mockups of what a real UI over this would look like —
 Namespaces, Tuple browser, Check playground, Soundness runs, Expand
