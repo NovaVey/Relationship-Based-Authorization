@@ -5,8 +5,8 @@
  * runner-dry-run-cleanup-failure.test.ts` already uses for the identical
  * kind of orchestration-logic test (`productionCheck` mocked via
  * `vi.spyOn` on its own module namespace; Postgres itself replaced with a
- * tiny fake `Pool` whose `query` just distinguishes the one statement shape
- * this file cares about).
+ * tiny fake `Pool` whose `connect()`/`query` just distinguish the statement
+ * shapes this file cares about).
  *
  * What's under test here is `performCheck`'s own sequencing — hit-path
  * logging, miss-path caching, and, above all, the exact ordering an
@@ -18,6 +18,17 @@
  * isolation; this file proves `performCheck` actually *calls* it in the
  * right order, at the one layer where a mistake (e.g. swapping the insert
  * and the `trySet` back the wrong way round) would matter.
+ *
+ * `fakePool` below opens a fake "connection" (`.connect()`) rather than
+ * answering `.query()` directly, matching `insertCheckRow`'s own real shape
+ * since the hash-chain feature landed: `BEGIN`, the advisory-lock
+ * acquisition, the chain-tip read, the actual `insert into checks`, then
+ * `COMMIT` — none of this file's own tests care about the hash-chain
+ * columns themselves (that's `checks-hash-chain.test.ts`'s job, DB-free,
+ * and `checks-hash-chain.integration.test.ts`'s, against real Postgres);
+ * this fake just has to let every statement in that real sequence resolve
+ * so `performCheck`'s own hit/miss/cache sequencing — the actual subject of
+ * this file — can be exercised without a real database.
  *
  * Real Postgres integration coverage for `performCheck` itself (uncached)
  * already exists in `checks.integration.test.ts` — nothing here duplicates
@@ -46,17 +57,48 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** A fake `Pool` recording every `insert into checks` call; anything else throws — nothing else should ever be queried by `performCheck` itself. */
+/**
+ * A fake `Pool` whose `.connect()` hands out a fake client that answers
+ * `insertCheckRow`'s real statement sequence (`BEGIN`, the advisory lock,
+ * the chain-tip `select`, the actual `insert into checks`, `COMMIT`/
+ * `ROLLBACK`) — see this file's own top-of-file doc comment. Records every
+ * `insert into checks` call's params; anything outside that known sequence
+ * throws — nothing else should ever be queried by `performCheck` itself.
+ * `pool.query` itself is never expected to be called at all any more
+ * (`insertCheckRow` only ever queries through a connected client) and
+ * throws if it is, so a regression back to the old bare-`pool.query` shape
+ * would fail loudly here, not silently pass by accident.
+ */
 function fakePool(): { pool: Pool; insertCalls: unknown[][] } {
   const insertCalls: unknown[][] = [];
-  const pool = {
+  const client = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
-      if (typeof sql === 'string' && sql.includes('insert into checks')) {
+      const normalized = typeof sql === 'string' ? sql.trim().toLowerCase() : '';
+      if (normalized === 'begin' || normalized === 'commit' || normalized === 'rollback') {
+        return { rows: [] };
+      }
+      if (normalized.startsWith('select pg_advisory_xact_lock')) {
+        return { rows: [] };
+      }
+      if (normalized.startsWith('select row_hash from checks')) {
+        // Empty checks table (from this fake's own perspective) — every
+        // insert chains from GENESIS_PREV_HASH, exactly like a real,
+        // freshly-migrated database with no chained rows yet.
+        return { rows: [] };
+      }
+      if (normalized.startsWith('insert into checks')) {
         insertCalls.push(params ?? []);
         return { rows: [] };
       }
-      throw new Error(`fakePool: unexpected query: ${sql}`);
+      throw new Error(`fakePool: unexpected client query: ${sql}`);
     }),
+    release: vi.fn(),
+  };
+  const pool = {
+    query: vi.fn(async (sql: string) => {
+      throw new Error(`fakePool: pool.query should never be called directly any more: ${sql}`);
+    }),
+    connect: vi.fn(async () => client),
   } as unknown as Pool;
   return { pool, insertCalls };
 }
@@ -174,10 +216,28 @@ describe('performCheck with a cache: a failed audit insert on a miss never poiso
     // reach the cache — otherwise a later, unrelated caller could get a
     // cache HIT for a decision that was never actually logged.
     vi.spyOn(productionModule, 'productionCheck').mockResolvedValue(ALLOWED);
+    // Everything up through the chain-tip read succeeds normally (mirroring
+    // fakePool's own client above) — only the actual `insert into checks`
+    // statement fails, matching this test's own name and intent precisely
+    // now that insertCheckRow runs more than one statement per call.
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        const normalized = sql.trim().toLowerCase();
+        if (normalized === 'begin' || normalized === 'rollback') return { rows: [] };
+        if (normalized.startsWith('select pg_advisory_xact_lock')) return { rows: [] };
+        if (normalized.startsWith('select row_hash from checks')) return { rows: [] };
+        if (normalized.startsWith('insert into checks')) {
+          throw new Error('simulated transient checks-table insert failure');
+        }
+        throw new Error(`unexpected client query: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
     const pool = {
       query: vi.fn(async () => {
-        throw new Error('simulated transient checks-table insert failure');
+        throw new Error('pool.query should never be called directly any more');
       }),
+      connect: vi.fn(async () => client),
     } as unknown as Pool;
     const cache = new CheckCache(100, 60_000);
     const key = buildCacheKey(ALICE, RELATION, README, {});
