@@ -275,9 +275,9 @@ describe('the static ADMIN_API_KEY env var keeps working completely unaffected â
       method: 'POST',
       url: '/check',
       payload: {
-        subject: { ns: 'user', id: 'zzz-regression-guard' },
+        subject: { ns: 'user', id: 'zzz_regression_guard' },
         relation: 'view',
-        object: { ns: 'nsa', id: 'doc-regression' },
+        object: { ns: 'nsa', id: 'doc_regression' },
       },
       headers: authHeaders(STATIC_ADMIN_KEY),
     });
@@ -287,9 +287,9 @@ describe('the static ADMIN_API_KEY env var keeps working completely unaffected â
       method: 'POST',
       url: '/check',
       payload: {
-        subject: { ns: 'user', id: 'zzz-regression-guard' },
+        subject: { ns: 'user', id: 'zzz_regression_guard' },
         relation: 'view',
-        object: { ns: 'nsb', id: 'doc-regression' },
+        object: { ns: 'nsb', id: 'doc_regression' },
       },
       headers: authHeaders(STATIC_ADMIN_KEY),
     });
@@ -300,10 +300,10 @@ describe('the static ADMIN_API_KEY env var keeps working completely unaffected â
       url: '/tuples',
       payload: {
         objectNs: 'nsb',
-        objectId: 'doc-regression',
+        objectId: 'doc_regression',
         relation: 'viewer',
         subjectNs: 'user',
-        subjectId: 'zzz-regression-guard',
+        subjectId: 'zzz_regression_guard',
       },
       headers: authHeaders(STATIC_ADMIN_KEY),
     });
