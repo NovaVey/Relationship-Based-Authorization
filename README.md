@@ -621,6 +621,7 @@ reverse-lookup operations with no CLI command of their own:
 | `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)       |
 | `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                   |
 | `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version |
+| `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                 |
 
 `READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
 the four read/list routes above without also granting write access.

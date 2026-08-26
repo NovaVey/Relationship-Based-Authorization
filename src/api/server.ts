@@ -68,6 +68,7 @@ import { compileSchema } from '../schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
 import { publishSchema, listLatestNamespaceVersions } from '../schema/publish.js';
 import { createCheckCache, type CheckCache } from '../resolve/production/cache.js';
+import { buildOpenApiDocument } from './openapi-document.js';
 import { checkAdminAuth, checkReadAuth } from './auth.js';
 import {
   createRedisClient,
@@ -1070,6 +1071,26 @@ export async function buildServer(
       }
     },
   );
+
+  // Deliberately unauthenticated, like `/health` and `/schema/compile` —
+  // nothing this route returns is a secret or a permission decision, just a
+  // description of this API's own already-public route shapes. No
+  // per-route `config.rateLimit` override: this route does no I/O (no
+  // Postgres, no filesystem — `buildOpenApiDocument()` is a pure, in-memory
+  // function), so it gets the same server-wide default budget
+  // (100 requests/minute, registered above) `/schema/compile` already uses
+  // for the identical reason — no external dependency, no load-balancer-
+  // polling headroom need `/health`'s own 300/min override exists for.
+  //
+  // Serves the exact same document `scripts/generate-openapi.ts` writes to
+  // `docs/openapi.json` — both call `buildOpenApiDocument()`
+  // (`src/api/openapi-document.ts`), never two independently-maintained
+  // copies. See that module's own top-of-file doc comment for the full
+  // "hand-written, hand-maintained, disclosed-not-automatic" design and why
+  // it lives in `src/api/` rather than `scripts/`.
+  app.get('/openapi.json', async (_request, reply) => {
+    await reply.code(200).send(buildOpenApiDocument());
+  });
 
   return app;
 }
