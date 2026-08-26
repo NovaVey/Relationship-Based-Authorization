@@ -77,6 +77,22 @@ let poolQuery: ReturnType<typeof vi.fn<(...args: unknown[]) => Promise<unknown>>
 
 beforeEach(async () => {
   poolQuery = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+  // Default: "no matching row" for any query — a real, ephemeral `api_keys`
+  // table would return this for a `validateDbApiKey` lookup against a key
+  // that was never minted (`src/api/db-api-keys.ts`). Since `src/api/
+  // auth.ts`'s `checkAdminAuthDb`/`checkReadAuthDb` (wired into
+  // `requireAdminAuth`/`requireReadAuth`, `src/api/server.ts`) now fall back
+  // to a real `pool.query` call whenever a bearer token is supplied that
+  // doesn't match the configured static key — real, intended new behavior,
+  // not a bug this default papers over — every pre-existing "wrong key"
+  // test below needs `poolQuery` to resolve to *something* shaped like a
+  // real `pg` result instead of `undefined` (this mock's default with no
+  // implementation configured), or that fallback lookup throws trying to
+  // destructure `.rows` off it. Individual tests that need a different
+  // `poolQuery` behavior (the `/health` tests, the 503-mapping test) already
+  // override this via their own `mockImplementation`/`mockResolvedValue`/
+  // `mockRejectedValue` call, which fully replaces this default.
+  poolQuery.mockResolvedValue({ rows: [], rowCount: 0 });
   const pool = { query: poolQuery } as unknown as Pool;
   app = await buildServer(pool, { logger: false });
 });
@@ -1218,6 +1234,11 @@ describe('D-104: trustExactlyOneRealProxyHop reimplements trustProxy: 1 as a Tru
 describe('D-105: authFloodState is a bounded LruMap, not an unbounded plain Map', () => {
   it('an-ip-evicted-from-the-flood-guards-own-cache-by-newer-distinct-ips-gets-a-fresh-window-its-old-count-does-not-survive', async () => {
     const boundedPoolQuery = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+    // Same "no matching row" default as the shared `poolQuery` in this
+    // file's own `beforeEach` — every request below presents a wrong key,
+    // so `checkAdminAuthDb`'s DB fallback (`src/api/auth.ts`) really does
+    // query this pool on every one of them.
+    boundedPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 });
     const boundedApp = await buildServer({ query: boundedPoolQuery } as unknown as Pool, {
       logger: false,
       authFloodStateMaxEntries: 2,

@@ -59,7 +59,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 
 import { env } from '../config/env.js';
-import { performCheck } from '../audit/checks.js';
+import { performCheck, type PerformCheckResult } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { listObjects, listUsers } from '../audit/list.js';
 import { writeTuple, deleteTuple, type TupleKey } from '../store/tuples.js';
@@ -68,7 +68,7 @@ import { compileSchema } from '../schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
 import { publishSchema, listLatestNamespaceVersions } from '../schema/publish.js';
 import { createCheckCache, type CheckCache } from '../resolve/production/cache.js';
-import { checkAdminAuth, checkReadAuth } from './auth.js';
+import { checkAdminAuthDb, checkReadAuthDb } from './auth.js';
 import {
   createRedisClient,
   InMemoryFloodStore,
@@ -77,6 +77,7 @@ import {
 } from './redis-store.js';
 import {
   checkResponse,
+  checkBatchResponse,
   expandResponse,
   listObjectsResponse,
   listUsersResponse,
@@ -88,6 +89,7 @@ import {
 } from './responses.js';
 import {
   unauthorizedError,
+  forbiddenError,
   invalidRequestError,
   infrastructureUnavailableError,
   internalError,
@@ -95,6 +97,30 @@ import {
   notFoundError,
   type ApiErrorResponse,
 } from './errors.js';
+
+/**
+ * `request.authScopes` — set by `requireAdminAuth`/`requireReadAuth` once
+ * authentication succeeds, read by every gated route handler afterward to
+ * enforce namespace scope (see those functions' own doc comments and
+ * `findOutOfScopeNamespace` below). `null` means unscoped (every static
+ * env-var key match, or a DB-backed key deliberately minted with no
+ * `--scope` — `src/api/auth.ts`'s `AdminAuthDbResult`/`ReadAuthDbResult`);
+ * a `string[]` names exactly the namespaces a scoped DB-backed key may act
+ * on. Left `undefined` only for a request to an ungated route
+ * (`/schema/compile`, `/health`) that never runs either preHandler at all —
+ * those two routes never read this field.
+ *
+ * A Fastify module augmentation, not an ad hoc `(request as ...)` cast at
+ * every read site — this is the framework's own documented mechanism for a
+ * preHandler to hand a computed value forward to its route's handler
+ * (`app.decorateRequest`, called once in `buildServer` below), typed
+ * everywhere it's touched without a cast anywhere in this file.
+ */
+declare module 'fastify' {
+  interface FastifyRequest {
+    authScopes?: string[] | null;
+  }
+}
 
 // `identifierField()` — the same grammar `src/store/tuples.ts`'s
 // `validateIdentifiers` already enforces on every tuple write/delete
@@ -157,6 +183,48 @@ const checkBodySchema = z
     // shape every other malformed-body case here does, not a
     // differently-worded Zod error.
     atToken: z.string().optional(),
+  })
+  .strict();
+
+// `POST /check/batch` (new feature) — the cap on how many checks one HTTP
+// call may bundle. Named/sized the same way `src/audit/list.ts`'s
+// `LIST_OBJECTS_MAX_CANDIDATES` is (that file's own doc comment: "a
+// deliberately simple, round starting point, not derived from a load
+// test"): each item is a full, independent `performCheck` graph walk, not
+// a cheap lookup, so an unbounded batch would let one HTTP request demand
+// an unbounded amount of server-side work. 50 is generous enough for the
+// endpoint's real purpose — folding a handful to a few dozen related
+// questions ("can this subject do X on each of these objects") into one
+// round trip — while keeping the worst case (50 full graph walks) bounded
+// and predictable. A caller that legitimately needs more than 50 checks
+// answered makes more than one batch call; this is a batching
+// convenience, not a bulk-export mechanism (`listObjects`/`listUsers`
+// already exist for "enumerate everything" — this is not a third way to
+// do that). An oversized batch is rejected outright with a specific 400,
+// never silently truncated — `LIST_OBJECTS_MAX_CANDIDATES`'s own
+// `truncated: true` flag can afford to signal "more exist, ask again";
+// silently dropping checks a caller explicitly asked for would instead
+// make some of the caller's own questions vanish with no signal at all,
+// which for an authorization decision is a materially worse failure mode
+// than a loud, immediate rejection.
+const CHECK_BATCH_MAX_SIZE = 50;
+
+// Reuses `checkBodySchema` directly as the per-item schema, rather than a
+// second definition mirroring its fields the way `listObjectsBodySchema`/
+// `listUsersBodySchema` mirror-but-don't-reuse `checkBodySchema`/
+// `expandBodySchema`'s fields immediately below (that pair's own comment:
+// "bodies mirror ... exactly, field for field"). Those two are a
+// *different* question (a reverse lookup) that happens to share some
+// field names; `/check/batch` asks the exact same question `checkBodySchema`
+// already models, N times over — there is nothing to mirror, only to
+// repeat, so importing the one real definition is more honest reuse than a
+// second copy of identical fields would be.
+const checkBatchBodySchema = z
+  .object({
+    checks: z
+      .array(checkBodySchema)
+      .min(1, 'checks must contain at least one check')
+      .max(CHECK_BATCH_MAX_SIZE, `a batch may contain at most ${CHECK_BATCH_MAX_SIZE} checks`),
   })
   .strict();
 
@@ -251,6 +319,36 @@ async function sendApiError(reply: FastifyReply, err: ApiErrorResponse): Promise
 }
 
 /**
+ * Namespace-scope enforcement (real, DB-backed API keys — `src/api/
+ * db-api-keys.ts`, `src/api/auth.ts`'s `checkAdminAuthDb`/`checkReadAuthDb`)
+ * — every gated route calls this once, after its own body has parsed
+ * successfully, with every namespace name *this specific request* targets.
+ * `scopes` is `request.authScopes`: `null`/`undefined` (a static env-var
+ * key match, or a DB key deliberately minted with no `--scope`) means
+ * every namespace is in scope, mirroring the exact "no restriction"
+ * meaning `relation_tuples.subject_relation IS NULL` already carries
+ * elsewhere in this schema (`0001_relation_tuples_and_write_log.sql`'s own
+ * precedent) — applied here to a credential's authority instead of a
+ * tuple's subject shape.
+ *
+ * Returns the FIRST out-of-scope namespace found, for a specific,
+ * actionable 403 message (`forbiddenError`, `src/api/errors.ts`) naming
+ * exactly which namespace the credential doesn't cover — never a bare
+ * "forbidden" that would leave a caller to guess which of several
+ * namespaces in a multi-namespace request (`/schema/publish`,
+ * `/check/batch`) was the actual problem. `undefined` when every namespace
+ * in `namespaces` is covered (including the trivial case where `scopes`
+ * itself is `null`/`undefined`).
+ */
+function findOutOfScopeNamespace(
+  scopes: string[] | null | undefined,
+  namespaces: readonly string[],
+): string | undefined {
+  if (scopes === null || scopes === undefined) return undefined;
+  return namespaces.find((ns) => !scopes.includes(ns));
+}
+
+/**
  * Every route's own DB call is wrapped in this, mirroring the identical
  * `catch (err) { console.error('Postgres: ...'); process.exitCode = 3; }`
  * pattern every `src/cli/commands/*.ts` file already applies to the exact
@@ -270,6 +368,59 @@ async function runOrInfrastructureError<T>(
     await sendApiError(reply, infrastructureUnavailableError((err as Error).message));
     return undefined;
   }
+}
+
+/** One `/check/batch` item, already validated (`checkBodySchema`, reused as the array-element schema) and `atToken`-decoded — see `POST /check/batch`'s own route comment. */
+interface DecodedBatchCheckItem {
+  subject: z.infer<typeof entityRefSchema>;
+  relation: string;
+  object: z.infer<typeof entityRefSchema>;
+  atToken?: number;
+}
+
+/** One `DecodedBatchCheckItem` plus the real `PerformCheckResult` `performCheck` produced for it — exactly the shape `checkBatchResponse` (`src/api/responses.ts`) needs to build a `CheckResponseBody` for this item via `checkResponse`, the same four echo fields `/check`'s own single-check handler already threads through. */
+type BatchCheckOutcome = DecodedBatchCheckItem & { result: PerformCheckResult };
+
+/**
+ * Runs every item in `items` through the real `performCheck`,
+ * `Math.max(1, env.MAX_CONCURRENCY)` at a time — the identical slice-into-
+ * batches/`Promise.all`-each-batch shape `src/audit/list.ts`'s
+ * `checkCandidatesConcurrently` already establishes for the same reason
+ * (bound how many concurrent recursive graph walks run against `pool` at
+ * once, rather than firing all of them simultaneously), not reinvented
+ * here. See `POST /check/batch`'s own route comment for the one deliberate
+ * difference: `checkCandidatesConcurrently`'s own result order isn't
+ * meaningful (a set), so it collects hits in whatever order a batch's
+ * promises resolve; `/check/batch`'s own contract is "one entry per input
+ * check, in the same order the caller supplied them," so every item's
+ * outcome is written to its own pre-computed `start + offset` index
+ * instead of appended — correct regardless of which promise within a batch
+ * happens to settle first.
+ */
+async function runCheckBatch(
+  pool: Pool,
+  items: readonly DecodedBatchCheckItem[],
+  cache: CheckCache | undefined,
+): Promise<BatchCheckOutcome[]> {
+  const concurrency = Math.max(1, env.MAX_CONCURRENCY);
+  const outcomes = new Array<BatchCheckOutcome>(items.length);
+  for (let start = 0; start < items.length; start += concurrency) {
+    const batch = items.slice(start, start + concurrency);
+    await Promise.all(
+      batch.map(async (item, offset) => {
+        const result = await performCheck(
+          pool,
+          item.subject,
+          item.object,
+          item.relation,
+          item.atToken !== undefined ? { atToken: item.atToken } : {},
+          cache,
+        );
+        outcomes[start + offset] = { ...item, result };
+      }),
+    );
+  }
+  return outcomes;
 }
 
 /**
@@ -455,6 +606,16 @@ export async function buildServer(
     bodyLimit: 262_144,
   });
 
+  // The default for `request.authScopes` (this file's own top-of-file
+  // module augmentation) — `null` (unscoped), matching what an ungated
+  // request that never runs `requireAdminAuth`/`requireReadAuth` at all
+  // would otherwise leave undecorated. Every gated route's own preHandler
+  // chain always overwrites this with the real resolved value before that
+  // route's handler runs (either by rejecting the request first, or by
+  // setting `request.authScopes` explicitly on success) — this default
+  // only matters for the two ungated routes, which never read the field.
+  app.decorateRequest('authScopes', null);
+
   // Opt-in horizontal-scaling readiness (post-audit improvement, unset by
   // default — see `env.REDIS_URL`'s own doc comment and
   // `src/api/redis-store.ts`'s top-of-file doc comment for the full
@@ -620,37 +781,87 @@ export async function buildServer(
    * never even attempts a key can never consume the budget meant to
    * protect the one who holds it. Confirmed directly by reading that
    * plugin's own source, not assumed from its public docs alone.
+   *
+   * **Async, and genuinely DB-aware, since the real, mintable API-key
+   * credential tier** (`src/api/db-api-keys.ts`, `src/api/auth.ts`'s
+   * `checkAdminAuthDb`) **— but only on the path a plain `ADMIN_API_KEY`
+   * match never reaches.** `checkAdminAuthDb` tries the exact same
+   * synchronous, DB-free `checkAdminAuth` comparison this function always
+   * ran and only queries `api_keys` if that fails; see that function's own
+   * top-of-file doc comment for the full reasoning behind every part of
+   * the fallback shape. Concretely, for THIS function: a deployment that
+   * only ever presents its static `ADMIN_API_KEY` sees zero added latency
+   * or behavior from this credential tier existing at all.
+   *
+   * A thrown error here (Postgres unreachable mid-lookup) is caught and
+   * reported as `infrastructureUnavailableError` (503) — never silently
+   * treated as "unauthorized" (which would misreport a real outage as a
+   * credential problem) and never allowed to fail open into "authorized"
+   * (exactly the hazard build spec rule 10 rules out project-wide, applied
+   * here to a failed database lookup instead of a missing static secret).
+   * This mirrors `runOrInfrastructureError`'s own established
+   * DB-outage-is-a-distinct-honestly-reported-failure-class discipline,
+   * applied to the auth gate itself rather than to a route's own domain
+   * call — `runOrInfrastructureError` itself isn't reused here since it's
+   * shaped around a route handler that has already decided to answer with
+   * `undefined`-means-"already responded," not a `void`-returning
+   * preHandler.
+   *
+   * On success, stores the resolved credential's own namespace scope on
+   * `request.authScopes` — `null` for a static-key match or an unscoped DB
+   * key, a real `string[]` for a scoped one — for every gated route
+   * handler below to enforce afterward via `findOutOfScopeNamespace`.
    */
   async function requireAdminAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const result = checkAdminAuth(request.headers.authorization);
+    let result: Awaited<ReturnType<typeof checkAdminAuthDb>>;
+    try {
+      result = await checkAdminAuthDb(pool, request.headers.authorization);
+    } catch (err) {
+      await sendApiError(reply, infrastructureUnavailableError((err as Error).message));
+      return;
+    }
     if (!result.authorized) {
       const detail =
         result.reason === 'admin_api_key_not_configured'
           ? 'ADMIN_API_KEY is not configured for this deployment — writes are disabled'
           : 'missing or invalid admin API key';
       await sendApiError(reply, unauthorizedError(detail));
+      return;
     }
+    request.authScopes = result.scopes;
   }
 
   /**
    * The scoped, read-only credential tier's own gate (post-audit
    * improvement, D-064's own "Revisit if" — `src/api/auth.ts`'s
-   * `checkReadAuth`). Gates `/check`, `/expand`, `/list-objects`, and
-   * `/list-users` — every route that only ever answers a question about the
-   * tuple graph, never one that changes it. Mirrors `requireAdminAuth`'s
-   * own shape exactly (same "stop the preHandler chain on rejection" Fastify
-   * mechanism, same `sendApiError`), differing only in which check function
-   * it calls and how it phrases an unconfigured-credential rejection.
+   * `checkReadAuth`). Gates `/check`, `/check/batch`, `/expand`,
+   * `/list-objects`, and `/list-users` — every route that only ever
+   * answers a question about the tuple graph, never one that changes it.
+   * Mirrors `requireAdminAuth`'s own shape exactly (same "stop the
+   * preHandler chain on rejection" Fastify mechanism, same `sendApiError`,
+   * the identical async/DB-fallback/infrastructure-error/`authScopes`
+   * treatment — see that function's own doc comment immediately above for
+   * the full reasoning, not repeated here), differing only in which check
+   * function it calls and how it phrases an unconfigured-credential
+   * rejection.
    */
   async function requireReadAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const result = checkReadAuth(request.headers.authorization);
+    let result: Awaited<ReturnType<typeof checkReadAuthDb>>;
+    try {
+      result = await checkReadAuthDb(pool, request.headers.authorization);
+    } catch (err) {
+      await sendApiError(reply, infrastructureUnavailableError((err as Error).message));
+      return;
+    }
     if (!result.authorized) {
       const detail =
         result.reason === 'no_read_credential_configured'
           ? 'neither READONLY_API_KEY nor ADMIN_API_KEY is configured for this deployment — reads are disabled'
           : 'missing or invalid API key';
       await sendApiError(reply, unauthorizedError(detail));
+      return;
     }
+    request.authScopes = result.scopes;
   }
 
   /**
@@ -842,6 +1053,16 @@ export async function buildServer(
         return;
       }
       const { subject, relation, object, atToken: opaqueAtToken } = parsed.data;
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, [object.ns]);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
+        return;
+      }
       let atToken: number | undefined;
       if (opaqueAtToken !== undefined) {
         try {
@@ -867,6 +1088,116 @@ export async function buildServer(
     },
   );
 
+  // A stricter per-minute budget than `/check`'s own 200/min
+  // (`gatedReadRateLimit`), scaled down to reflect that a batch call costs
+  // more server-side work per HTTP request. `/check`'s own 200/min assumes
+  // each call costs one `performCheck` graph walk; a single `/check/batch`
+  // call can cost up to `CHECK_BATCH_MAX_SIZE` (50) of them, so admitting
+  // the same 200/min here would let a caller cause up to 50× the
+  // underlying check volume `/check`'s own budget was sized to bound (worst
+  // case: 200 full-sized batches/min = 10,000 check-equivalents/min). 20/min
+  // keeps the worst-case aggregate underlying check volume (20 × 50 =
+  // 1,000/min) to a bounded, deliberately-chosen multiple (5×) of `/check`'s
+  // own ceiling — generous enough for this endpoint's real purpose (folding
+  // many individual checks into fewer HTTP round trips, which by
+  // definition means fewer *calls* even from a caller doing a lot of
+  // checking) while still bounding abuse meaningfully tighter than simply
+  // reusing `/check`'s own number outright.
+  const checkBatchRateLimit = {
+    config: { rateLimit: { max: 20, timeWindow: '1 minute', hook: 'preHandler' as const } },
+  };
+
+  /**
+   * `POST /check/batch` (new feature) — N `/check` calls folded into one
+   * HTTP round trip. Gated and rate-limited exactly like `/check` itself
+   * (`gatedReadPreHandlers`, a scoped-down rate budget — see
+   * `checkBatchRateLimit`'s own comment immediately above), scope-checked
+   * against EVERY object namespace present anywhere in the batch, not just
+   * the first one — a caller with a namespace-scoped DB key could otherwise
+   * smuggle a check against an out-of-scope namespace into an otherwise
+   * in-scope-looking batch. **The whole batch is rejected, before any
+   * individual check runs, the moment even one item names an out-of-scope
+   * namespace** — mirrors this file's own single-`/check` scope check
+   * exactly, just evaluated over the full set of namespaces the batch
+   * targets instead of one.
+   *
+   * Every `atToken` in the batch is decoded up front too, for the same
+   * reason: an all-or-nothing validation pass before any `performCheck`
+   * call runs, so a malformed token on item 37 of 50 can never leave items
+   * 1-36 having already spent real work answering questions the request as
+   * a whole was going to be rejected for anyway.
+   *
+   * Runs every check via the real `performCheck` (never `productionCheck`
+   * directly) — every check in a batch is logged to the `checks` audit
+   * table exactly as if it had been its own individual `/check` call,
+   * unlike `listObjects`/`listUsers`'s own deliberate, disclosed
+   * audit-table gap (`src/audit/list.ts`'s own top-of-file doc comment) —
+   * `/check/batch` is N named "is this one (subject, object) pair allowed"
+   * questions, exactly the shape `performCheck`'s own contract covers, not
+   * a bulk discovery/reporting operation like `listObjects` is.
+   *
+   * Batched at `Math.max(1, env.MAX_CONCURRENCY)` concurrency, reusing
+   * `src/audit/list.ts`'s `checkCandidatesConcurrently` batching pattern
+   * exactly (slice into fixed-size batches, `Promise.all` each batch in
+   * turn) — see `runCheckBatch` below. The one deliberate difference from
+   * that function: `checkCandidatesConcurrently`'s own result order isn't
+   * meaningful (`listObjects`' contract is a set), so it collects results
+   * in whichever order a batch's promises happen to resolve; `/check/batch`
+   * must return "one entry per input check in the same order" the caller
+   * supplied them, so `runCheckBatch` writes each result to its own
+   * pre-computed index instead.
+   */
+  app.post(
+    '/check/batch',
+    { preHandler: gatedReadPreHandlers(), ...checkBatchRateLimit },
+    async (request, reply) => {
+      const parsed = checkBatchBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const { checks } = parsed.data;
+
+      const items: DecodedBatchCheckItem[] = [];
+      for (const item of checks) {
+        if (item.atToken === undefined) {
+          items.push({ subject: item.subject, relation: item.relation, object: item.object });
+          continue;
+        }
+        try {
+          items.push({
+            subject: item.subject,
+            relation: item.relation,
+            object: item.object,
+            atToken: decodeToken(item.atToken),
+          });
+        } catch (err) {
+          await sendApiError(reply, invalidRequestError((err as Error).message));
+          return;
+        }
+      }
+
+      const namespaces = [...new Set(items.map((item) => item.object.ns))];
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, namespaces);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
+        return;
+      }
+
+      const outcomes = await runOrInfrastructureError(reply, () =>
+        runCheckBatch(pool, items, checkCache),
+      );
+      if (outcomes === undefined) return;
+      const resp = checkBatchResponse(outcomes);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
+
   app.post(
     '/expand',
     { preHandler: gatedReadPreHandlers(), ...gatedReadRateLimit },
@@ -877,6 +1208,16 @@ export async function buildServer(
         return;
       }
       const { object, relation } = parsed.data;
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, [object.ns]);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
+        return;
+      }
       const tree = await runOrInfrastructureError(reply, () => expand(pool, object, relation));
       if (tree === undefined) return;
       const resp = expandResponse(object, relation, tree);
@@ -901,6 +1242,16 @@ export async function buildServer(
         return;
       }
       const { subject, relation, objectNs, atToken: opaqueAtToken } = parsed.data;
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, [objectNs]);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
+        return;
+      }
       let atToken: number | undefined;
       if (opaqueAtToken !== undefined) {
         try {
@@ -929,6 +1280,16 @@ export async function buildServer(
         return;
       }
       const { object, relation } = parsed.data;
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, [object.ns]);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
+        return;
+      }
       const result = await runOrInfrastructureError(reply, () => listUsers(pool, object, relation));
       if (result === undefined) return;
       const resp = listUsersResponse(object, relation, result);
@@ -943,6 +1304,16 @@ export async function buildServer(
       const parsed = tupleBodySchema.safeParse(request.body);
       if (!parsed.success) {
         await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, [parsed.data.objectNs]);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
         return;
       }
       const tuple = toTupleKey(parsed.data);
@@ -967,6 +1338,16 @@ export async function buildServer(
       const parsed = tupleBodySchema.safeParse(request.body);
       if (!parsed.success) {
         await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, [parsed.data.objectNs]);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
         return;
       }
       const tuple = toTupleKey(parsed.data);
@@ -998,6 +1379,38 @@ export async function buildServer(
       if (!parsed.success) {
         await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
         return;
+      }
+      // Scope enforcement needs the FULL set of namespaces this publish
+      // would touch — one schema source can declare several `namespace {
+      // ... }` blocks at once (`CompiledSchema.namespaces`, `src/schema/
+      // dsl/types.ts`), and `publishSchema` below publishes every one of
+      // them together, in one transaction. Recompiling here, purely to
+      // extract that namespace list before any write happens, is a real,
+      // deliberate duplication of the compile `publishSchema` will do
+      // again internally a moment later — `compileSchema` is pure and
+      // DB-free (no I/O, no side effects), so the cost is negligible, and
+      // the alternative (threading a pre-compiled schema, or its namespace
+      // list, through `publishSchema`'s own signature) would be much
+      // larger surgery on `src/schema/publish.ts` for a single caller's
+      // benefit. A compile failure here is deliberately NOT itself an
+      // error at this layer — it just means there is no real namespace set
+      // to check scope against yet, so this skips straight to
+      // `publishSchema` below, which recompiles for real and reports the
+      // exact same failure via its own established `schemaPublishError`
+      // path, unchanged.
+      const compiledForScope = compileSchema(parsed.data.source);
+      if (compiledForScope.ok) {
+        const namespaces = Object.keys(compiledForScope.schema.namespaces);
+        const outOfScope = findOutOfScopeNamespace(request.authScopes, namespaces);
+        if (outOfScope !== undefined) {
+          await sendApiError(
+            reply,
+            forbiddenError(
+              `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+            ),
+          );
+          return;
+        }
       }
       const result = await runOrInfrastructureError(reply, () =>
         publishSchema(pool, parsed.data.source),

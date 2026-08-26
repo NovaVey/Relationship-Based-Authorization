@@ -52,6 +52,7 @@ export type ApiErrorCode =
   | 'tuple_validation_failed'
   | 'schema_compile_failed'
   | 'unauthorized'
+  | 'forbidden'
   | 'not_found'
   | 'rate_limited'
   | 'infrastructure_unavailable'
@@ -100,6 +101,20 @@ export interface ApiErrorResponse {
  *   than splitting some codes into a 404-shaped response.
  * - `unauthorized` — 401. A missing/wrong `ADMIN_API_KEY` on a gated write
  *   route.
+ * - `forbidden` — 403. Added by `src/api/server.ts` (real, mintable,
+ *   namespace-scoped DB-backed API keys — `src/api/db-api-keys.ts`): a
+ *   credential that authenticated successfully but is scoped to a set of
+ *   namespaces that doesn't cover this specific request's target
+ *   namespace(s). Distinct from `unauthorized`/401 on purpose, following
+ *   ordinary HTTP convention: 401 means "who are you, and this deployment
+ *   couldn't establish that" (no credential, or one that matches nothing
+ *   at all); 403 means "this deployment knows exactly who you are, and
+ *   that identity's own authority doesn't reach what you're asking for."
+ *   Collapsing the two into one status would force every client to parse
+ *   `message` text to tell "your key is wrong" apart from "your key is
+ *   real but doesn't cover this namespace" — two different, differently-
+ *   actionable problems (get a valid credential, versus get one scoped
+ *   more broadly, or ask for something the one you have actually covers).
  * - `not_found` — 404. An HTTP request whose method and path match no route
  *   this API registers at all — a genuine 404, distinct from a domain-level
  *   "no published schema for this namespace," which stays
@@ -133,6 +148,7 @@ export const API_ERROR_STATUS: Readonly<Record<ApiErrorCode, number>> = {
   tuple_validation_failed: 400,
   schema_compile_failed: 400,
   unauthorized: 401,
+  forbidden: 403,
   not_found: 404,
   rate_limited: 429,
   infrastructure_unavailable: 503,
@@ -273,6 +289,22 @@ export function schemaPublishError(errors: readonly string[]): ApiErrorResponse 
  */
 export function unauthorizedError(detail = 'missing or invalid admin API key'): ApiErrorResponse {
   return apiError('unauthorized', `unauthorized — ${detail}`);
+}
+
+/**
+ * A request from a credential that authenticated successfully but whose
+ * own namespace scope doesn't cover this request's target namespace(s) —
+ * real, mintable, namespace-scoped DB-backed API keys
+ * (`src/api/db-api-keys.ts`, `src/api/server.ts`'s
+ * `findOutOfScopeNamespace`). See `API_ERROR_STATUS`'s own doc comment for
+ * why this is 403, not a second flavor of `unauthorizedError`'s 401.
+ * `detail` is required, not defaulted the way `unauthorizedError`'s is —
+ * a bare "forbidden" names no fix; every real call site names the specific
+ * out-of-scope namespace so a caller learns exactly what their credential
+ * doesn't cover, matching this file's own "errors name the fix" discipline.
+ */
+export function forbiddenError(detail: string): ApiErrorResponse {
+  return apiError('forbidden', `forbidden — ${detail}`);
 }
 
 /**
