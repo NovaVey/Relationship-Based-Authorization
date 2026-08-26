@@ -105,6 +105,20 @@ export function generateRawApiKey(): string {
  * infeasible to guess or brute-force).
  */
 export function hashApiKey(rawKey: string): string {
+  // codeql[js/insufficient-password-hash]: not a password hash — rawKey is
+  // always either generateRawApiKey()'s own 256-bit crypto.randomBytes
+  // output (the create path) or an equality-lookup candidate compared
+  // against rows whose key_hash all came from that same source (the
+  // validate path). CodeQL's rule targets low-entropy, human-chosen
+  // secrets, where a fast hash makes offline dictionary/brute-force attacks
+  // against a leaked hash cheap — a slow KDF (bcrypt/scrypt/argon2) is the
+  // right fix there. It buys nothing here: a 256-bit CSPRNG search space
+  // is already computationally infeasible to brute-force regardless of
+  // hash speed, so a slow KDF would only add real per-request latency to
+  // every legitimate lookup for a threat model entropy already closes —
+  // the same reasoning GitHub's, Stripe's, and AWS's own API-key/token
+  // hashing designs use. Full tradeoff discussion: this file's own
+  // top-of-file doc comment.
   return createHash('sha256').update(rawKey, 'utf8').digest('hex');
 }
 
