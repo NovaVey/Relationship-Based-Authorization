@@ -28,6 +28,7 @@ to try the DSL compiler itself against your own source.
 - [Also proven: the write path survives a crash mid-transaction, and every advisory lock actually blocks](#also-proven-the-write-path-survives-a-crash-mid-transaction-and-every-advisory-lock-actually-blocks)
 - [A third proof: the static schema verifier](#a-third-proof-the-static-schema-verifier)
 - [A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed](#a-fourth-proof-metamorphic-and-mutation-testing--plus-a-real-deadlock-found-reproduced-and-fixed)
+- [A scope decision, two proof extensions, a tamper-evident audit log, and a schema safety net](#a-scope-decision-two-proof-extensions-a-tamper-evident-audit-log-and-a-schema-safety-net)
 - [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
 - [How it works](#how-it-works)
 - [Latency](#latency)
@@ -362,6 +363,87 @@ evidence that nothing crashes or is silently wrong under real traffic, not
 a substitute for either. Full account of all five:
 [`docs/DECISIONS.md`](docs/DECISIONS.md) D-139 through D-143.
 
+## A scope decision, two proof extensions, a tamper-evident audit log, and a schema safety net
+
+The four proofs above cover the check engine, the write path, a schema's
+abstract safety, and — via metamorphic/mutation testing — blind spots none
+of the others can reach. A feature-ideation pass raised about 28 further
+ideas; most turned out to be "just build it," but one needed a real,
+explicit decision before any code could touch it.
+
+**D-144 — caveats, reopened narrowly, not drifted into.** D-114 named
+caveats (SpiceDB-style attribute conditions on a relation) explicitly out
+of scope for v1, and explicitly invited a future, dated decision to
+reopen it if a real need ever surfaced — never a silent drift. One did:
+time-boxed contractor/reviewer access, which today can only be expressed
+by an external cron job deleting tuples out-of-band — exactly the
+"authorization logic scattered outside the system of record" failure this
+README opens by naming. **What's now in scope:** a closed-form time-window
+check on a tuple (an `expires_at` comparison against the current clock,
+provable the same way `atToken`'s floor comparison already is). **What
+stays out, unchanged:** a general attribute/context-evaluation engine
+(CEL/Rego/Cedar-style) — the "What this is not" section below still holds
+that line. This entry is a decision only; no code shipped. Building the
+narrow form is separate, tracked follow-up work.
+
+Five further items shipped, built in parallel as independent, isolated
+pieces of work:
+
+- **Schema-parser crash-safety fuzzing** found a real, previously-
+  undiscovered bug: a flat, unparenthesized exclusion (`-`) chain has no
+  depth ceiling at all — unlike `|`/`&` (already flattened) or `(`
+  nesting, exclusion isn't associative and is therefore never flattened.
+  A ~5,000-term chain, well inside `POST /schema/compile`'s real
+  request-body cap, threw a raw, unhandled `RangeError`. Fixed by
+  charging exclusion links against the same nesting-depth ceiling `(`
+  nesting already uses; confirmed live by reverting the fix and watching
+  the fuzz suite reproduce the exact crash (D-146).
+- **The exclusion anti-monotonicity property** (D-140's Property 5)
+  generalized beyond its one hand-verified shape to arbitrary,
+  randomly-generated exclusion trees, via a new `findFlippableExclusion`
+  extension of the monotonicity classifier's own AST walk — re-verified
+  live by weakening the resolver's real exclusion evaluation and
+  confirming both the original and the new property fail for exactly the
+  predicted reason (D-147).
+- **The `checks` audit trail is now hash-chained** — tamper-evidence for
+  the one table this project's entire "every allow can show its work"
+  pitch depends on being trustworthy. Every insert now runs inside its
+  own advisory-locked transaction, chaining each row's hash to the true
+  previous row. `authz audit verify` walks the chain and reports either
+  every row intact or the exact first broken link. Live fail-check:
+  tamper with one already-committed row via a raw SQL `UPDATE`, confirm
+  that exact row is named, not just "something is wrong somewhere"
+  (D-148).
+- **`authz schema diff <file>` and `authz schema rollback <namespace>
+<version>`** catch a publish that would silently revoke access before
+  it ships, reusing the same structural reasoning the monotonicity
+  classifier established — proven end to end against a real narrowing
+  publish that genuinely does revoke a real grant, and a rollback that
+  genuinely restores it, plus a negative test confirming a pure-widening
+  publish never triggers a false warning (D-149).
+- **A startup `PG_POOL_MAX`/`MAX_CONCURRENCY` guard** — `authz doctor`
+  now warns when `MAX_CONCURRENCY >= PG_POOL_MAX`, a numeric relationship
+  D-140 disclosed but left invisible and unconfigurable; soft, not a hard
+  failure, since D-143 already closed the actual deadlock this
+  relationship used to be able to cause (D-145).
+
+Two real problems surfaced building this batch in parallel, disclosed
+rather than smoothed over. Two of five parallel agents (each in its own
+isolated git worktree) returned corrupted structured output for some
+files — a literal placeholder string for three files, a natural-language
+description in place of two others — despite each agent's own summary
+describing genuinely thorough, correct work throughout. Caught by
+independently re-running the type checker across the combined result
+before trusting any of it, not by assuming five clean individual reports
+meant a clean whole. Separately, two agents (D-148 and D-149) each
+independently modified the same shared file, `src/cli/index.ts`, in their
+own worktrees; applying both file sets in sequence let the second silently
+drop the first's CLI wiring with no error anywhere — caught only by
+checking the merged file's real content directly, then fixed by hand and
+reconfirmed with real, un-mocked CLI invocations of both command groups.
+Full account of both problems, and every decision above:
+[`docs/DECISIONS.md`](docs/DECISIONS.md) D-144 through D-149.
+
 ## Try it yourself — under 10 minutes, from a clean clone
 
 ```bash
@@ -510,17 +592,20 @@ of this project has.
 
 ## API and CLI
 
-| Command                                                                                | Does                                                                                                                               |
-| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `authz doctor`                                                                         | Confirm `DATABASE_URL` is reachable, apply migrations, report status                                                               |
-| `authz schema compile <file>`                                                          | Parse + compile a namespace DSL file                                                                                               |
-| `authz schema publish <file>`                                                          | Compile and publish a new `namespace_configs` version                                                                              |
-| `authz tuple write <object> <relation> <subject>`                                      | Write a tuple, prints the returned consistency token                                                                               |
-| `authz tuple delete <object> <relation> <subject>`                                     | Delete a tuple, prints the returned consistency token                                                                              |
-| `authz check <subject> <relation> <object> [--at-token T] [--path]`                    | Is `subject` related to `object` via `relation`? `--path` prints the real resolution path (see "What an `allow`..." above)         |
-| `authz expand <object> <relation>`                                                     | Print the resolved subject tree for `object`#`relation`                                                                            |
-| `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]` | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr) |
-| `authz serve`                                                                          | Start the Fastify API server                                                                                                       |
+| Command                                                                                | Does                                                                                                                                       |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `authz doctor`                                                                         | Confirm `DATABASE_URL` is reachable, apply migrations, report status                                                                       |
+| `authz schema compile <file>`                                                          | Parse + compile a namespace DSL file                                                                                                       |
+| `authz schema publish <file>`                                                          | Compile and publish a new `namespace_configs` version                                                                                      |
+| `authz schema diff <file>`                                                             | Compare a candidate against each namespace's currently-published version; warns (exit 1) on any change that isn't a provable widen (D-149) |
+| `authz schema rollback <namespace> <version>`                                          | Republish an earlier published version's exact original source as a new version (D-149)                                                    |
+| `authz tuple write <object> <relation> <subject>`                                      | Write a tuple, prints the returned consistency token                                                                                       |
+| `authz tuple delete <object> <relation> <subject>`                                     | Delete a tuple, prints the returned consistency token                                                                                      |
+| `authz check <subject> <relation> <object> [--at-token T] [--path]`                    | Is `subject` related to `object` via `relation`? `--path` prints the real resolution path (see "What an `allow`..." above)                 |
+| `authz expand <object> <relation>`                                                     | Print the resolved subject tree for `object`#`relation`                                                                                    |
+| `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]` | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr)         |
+| `authz audit verify`                                                                   | Walk the `checks` hash chain; reports every row verified intact or names the exact first tampered row (D-148)                              |
+| `authz serve`                                                                          | Start the Fastify API server                                                                                                               |
 
 `authz serve` exposes the same operations over HTTP, plus two bulk
 reverse-lookup operations with no CLI command of their own:
@@ -556,15 +641,15 @@ same real example data.
 ```
 src/
   config/      validated environment loading
-  schema/      the namespace DSL — publish.ts, plus dsl/ (parser, compiler, types, errors)
+  schema/      the namespace DSL — publish.ts, diff.ts (schema-diff safety check, D-149), plus dsl/ (parser, compiler, types, errors)
   store/       migrations/ (the real .sql files), the tuple store, consistency tokens
     dst/     deterministic simulation testing — the in-memory fake storage seam (docs/DST-PROPOSAL.md)
   resolve/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
     production/  the real, SQL-backed check engine, plus the opt-in check-result cache (cache.ts)
-  metamorphic/ classifyMonotone() — the monotonicity classifier backing test/metamorphic/'s property tests (D-140)
+  metamorphic/ classifyMonotone()/findFlippableExclusion() — the monotonicity classifier backing test/metamorphic/'s property tests (D-140, D-147)
   soundness/   the differential-fuzz generator, classifier, runner
-  audit/       expand(), listObjects()/listUsers(), and the checks audit trail every real check is logged to
+  audit/       expand(), listObjects()/listUsers(), and the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148)
   report/      markdown/JSON soundness reporters, exit codes, PR-comment logic
   api/         the Fastify server, plus the opt-in Redis-backed rate-limit store (redis-store.ts)
   cli/         the authz CLI — index.ts, plus commands/ (one file per subcommand)
