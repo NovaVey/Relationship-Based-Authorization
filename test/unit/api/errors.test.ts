@@ -24,6 +24,7 @@ import {
   schemaCompileError,
   schemaPublishError,
   unauthorizedError,
+  forbiddenError,
   notFoundError,
   rateLimitedError,
   infrastructureUnavailableError,
@@ -42,17 +43,20 @@ const ERRORS_SOURCE_PATH = fileURLToPath(new URL('../../../src/api/errors.ts', i
 // ---------------------------------------------------------------------------
 
 // Hand-derived from API_ERROR_STATUS's own doc comment
-// (`400/400/400/401/404/429/503/500` for `invalid_request`/
+// (`400/400/400/401/403/404/429/503/500` for `invalid_request`/
 // `tuple_validation_failed`/`schema_compile_failed`/`unauthorized`/
-// `not_found`/`rate_limited`/`infrastructure_unavailable`/`internal_error`),
-// not read off the table itself. `rate_limited` (429) was added after this
-// table alongside `@fastify/rate-limit` — see `docs/DECISIONS.md` D-056.
-// `not_found` (404, full-repo audit finding #14) was added after that.
+// `forbidden`/`not_found`/`rate_limited`/`infrastructure_unavailable`/
+// `internal_error`), not read off the table itself. `rate_limited` (429)
+// was added after this table alongside `@fastify/rate-limit` — see
+// `docs/DECISIONS.md` D-056. `not_found` (404, full-repo audit finding #14)
+// was added after that. `forbidden` (403, real/mintable/namespace-scoped DB-
+// backed API keys) was added after that.
 const DOCUMENTED_STATUS: Record<ApiErrorCode, number> = {
   invalid_request: 400,
   tuple_validation_failed: 400,
   schema_compile_failed: 400,
   unauthorized: 401,
+  forbidden: 403,
   not_found: 404,
   rate_limited: 429,
   infrastructure_unavailable: 503,
@@ -73,6 +77,7 @@ describe("every constructor's returned status matches API_ERROR_STATUS for its o
       { expectedCode: 'schema_compile_failed', response: schemaCompileError([]) },
       { expectedCode: 'schema_compile_failed', response: schemaPublishError([]) },
       { expectedCode: 'unauthorized', response: unauthorizedError() },
+      { expectedCode: 'forbidden', response: forbiddenError("does not include 'document'") },
       { expectedCode: 'not_found', response: notFoundError() },
       { expectedCode: 'rate_limited', response: rateLimitedError(60) },
       {
@@ -243,6 +248,28 @@ describe('unauthorizedError — default detail text vs. a caller-supplied detail
     expect(response.body.error.message).toBe(
       'unauthorized — Authorization header missing entirely',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4a. forbiddenError — real, mintable, namespace-scoped DB-backed API keys
+//     (src/api/db-api-keys.ts): a credential that authenticated
+//     successfully but whose own scope doesn't cover this request's target
+//     namespace(s). No default detail (unlike unauthorizedError/notFoundError)
+//     — see the constructor's own doc comment for why every real call site
+//     must name the specific out-of-scope namespace.
+// ---------------------------------------------------------------------------
+
+describe('forbiddenError — message and status/code', () => {
+  it('forbiddenerror-message-is-forbidden-dash-the-supplied-detail-verbatim', () => {
+    const response = forbiddenError("does not include 'document'");
+    expect(response.body.error.message).toBe("forbidden — does not include 'document'");
+  });
+
+  it('forbiddenerror-status-is-403-and-body-error-code-is-forbidden', () => {
+    const response = forbiddenError('out of scope');
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('forbidden');
   });
 });
 

@@ -60,6 +60,14 @@ let poolQuery: ReturnType<typeof vi.fn<(...args: unknown[]) => Promise<unknown>>
 
 beforeEach(async () => {
   poolQuery = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+  // Default: "no matching row" — see the identical default in
+  // `test/unit/api/server.test.ts`'s own `beforeEach` for the full
+  // reasoning. `checkReadAuthDb` (`src/api/auth.ts`) falls back to a real
+  // `pool.query` call whenever a bearer token is supplied that matches
+  // neither configured static key; this file's own "wrong bearer key"
+  // describe block below needs that fallback lookup to resolve to a
+  // real-shaped empty result, not `undefined`.
+  poolQuery.mockResolvedValue({ rows: [], rowCount: 0 });
   const pool = { query: poolQuery } as unknown as Pool;
   app = await buildServer(pool, { logger: false });
 });
