@@ -188,6 +188,61 @@ export async function getLatestNamespaceConfig(
   return rows[0]?.config;
 }
 
+/** One historical `namespace_configs` row's full stored content — see `getNamespaceConfigVersion`. */
+export interface NamespaceConfigVersion {
+  namespace: string;
+  version: number;
+  config: NamespaceConfig;
+  /** The exact `source_dsl` text this version was published from — see `publishSchema`'s own doc comment on why this is the entire compilation unit's source, not a per-namespace slice. */
+  sourceDsl: string;
+}
+
+/**
+ * Fetches one specific historical `(namespace, version)` row's stored
+ * compiled config AND its original `source_dsl` text — `undefined` if no
+ * such row exists. `getLatestNamespaceConfig` above answers "what does a
+ * tuple write validate against right now"; this answers "what did this
+ * namespace look like N versions ago," the lookup `authz schema rollback`
+ * (`src/cli/commands/schema.ts`) needs.
+ *
+ * Rollback itself is deliberately *not* a new write path: it is
+ * `publishSchema(pool, historical.sourceDsl)` — republishing the exact text
+ * this version was originally compiled from, through the exact same
+ * validated, transactional, advisory-locked path every other publish goes
+ * through. That single design choice has a real, disclosed consequence
+ * worth stating here rather than only in the CLI command's own comment:
+ * because `source_dsl` stores an entire compilation unit's text verbatim
+ * (`publishSchema`'s own doc comment — "even when one call publishes
+ * several namespaces at once"), rolling one namespace back to a version
+ * that was originally published alongside other namespaces in the same
+ * source file republishes *all* of them, bumping every one of their
+ * version numbers, not only the one the caller named. This is the correct,
+ * intended behavior for "republish this exact stored source" — not a
+ * "roll back only this one namespace's config and leave every sibling
+ * namespace exactly where it is" operation, which this table's own
+ * per-namespace-versioned, whole-source-per-row shape cannot express
+ * without re-slicing source text back out of a shared AST (`publishSchema`
+ * already rejected that approach for the same reason at initial-publish
+ * time). `src/cli/commands/schema.ts`'s `rollbackSchema` prints every
+ * namespace `publishSchema`'s own result actually bumps, not only the one
+ * requested, so this is visible to the caller rather than a silent
+ * side effect.
+ */
+export async function getNamespaceConfigVersion(
+  pool: QueryExecutor,
+  namespace: string,
+  version: number,
+): Promise<NamespaceConfigVersion | undefined> {
+  const { rows } = await pool.query<{ config: NamespaceConfig; source_dsl: string }>(
+    `select config, source_dsl from namespace_configs
+     where namespace = $1 and version = $2`,
+    [namespace, version],
+  );
+  const row = rows[0];
+  if (!row) return undefined;
+  return { namespace, version, config: row.config, sourceDsl: row.source_dsl };
+}
+
 /**
  * Deletes exactly one `namespace_configs` row by `(namespace, version)`.
  *

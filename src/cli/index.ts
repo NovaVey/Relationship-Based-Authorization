@@ -9,12 +9,18 @@
 import { Command, CommanderError } from 'commander';
 
 import { doctor } from './commands/doctor.js';
-import { compileSchemaFile, publishSchemaFile } from './commands/schema.js';
+import {
+  compileSchemaFile,
+  publishSchemaFile,
+  diffSchemaFile,
+  rollbackSchema,
+} from './commands/schema.js';
 import { tupleWrite, tupleDelete } from './commands/tuple.js';
 import { check } from './commands/check.js';
 import { soundnessRun } from './commands/soundness.js';
 import { expandCli } from './commands/expand.js';
 import { serve } from './commands/serve.js';
+import { auditVerify } from './commands/audit.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -53,6 +59,27 @@ schema
   .argument('<file>', 'path to a .authz schema file')
   .action(async (file: string) => {
     await publishSchemaFile(file);
+  });
+
+schema
+  .command('diff')
+  .description(
+    "Compile a namespace DSL file and compare it against each namespace's currently-published version, warning about any change that isn't a provable widen",
+  )
+  .argument('<file>', 'path to a .authz schema file')
+  .action(async (file: string) => {
+    await diffSchemaFile(file);
+  });
+
+schema
+  .command('rollback')
+  .description(
+    'Republish a namespace at an earlier published version, exactly as originally compiled',
+  )
+  .argument('<namespace>', 'namespace name')
+  .argument('<version>', 'the published version number to roll back to')
+  .action(async (namespace: string, version: string) => {
+    await rollbackSchema(namespace, version);
   });
 
 const tuple = program.command('tuple').description('Relation tuple operations');
@@ -143,6 +170,18 @@ soundness
       await soundnessRun(options);
     },
   );
+
+const audit = program.command('audit').description('Checks audit-log hash-chain operations');
+
+audit
+  .command('verify')
+  .description(
+    "Walk the checks table's hash chain and report either every chained row verified " +
+      '(chain intact) or the first row whose stored hash does not match a fresh recomputation',
+  )
+  .action(async () => {
+    await auditVerify();
+  });
 
 program
   .command('serve')
