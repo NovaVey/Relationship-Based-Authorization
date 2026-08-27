@@ -74,6 +74,14 @@ function fakePool(insertedRunId: string, captured: { sql: string; params: unknow
       if (typeof sql === 'string' && sql.includes('delete from soundness_runs')) {
         return { rows: [] };
       }
+      // D-153: backdating an 'expired' generated tuple (`backdateExpiringTuples`,
+      // `src/soundness/runner.ts`) — this test's own fixed seed can draw one or
+      // more, and this file's assertions are about the `soundness_runs` insert,
+      // not expiry, so this is recognized and trivially resolved like `delete
+      // from soundness_runs` above.
+      if (typeof sql === 'string' && sql.includes('update relation_tuples')) {
+        return { rows: [] };
+      }
       throw new Error(`fakePool: unexpected query: ${sql}`);
     }),
   } as unknown as Pool;

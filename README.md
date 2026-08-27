@@ -14,11 +14,12 @@ the check engine never grants a permission no real path supports.
 seeded with the exact demo graph below (`document`/`folder`/`group`/`org`,
 all four published); `GET /health` (unauthenticated) confirms this directly —
 real database connectivity, and all four namespaces at their real versions.
-`POST /check`/`/expand`/`/schema/publish` and `/tuples` writes are
-`ADMIN_API_KEY`-gated (D-064) — this is a live instance of the real service,
-not a public sandbox, so read access is deliberately not open to anyone who
-finds the URL. `POST /schema/compile` (no write, no gate) is open if you want
-to try the DSL compiler itself against your own source.
+`POST /check`/`/expand` accept either `ADMIN_API_KEY` or `READONLY_API_KEY`
+(D-064, widened by D-138); `/schema/publish` and `/tuples` writes remain
+`ADMIN_API_KEY`-only — this is a live instance of the real service, not a
+public sandbox, so read access is deliberately not open to anyone who finds
+the URL. `POST /schema/compile` (no write, no gate) is open if you want to
+try the DSL compiler itself against your own source.
 
 ## Contents
 
@@ -30,7 +31,8 @@ to try the DSL compiler itself against your own source.
 - [A fourth proof: metamorphic and mutation testing — plus a real deadlock found, reproduced, and fixed](#a-fourth-proof-metamorphic-and-mutation-testing--plus-a-real-deadlock-found-reproduced-and-fixed)
 - [A scope decision, two proof extensions, a tamper-evident audit log, and a schema safety net](#a-scope-decision-two-proof-extensions-a-tamper-evident-audit-log-and-a-schema-safety-net)
 - [Expiring tuples: D-144's own caveat, built](#expiring-tuples-d-144s-own-caveat-built)
-- [Four bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec](#four-bigger-bets-built-in-parallel-scoped-api-keys-a-batch-endpoint-a-privilege-escalation-scanner-an-smt-tier-and-a-machine-checked-api-spec)
+- [Five bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec](#five-bigger-bets-built-in-parallel-scoped-api-keys-a-batch-endpoint-a-privilege-escalation-scanner-an-smt-tier-and-a-machine-checked-api-spec)
+- [Three more from that same list: a Horn-clause tier for the schema verifier, expiring tuples wired into the fuzzer, and an out-of-band audit anchor](#three-more-from-that-same-list-a-horn-clause-tier-for-the-schema-verifier-expiring-tuples-wired-into-the-fuzzer-and-an-out-of-band-audit-anchor)
 - [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
 - [How it works](#how-it-works)
 - [Latency](#latency)
@@ -236,8 +238,9 @@ It's wired into this repo's own CI as a required status check
 (`.github/workflows/schema-verifier.yml`) — every PR proves
 `org#view = member - banned` still holds against `schema/example.authz`,
 this repo's own real, live schema, not a demo fixture. And it's been run
-against twelve real, published schemas this project didn't write (six
-OpenFGA `sample-stores`, six SpiceDB `authzed/examples`): **originally**
+against twelve real, published schemas this project didn't write (five
+OpenFGA `sample-stores`, seven SpiceDB — six `authzed/examples`, one
+`authzed/docs`): **originally**
 nine came back `VIOLATED` and three `HOLDS`, with eight of those nine
 sharing one root cause — the invariant language had no way to state a
 _negative_ precondition, so any goal reachable via a directly-grantable
@@ -303,7 +306,7 @@ it:
   properties turned out flawed on adversarial review before a line of
   implementation code was written — one property's own "backward" half was
   proven **false** by a constructed counterexample, not just softened. What
-  shipped: 4 new files, 69 new tests, zero existing files modified,
+  shipped: 5 new files, 69 new tests, zero existing files modified,
   including `src/metamorphic/monotonicity.ts`'s classifier — sound but
   deliberately incomplete: a genuinely-monotone cyclic permission gets
   conservatively misclassified `false`, since the alternative risks the
@@ -449,8 +452,10 @@ own worktrees; applying both file sets in sequence let the second silently
 drop the first's CLI wiring with no error anywhere — caught only by
 checking the merged file's real content directly, then fixed by hand and
 reconfirmed with real, un-mocked CLI invocations of both command groups.
-Full account of both problems, and every decision above:
-[`docs/DECISIONS.md`](docs/DECISIONS.md) D-144 through D-149.
+Full account of the corrupted-output problem: [`PROGRESS.md`](PROGRESS.md)'s
+D-145–D-149 batch entry. Full account of the shared-file collision, and
+every decision above: [`docs/DECISIONS.md`](docs/DECISIONS.md) D-144
+through D-149.
 
 ## Expiring tuples: D-144's own caveat, built
 
@@ -486,19 +491,29 @@ the exact failure, fixed by reconciling every affected shape once every
 piece had merged. Full account, including every fail-check:
 [`docs/DECISIONS.md`](docs/DECISIONS.md) D-150.
 
-## Four bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec
+## Five bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec
 
 The same feature-ideation pass that produced D-144 through D-150 above named a second, bigger tier of ideas. Five were built next, dispatched as five independent, isolated-worktree agents in one parallel batch: a third, optional DB-backed API-key credential tier that can be scoped to a namespace set and/or given an expiry (`authz apikey create/revoke/list`) — the two existing static env-var keys stay completely unchanged; `POST /check/batch`, up to 50 independent checks in one call, order-preserving; `authz audit privesc`, a privilege-escalation scanner built entirely on the existing `productionCheck` primitive, flagging drift against an `--expected` allow-list; a hand-maintained OpenAPI 3.0.3 document (`GET /openapi.json`, zero new dependency); and a real SMT-backed exact tier for the schema verifier's non-recursive fragment (`z3-solver`, a new dependency approved specifically for this task), closing part of the gap this project's own SMT encoding sketch left open since the verifier first shipped.
 
 Every SAT result the SMT tier reports is reconstructed into a concrete witness and replayed through the real, unmodified production engine before ever being called `VIOLATED` — never trusted on the solver's word alone, the same discipline the exact monotone prover already holds itself to. A real, disclosed finding surfaced while grounding the work: the task's own named "live proof" fixture is itself graph-recursive (via this schema's own deliberate parent-hierarchy and nested-group-membership features), so per the tier's own explicit scope it correctly declines on it — a same-shape non-recursive fixture delivers the genuine capability proof instead.
 
-**Two real numbering collisions, both a direct consequence of dispatching from a moving base, caught before shipping.** These five worktrees were branched at different points relative to D-150 (some before it existed at all, some before its own README writeup landed) — since none of the agents could see D-150's own migration or decision number while working, one new migration collided on its number (`0007`→`0008`) and two of the five agents' own `docs/DECISIONS.md` additions both independently chose `D-150` for themselves, requiring renumbering to `D-151`/`D-152` once every piece merged.
+**Two real numbering collisions, both a direct consequence of dispatching from a moving base, caught before shipping.** These five worktrees were branched at different points relative to D-150 (some before it existed at all, some before its own README writeup landed) — since none of the agents could see D-150's own migration or decision number while working, one new migration collided on its number (`0007`→`0008`) and the SMT agent's own `docs/DECISIONS.md` addition also independently chose `D-150`, already taken by the expiring-tuples entry — renumbered to `D-151`, with the sibling four-piece writeup taking `D-152` once every piece merged.
 
 **A real file-set collision, anticipated this time, but not prevented by anticipating it — unlike D-150's own batch, where zero file overlap was verified before dispatch.** Two agents were both instructed to add a new route to `src/api/server.ts`. Caught immediately after dispatch, resolved the same way D-148/D-149's own shared-file collision was: real `git merge` conflict resolution per worktree, reading and reconciling each actual conflict by hand.
 
 **Two more cross-cutting gaps, both closed once every piece had merged together — the OpenAPI document couldn't describe a route that didn't exist yet in its own author's worktree, and one integration test's own fixture used ids invalid under this project's identifier grammar, found only by live-verifying against a real database rather than trusting a green DB-free suite.**
 
 **A real security-scanner finding, surfaced only after opening the pull request — none of the local verification above catches this class of issue.** GitHub's CodeQL flagged the new API-key hashing function as `js/insufficient-password-hash`, a real rule built for a different threat model than this one: it targets low-entropy, human-chosen secrets, where a fast hash makes brute-forcing a leaked hash cheap. `hashApiKey` never hashes anything human-chosen — its only input is either `generateRawApiKey`'s own 256-bit CSPRNG output or an equality-lookup candidate compared against rows that all came from that same source, making an offline brute-force search infeasible regardless of hash speed, the identical bet GitHub's and Stripe's own API-key systems make. Two inline suppression-comment attempts didn't clear the alert — this repository's CodeQL configuration doesn't appear to honor them — so the fix converged by substance instead: `hashApiKey` now derives its digest via `scrypt` rather than a bare fast hash, with deliberately modest cost parameters since this function runs on every gated request, not once per login. Full account of every collision and every fail-check, including this one: [`docs/DECISIONS.md`](docs/DECISIONS.md) D-151, D-152.
+
+## Three more from that same list: a Horn-clause tier for the schema verifier, expiring tuples wired into the fuzzer, and an out-of-band audit anchor
+
+D-151's own SMT tier explicitly declined on any recursive schema goal, naming a Horn-clause/CHC fixpoint solver as "the real v2 answer." That answer shipped next: `tools/schema-verifier/src/smt/chc.ts` compiles a recursive schema's rewrite rules into Horn clauses and queries `z3-solver`'s real `Fixedpoint` (PDR/Spacer) engine directly. Two real findings surfaced exercising the API directly, not assumed from documentation — every namespace has to share one Z3 `Int` sort rather than a per-namespace uninterpreted one (Spacer's model-based projection needs theory structure an uninterpreted domain doesn't give it), and negation of a registered relation is confirmed non-functional in this build's `Fixedpoint` engine, reproduced across every engine and configuration tried. `exclusion`/`notRelationEquals` are out of this tier's scope by disclosed design because of that second finding, not oversight — the repo's own CI-checked exclusion-reaching invariant is unaffected, still decided by bounded search exactly as before. The real payoff: `schema/example.authz`'s own `folder#sensitive_review`, D-151's own named example of what recursion made it decline on, is now decided exactly (`VIOLATED`, `proof: exact`, a real witness confirmed through the unmodified production engine) — genuinely fail-checked, the same way every tier here is: a 30-level recursive chain exceeding the engine's own depth ceiling produced a wrong `VIOLATED` with the self-verification gate disabled, confirmed, then reverted and kept as a permanent regression test.
+
+D-150 shipped expiring tuples end to end but deliberately never exercised them through the main fuzzer's own random tuple-graph generator, naming the reason: the reference resolver's `now` and Postgres's real `now()` are two independently-timed clock reads, and a fuzz-generated `expiresAt` landing in the gap between them could make the two resolvers disagree for a reason unrelated to a real bug. Closed without synchronizing the two clocks — `generators.ts` marks a fraction of randomly generated tuples `'expired'`/`'valid'` deterministically, with no clock read at all; `runner.ts` captures one `expiryAnchor` per run and writes/backdates real timestamps a measured `EXPIRY_MARGIN_MS` (2 hours, ~600x an actually-measured full-run duration) to either side of it. Fail-checked live by breaking `productionCheck`'s own expiry filter: 3/3 fresh seeds went `unsound` with real nonzero `false_grant` counts, each traced to exactly the class of bug this feature exists to prevent; reverted, 3/3 `sound` again. A real run left 13 of 88 tuples in the random graph carrying `expires_at` — genuinely present, not just wired in theory.
+
+D-148's hash chain catches a single tampered row but disclosed a real limit: a privileged database user can rewrite the whole chain forward, consistently, and the internal walk alone can't tell — because every input that walk trusts, including the chain's own history, lives in the one database that attacker already controls. `src/audit/anchor.ts` and a new `authz audit anchor [--file <path>]` command record the chain's own tip to a local, append-only NDJSON file instead — a new Postgres table was ruled out outright, since the same privileged user could rewrite that too. `authz audit verify --anchor-file <path>` independently re-derives what the chain actually hashes to at each anchored position from what's currently stored and compares it against what was recorded, reporting a distinct `ANCHOR MISMATCH`. **The one honest limit this can't engineer past, stated in the code and repeated every time the CLI runs, not just here:** a local file on the same host provides no real protection on its own — it only closes the gap once an operator replicates it somewhere this same Postgres instance genuinely cannot reach. Fail-checked live, the actual point of the work: recorded a real anchor, performed a genuine full consistent-forward rewrite via raw SQL, and confirmed — as two separately observed facts — that a plain `authz audit verify` reports the rewritten chain fully intact (the real, disclosed gap, proven not assumed) while `--anchor-file` correctly catches it. A real, previously-undiscovered bug turned up along the way: `readChainTip`'s own query cast `chain_seq` to text before sorting by it, sorting lexicographically instead of numerically and silently returning the wrong row as "the tip" past nine chained rows — fixed by dropping the redundant cast.
+
+These three were dispatched as three independent, isolated-worktree agents in one parallel batch; the only collision was the by-now-familiar one — two of the three agents' own `docs/DECISIONS.md` additions both independently chose `D-153`, requiring one renumbered to `D-154` once merged. Full account of all three, including every fail-check: [`docs/DECISIONS.md`](docs/DECISIONS.md) D-153, D-154, D-155.
 
 ## Try it yourself — under 10 minutes, from a clean clone
 
@@ -648,24 +663,25 @@ of this project has.
 
 ## API and CLI
 
-| Command                                                                                | Does                                                                                                                                       |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `authz doctor`                                                                         | Confirm `DATABASE_URL` is reachable, apply migrations, report status                                                                       |
-| `authz schema compile <file>`                                                          | Parse + compile a namespace DSL file                                                                                                       |
-| `authz schema publish <file>`                                                          | Compile and publish a new `namespace_configs` version                                                                                      |
-| `authz schema diff <file>`                                                             | Compare a candidate against each namespace's currently-published version; warns (exit 1) on any change that isn't a provable widen (D-149) |
-| `authz schema rollback <namespace> <version>`                                          | Republish an earlier published version's exact original source as a new version (D-149)                                                    |
-| `authz tuple write <object> <relation> <subject> [--expires-at T]`                     | Write a tuple, prints the returned consistency token; `--expires-at` (ISO-8601) makes it live only until then (D-150)                      |
-| `authz tuple delete <object> <relation> <subject>`                                     | Delete a tuple, prints the returned consistency token                                                                                      |
-| `authz check <subject> <relation> <object> [--at-token T] [--path]`                    | Is `subject` related to `object` via `relation`? `--path` prints the real resolution path (see "What an `allow`..." above)                 |
-| `authz expand <object> <relation>`                                                     | Print the resolved subject tree for `object`#`relation`                                                                                    |
-| `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]` | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr)         |
-| `authz audit verify`                                                                   | Walk the `checks` hash chain; reports every row verified intact or names the exact first tampered row (D-148)                              |
-| `authz audit privesc <object> <relation> [--expected s1,s2,...]`                       | Every real subject currently able to reach a relation/permission, each with its own path; `--expected` flags UNEXPECTED/MISSING drift      |
-| `authz apikey create --role <admin\|readonly> [--scope ns1,ns2] [--expires-at T]`      | Mint a real, DB-backed API key; prints the raw key exactly once (D-152)                                                                    |
-| `authz apikey revoke <id>`                                                             | Revoke a DB-backed API key by id; rejected immediately on every future use (D-152)                                                         |
-| `authz apikey list`                                                                    | List every DB-backed API key (id, name, role, scopes, timestamps) — never a hash or raw key (D-152)                                        |
-| `authz serve`                                                                          | Start the Fastify API server                                                                                                               |
+| Command                                                                                      | Does                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `authz doctor`                                                                               | Confirm `DATABASE_URL` is reachable, apply migrations, report status                                                                                                                                                 |
+| `authz schema compile <file>`                                                                | Parse + compile a namespace DSL file                                                                                                                                                                                 |
+| `authz schema publish <file>`                                                                | Compile and publish a new `namespace_configs` version                                                                                                                                                                |
+| `authz schema diff <file>`                                                                   | Compare a candidate against each namespace's currently-published version; warns (exit 1) on any change that isn't a provable widen (D-149)                                                                           |
+| `authz schema rollback <namespace> <version>`                                                | Republish an earlier published version's exact original source as a new version (D-149)                                                                                                                              |
+| `authz tuple write <object> <relation> <subject> [--expires-at T]`                           | Write a tuple, prints the returned consistency token; `--expires-at` (ISO-8601) makes it live only until then (D-150)                                                                                                |
+| `authz tuple delete <object> <relation> <subject>`                                           | Delete a tuple, prints the returned consistency token                                                                                                                                                                |
+| `authz check <subject> <relation> <object> [--at-token T] [--path]`                          | Is `subject` related to `object` via `relation`? `--path` prints the real resolution path (see "What an `allow`..." above)                                                                                           |
+| `authz expand <object> <relation>`                                                           | Print the resolved subject tree for `object`#`relation`                                                                                                                                                              |
+| `authz soundness run [--queries N] [--seed S] [--format …] [--dry-run] [--progress N]`       | Run the differential fuzz harness, print/store the report (`--dry-run`: leave nothing persisted; `--progress`: progress on stderr)                                                                                   |
+| `authz audit verify [--anchor-file <path>]`                                                  | Walk the `checks` hash chain; reports every row verified intact or names the exact first tampered row (D-148). `--anchor-file` also catches a full, consistent forward rewrite the internal walk alone can't (D-155) |
+| `authz audit anchor [--file <path>]`                                                         | Append one entry recording the checks hash chain's current tip to a local, append-only file (D-155)                                                                                                                  |
+| `authz audit privesc <object> <relation> [--expected s1,s2,...]`                             | Every real subject currently able to reach a relation/permission, each with its own path; `--expected` flags UNEXPECTED/MISSING drift                                                                                |
+| `authz apikey create --role <admin\|readonly> [--scope ns1,ns2] [--expires-at T] [--name L]` | Mint a real, DB-backed API key; prints the raw key exactly once (D-152)                                                                                                                                              |
+| `authz apikey revoke <id>`                                                                   | Revoke a DB-backed API key by id; rejected immediately on every future use (D-152)                                                                                                                                   |
+| `authz apikey list`                                                                          | List every DB-backed API key (id, name, role, scopes, timestamps) — never a hash or raw key (D-152)                                                                                                                  |
+| `authz serve`                                                                                | Start the Fastify API server                                                                                                                                                                                         |
 
 `authz serve` exposes the same operations over HTTP, plus two bulk
 reverse-lookup operations with no CLI command of their own:
@@ -715,17 +731,17 @@ src/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
     production/  the real, SQL-backed check engine, plus the opt-in check-result cache (cache.ts)
   metamorphic/ classifyMonotone()/findFlippableExclusion() — the monotonicity classifier backing test/metamorphic/'s property tests (D-140, D-147)
-  soundness/   the differential-fuzz generator, classifier, runner
-  audit/       expand(), listObjects()/listUsers(), privesc.ts (privilege-escalation scanner, D-152), and the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148)
+  soundness/   the differential-fuzz generator, classifier, runner — including expiring tuples in the random tuple graph (D-154)
+  audit/       expand(), listObjects()/listUsers(), privesc.ts (privilege-escalation scanner, D-152), the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148), and anchor.ts (the out-of-band, append-only tip anchor, D-155)
   report/      markdown/JSON soundness reporters, exit codes, PR-comment logic
   api/         the Fastify server, db-api-keys.ts (DB-backed API-key tier, D-152), openapi-document.ts (GET /openapi.json's own document, D-152), plus the opt-in Redis-backed rate-limit store (redis-store.ts)
-  cli/         the authz CLI — index.ts, plus commands/ (one file per subcommand)
+  cli/         the authz CLI — index.ts, plus commands/ (one file per command group, e.g. schema.ts backs compile/publish/diff/rollback)
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
 scripts/generate-openapi.ts writes docs/openapi.json (D-152)
-tools/schema-verifier/  the static schema verifier — see "A third proof" above; src/smt/ is the z3-backed exact tier for the non-recursive fragment (D-151)
+tools/schema-verifier/  the static schema verifier — see "A third proof" above; src/smt/ is the z3-backed exact tier for the non-recursive fragment (D-151), src/smt/chc.ts the Horn-clause/CHC tier for the recursive fragment (D-153)
 docs/        RELATIONS.md, CONSISTENCY.md, DELIVERY.md, DECISIONS.md, INVARIANTS.md, FINDINGS.md,
-             DST-PROPOSAL.md, github-governance.md, dst-regression-corpus.json, screens/
+             DST-PROPOSAL.md, github-governance.md, dst-regression-corpus.json, openapi.json, screens/
 test/
   isolation/   the inherited, repurposed proof suite — see test/isolation/README.md
   metamorphic/ a fourth proof mechanism — algebraic/invariant properties, no second implementation needed (D-140)

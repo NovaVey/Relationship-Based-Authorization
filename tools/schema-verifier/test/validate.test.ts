@@ -21,7 +21,6 @@ import { checkAndValidate, fuzzHolds, replayWitness } from '../src/validate/inde
 
 const SCHEMA_FIXTURE_DIR = fileURLToPath(new URL('../fixtures/schemas/', import.meta.url));
 const INVARIANT_FIXTURE_DIR = fileURLToPath(new URL('../fixtures/invariants/', import.meta.url));
-const REAL_SCHEMA_DIR = fileURLToPath(new URL('../../../schema/', import.meta.url));
 
 function loadSchema(dir: string, filename: string): CompiledSchema {
   const source = readFileSync(dir + filename, 'utf8');
@@ -115,29 +114,34 @@ describe('checkAndValidate — self-validation runs automatically on every VIOLA
   it('an UNKNOWN verdict gets no self-validation attempt at all', async () => {
     // Written before §7 existed, when checkAndValidate had no fallback for
     // an intersection/exclusion goal and every such goal was UNKNOWN by
-    // construction. §7 now routes this to boundedSearch instead — real
-    // folder-schema growth (viewer | edit) & sensitive_reviewer reaches 25
-    // candidate tuples even at k = 1, over MAX_BOUNDED_CANDIDATES, so this
-    // is still UNKNOWN, but now for a disclosed, bound-specific reason
-    // (see `result.reason`), not because intersection is unhandled — this
-    // fixture is kept as the "still UNKNOWN, still no validation attempt"
-    // regression case for whichever of the two reasons currently applies.
-    const example = loadSchema(REAL_SCHEMA_DIR, 'example.authz');
-    const exampleGraph = buildSchemaGraph(example);
+    // construction. §7 routed this to boundedSearch instead, and — once
+    // `docs/DECISIONS.md`'s entry adding `src/smt/chc.ts` landed — the new
+    // CHC tier now decides a *recursive* intersection goal exactly (see
+    // `test/smt-live-example.test.ts`'s own updated first describe block:
+    // this exact fixture, `schema/example.authz`'s own
+    // `folder#sensitive_review`, is `VIOLATED, proof: exact` now, not
+    // UNKNOWN). This test's own fixture moved to
+    // `fixtures/schemas/sensitive-review-recursive-exclusion.authz`: the
+    // same shape, deliberately sized past `MAX_BOUNDED_CANDIDATES`, but
+    // with the goal reaching an *exclusion* (`viewer | edit) - blocked`)
+    // rather than an intersection — the CHC tier's own disclosed scope
+    // boundary (`src/smt/chc-encode.ts`'s own header comment: Horn-clause
+    // negation is confirmed unusable in this z3-solver build) means it
+    // declines here too, so the verdict genuinely stays UNKNOWN, for a
+    // disclosed, bound-specific reason — the "still UNKNOWN, still no
+    // validation attempt" regression case this test exists to pin.
+    const schema = loadSchema(SCHEMA_FIXTURE_DIR, 'sensitive-review-recursive-exclusion.authz');
+    const graph = buildSchemaGraph(schema);
     const source = [
       'invariant reaches_sensitive_review {',
       '  s: user',
-      '  o: folder',
+      '  o: docx',
       '  goal: sensitive_review(s, o)',
       '}',
     ].join('\n');
     const parsed = parseInvariants(source);
     if (!parsed.ok) throw new Error('fixture invariant failed to parse');
-    const { result, validation } = await checkAndValidate(
-      exampleGraph,
-      example,
-      parsed.invariants[0]!,
-    );
+    const { result, validation } = await checkAndValidate(graph, schema, parsed.invariants[0]!);
     expect(result.verdict).toBe('UNKNOWN');
     expect(result.fragment).toBe('non-monotone');
     expect(result.reason).toContain('candidate');
