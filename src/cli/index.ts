@@ -20,7 +20,7 @@ import { check } from './commands/check.js';
 import { soundnessRun } from './commands/soundness.js';
 import { expandCli } from './commands/expand.js';
 import { serve } from './commands/serve.js';
-import { auditVerify } from './commands/audit.js';
+import { auditVerify, auditAnchor } from './commands/audit.js';
 import { apikeyCreate, apikeyRevoke, apikeyList } from './commands/apikey.js';
 import { privescCli } from './commands/privesc.js';
 
@@ -187,8 +187,28 @@ audit
     "Walk the checks table's hash chain and report either every chained row verified " +
       '(chain intact) or the first row whose stored hash does not match a fresh recomputation',
   )
-  .action(async () => {
-    await auditVerify();
+  .option(
+    '--anchor-file <path>',
+    'also compare against every entry in this out-of-band anchor file (authz audit anchor) — ' +
+      'detects a full, consistent forward chain rewrite the internal walk alone cannot (D-148)',
+  )
+  .action(async (options: { anchorFile?: string }) => {
+    await auditVerify(options);
+  });
+
+audit
+  .command('anchor')
+  .description(
+    "Append one new entry recording the checks hash chain's current tip to a local, " +
+      'append-only file — the out-of-band anchor D-148 names as the fix for a privileged ' +
+      'database user rewriting the chain forward consistently',
+  )
+  .option(
+    '--file <path>',
+    'anchor file to append to (defaults to ./audit-anchor.ndjson in the current working directory)',
+  )
+  .action(async (options: { file?: string }) => {
+    await auditAnchor(options);
   });
 
 // Real, mintable, DB-backed API keys (src/api/db-api-keys.ts) — a third

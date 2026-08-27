@@ -41,6 +41,43 @@
  * thing only when the current need actually depends on it" discipline,
  * already cited by several migrations in this repo). Revisit if a real
  * `checks` table ever grows large enough for this to matter.
+ *
+ * ---
+ *
+ * **`--anchor-file <path>` (closes D-148's own disclosed residual risk —
+ * see `src/audit/anchor.ts`'s own top-of-file doc comment for the full
+ * design).** The internal walk above recomputes every row's hash from
+ * that SAME row's own currently-stored columns and its predecessor's own
+ * currently-stored hash — which is exactly the computation a privileged
+ * attacker performs when rewriting the chain forward, consistently, from
+ * a tampered row. The two agree by construction, so a full consistent
+ * forward rewrite is invisible to the internal walk alone, no matter how
+ * carefully it's written — this is D-148's own stated, honest limit, not
+ * a bug in the walk above. `--anchor-file` closes exactly this gap, and
+ * only this gap: it reads every entry previously recorded by `authz audit
+ * anchor` and, for each one, independently re-derives what the chain
+ * actually hashes to at that exact `chain_seq` position using ONLY
+ * currently-stored data (`verifyAgainstAnchors` below, reusing the exact
+ * per-row `expectedRowHash` this file's own internal walk already
+ * computes) — comparing that fresh recomputation against what was
+ * anchored at the time. A privileged rewrite of any row at or before an
+ * anchored `chain_seq` changes what the chain re-derives to at that
+ * position, so it can never match an anchor recorded before the rewrite
+ * happened, even though the internal walk alone reports the (rewritten)
+ * chain fully intact.
+ *
+ * **Deliberately only ever run when the internal walk itself reports the
+ * chain intact.** If the internal walk already found a broken row (a
+ * single row edited without a cascading forward fix — the shape it CAN
+ * catch on its own), that is already a complete, correctly-attributed
+ * answer; running the anchor comparison on top would either report a
+ * redundant, secondary "also broken" finding or — worse — risk a report
+ * that reads as ambiguous about which finding is real. Keeping the two
+ * failure paths structurally disjoint (the function below returns
+ * immediately on an internal break, before `--anchor-file` is ever
+ * consulted) is what makes "never conflated with a plain
+ * single-row-tamper failure message" true by construction, not just by
+ * careful wording.
  */
 import {
   canonicalJson,
@@ -48,6 +85,12 @@ import {
   GENESIS_PREV_HASH,
   type HashableCheckRow,
 } from '../../audit/checks.js';
+import {
+  DEFAULT_ANCHOR_FILE_PATH,
+  readAnchorFile,
+  recordAnchor,
+  type AnchorEntry,
+} from '../../audit/anchor.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
 
@@ -116,7 +159,100 @@ function printBrokenRow(
   );
 }
 
-export async function auditVerify(): Promise<void> {
+/**
+ * Compares every entry in `anchorFile` against `expectedHashBySeq` — the
+ * per-row `chain_seq -> expectedRowHash` map `auditVerify`'s own internal
+ * walk already built while confirming the chain intact (see this file's
+ * own top-of-file "`--anchor-file`" section for why this is only ever
+ * reached once that walk has already reported no internal break). Prints
+ * either every anchor entry verified or a distinct `ANCHOR MISMATCH`
+ * report and sets `process.exitCode = 1` — never the `TAMPERING DETECTED`
+ * wording the internal walk above uses, so the two failure modes never
+ * read as the same finding.
+ *
+ * Reads the anchor file itself first; a missing/corrupt file is reported
+ * as a malformed-input problem (`process.exitCode = 2`, this project's own
+ * established convention — `index.ts`'s own top-of-file doc comment) since
+ * `--anchor-file` names a specific path the caller asserted exists, not an
+ * infrastructure failure.
+ */
+async function verifyAgainstAnchors(
+  anchorFile: string,
+  expectedHashBySeq: Map<string, string>,
+): Promise<void> {
+  let entries: AnchorEntry[];
+  try {
+    entries = await readAnchorFile(anchorFile);
+  } catch (err) {
+    console.error(`authz audit verify --anchor-file: ${(err as Error).message}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  if (entries.length === 0) {
+    console.log(
+      `authz audit verify: ${anchorFile} contains no anchor entries — nothing to compare ` +
+        "against. Run 'authz audit anchor' to record one.",
+    );
+    return;
+  }
+
+  for (const entry of entries) {
+    const expectedRowHash = expectedHashBySeq.get(entry.chainSeq);
+
+    if (expectedRowHash === undefined) {
+      console.error('authz audit verify: ANCHOR MISMATCH — an anchored row is missing.');
+      console.error('');
+      console.error(
+        `This anchor entry (recorded ${entry.recordedAt}) claims chain_seq ${entry.chainSeq} ` +
+          `had row_hash ${entry.rowHash}, but no chained row exists at that chain_seq in this ` +
+          'database right now. Either that row was deleted, or the chain was truncated and ' +
+          'rebuilt from an earlier point — either way, the chain no longer contains what was ' +
+          'genuinely observed and anchored at that moment.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    if (expectedRowHash !== entry.rowHash) {
+      console.error(
+        'authz audit verify: ANCHOR MISMATCH — the chain was rewritten forward, consistently, ' +
+          'after this anchor was recorded.',
+      );
+      console.error('');
+      console.error(
+        "This is exactly the residual risk D-148's own internal hash-chain walk (above, or on " +
+          'its own with no --anchor-file) CANNOT detect: a privileged database user rewrote ' +
+          "one or more rows at or before this anchor's own chain_seq and recomputed every " +
+          'row_hash/prev_hash forward from there, consistently — so the internal walk alone ' +
+          'reports the chain intact even though it no longer reflects what was genuinely ' +
+          'recorded.',
+      );
+      console.error('');
+      console.error(`  chain_seq:                 ${entry.chainSeq}`);
+      console.error(`  anchor recorded_at:        ${entry.recordedAt}`);
+      console.error(`  anchored row_hash:         ${entry.rowHash}`);
+      console.error(
+        `  currently re-derived hash: ${expectedRowHash} (recomputed from genesis using only ` +
+          "what's stored in this database right now)",
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  console.log(
+    `authz audit verify: ${entries.length}/${entries.length} anchor entries verified against ` +
+      `${anchorFile} — no consistent forward rewrite detected at any anchored position.`,
+  );
+}
+
+export interface AuditVerifyOptions {
+  /** Optional path to an anchor file (`authz audit anchor`, `src/audit/anchor.ts`) — see this file's own top-of-file "`--anchor-file`" section. */
+  anchorFile?: string;
+}
+
+export async function auditVerify(options: AuditVerifyOptions = {}): Promise<void> {
   if (!env.DATABASE_URL) {
     console.error('Postgres: DATABASE_URL is not set — see .env.example.');
     process.exitCode = 3;
@@ -142,9 +278,16 @@ export async function auditVerify(): Promise<void> {
       return;
     }
 
+    // Built alongside the walk below regardless of outcome — the input
+    // `--anchor-file` comparison needs (see this file's own top-of-file
+    // "`--anchor-file`" section). Harmless bookkeeping when no
+    // `--anchor-file` is given: the map is simply never read.
+    const expectedHashBySeq = new Map<string, string>();
+
     let expectedPrevHash = GENESIS_PREV_HASH;
     for (const row of rows) {
       const expectedRowHash = computeCheckRowHash(toHashable(row), expectedPrevHash);
+      expectedHashBySeq.set(row.chain_seq, expectedRowHash);
       if (row.row_hash !== expectedRowHash) {
         console.error('authz audit verify: TAMPERING DETECTED — the chain is broken.');
         console.error('');
@@ -168,6 +311,68 @@ export async function auditVerify(): Promise<void> {
           "excluded from the chain; see that migration's own doc comment.)",
       );
     }
+
+    // Only ever reached once the internal walk above found zero breaks —
+    // see this file's own top-of-file "Deliberately only ever run..."
+    // section for why.
+    if (options.anchorFile !== undefined) {
+      await verifyAgainstAnchors(options.anchorFile, expectedHashBySeq);
+    }
+  } finally {
+    await closePool();
+  }
+}
+
+export interface AuditAnchorOptions {
+  /** Path to append the new anchor entry to — defaults to `DEFAULT_ANCHOR_FILE_PATH` (`src/audit/anchor.ts`). */
+  file?: string;
+}
+
+/**
+ * `authz audit anchor [--file <path>]` — records one new anchor entry (the
+ * `checks` hash chain's current tip) to a local, append-only file. See
+ * `src/audit/anchor.ts`'s own top-of-file doc comment for the full design,
+ * the file format, and — most importantly — the honest disclosure that a
+ * local file alone provides no real security value until an operator
+ * replicates it somewhere this same Postgres instance genuinely cannot
+ * reach. Repeated here, at the point an operator actually runs this
+ * command, not just in a source comment they may never read.
+ */
+export async function auditAnchor(options: AuditAnchorOptions = {}): Promise<void> {
+  if (!env.DATABASE_URL) {
+    console.error('Postgres: DATABASE_URL is not set — see .env.example.');
+    process.exitCode = 3;
+    return;
+  }
+
+  const filePath = options.file ?? DEFAULT_ANCHOR_FILE_PATH;
+  const pool = getPool();
+  try {
+    const entry = await recordAnchor(pool, filePath);
+    if (!entry) {
+      console.log(
+        'authz audit anchor: no chained rows exist yet in checks — nothing to anchor. Run a ' +
+          'real check first (authz check), then anchor again.',
+      );
+      return;
+    }
+
+    console.log(
+      `authz audit anchor: recorded chain_seq=${entry.chainSeq} row_hash=${entry.rowHash} ` +
+        `(${entry.rowCount} chained row(s) total) to ${filePath}`,
+    );
+    console.log('');
+    console.log(
+      'Reminder: this file, on its own, on this same host, provides no protection against a ' +
+        'privileged Postgres user — it must be replicated somewhere this database genuinely ' +
+        'cannot reach (a different host, an external backup pipeline, a git commit to a ' +
+        "separate repository, anything already outside this database's own reach) before it " +
+        'closes the residual risk it exists to close. See src/audit/anchor.ts for the full ' +
+        'design.',
+    );
+  } catch (err) {
+    console.error(`Postgres: ${(err as Error).message}`);
+    process.exitCode = 3;
   } finally {
     await closePool();
   }
