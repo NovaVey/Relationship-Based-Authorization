@@ -51,8 +51,8 @@ export interface SmtTierResult {
 export const SMT_SOLVER_TIMEOUT_MS = 5_000;
 
 let z3Promise: ReturnType<typeof init> | undefined;
-/** Lazily initializes z3's WASM module once per process and reuses it — `init()` itself is the expensive step (loading and instantiating the WASM binary), not creating a `Context` per call, which is cheap. */
-function getZ3(): ReturnType<typeof init> {
+/** Lazily initializes z3's WASM module once per process and reuses it — `init()` itself is the expensive step (loading and instantiating the WASM binary), not creating a `Context` per call, which is cheap. Exported for `./chc.ts` to reuse — the CHC tier needs the identical `init()` result (there is only one WASM module to load, ever, per process), not a second cold-start of the same expensive step. */
+export function getZ3(): ReturnType<typeof init> {
   z3Promise ??= init();
   return z3Promise;
 }

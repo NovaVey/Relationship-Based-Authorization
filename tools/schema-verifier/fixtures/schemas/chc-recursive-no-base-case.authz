@@ -1,0 +1,20 @@
+// A minimal genuine cycle with no base case anywhere — `permission x`'s
+// only rewrite rule is its own self-reference via `parent`, with no
+// direct grant to fall back to. Deliberately pathological, for the CHC
+// tier's own HOLDS-direction unit test (`test/chc.test.ts`,
+// docs/DECISIONS.md, the entry adding `src/smt/chc.ts`): the least
+// fixpoint of a relation nothing ever grounds is empty, for every object
+// — a real, unconditional proof that recursion alone can decide, with
+// genuine cycle termination (not "up to k", not "up to depth d").
+//
+// This exact shape is *also* already decided directly by `checkInvariant`
+// (§5's own exact monotone search, cycle-safe since D-129) — no
+// intersection/exclusion anywhere reachable from the goal — so
+// `checkAndValidate` never actually routes it to this new tier; this
+// fixture's own tests call `tryChcTier` directly instead, the same way
+// `test/smt.test.ts` unit-tests the non-recursive tier's own encoder in
+// isolation rather than only through the full router.
+namespace folderx {
+  relation parent: folderx
+  permission x = parent->x
+}

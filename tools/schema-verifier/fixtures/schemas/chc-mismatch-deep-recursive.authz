@@ -1,0 +1,198 @@
+// SMT CHC-tier self-validation fail-check fixture (docs/DECISIONS.md) --
+// the same class of bug `smt-mismatch-deep-intersection.authz` (D-151)
+// demonstrates for the non-recursive tier, reproduced for the new
+// recursive/CHC tier specifically: a 30-level `next->view` chain, no
+// notion of the real engine's own `CHECK_MAX_DEPTH` (default 25) anywhere
+// in this encoder, PLUS a genuine, deliberately-unused self-loop at the
+// very last level so `isRecursive` is true (this tier's own entry gate)
+// without disturbing the chain's own shallowest-first witness discovery --
+// `self->view` is declared *after* `owner` at level29, so the walker never
+// actually needs it; it exists purely to make the reachable subgraph a
+// genuine cycle. `gate` is a trivial, always-satisfiable intersection
+// operand at level0, matching `smt-mismatch-deep-intersection.authz`'s own
+// precedent -- keeps `view` out of the monotone fragment so
+// `checkAndValidate` actually routes this to the new CHC tier rather than
+// deciding it via the exact monotone search first.
+
+namespace level0 {
+  relation next: level1
+  relation gate: user
+
+  permission view = (next->view) & gate
+}
+
+namespace level1 {
+  relation next: level2
+
+  permission view = next->view
+}
+
+namespace level2 {
+  relation next: level3
+
+  permission view = next->view
+}
+
+namespace level3 {
+  relation next: level4
+
+  permission view = next->view
+}
+
+namespace level4 {
+  relation next: level5
+
+  permission view = next->view
+}
+
+namespace level5 {
+  relation next: level6
+
+  permission view = next->view
+}
+
+namespace level6 {
+  relation next: level7
+
+  permission view = next->view
+}
+
+namespace level7 {
+  relation next: level8
+
+  permission view = next->view
+}
+
+namespace level8 {
+  relation next: level9
+
+  permission view = next->view
+}
+
+namespace level9 {
+  relation next: level10
+
+  permission view = next->view
+}
+
+namespace level10 {
+  relation next: level11
+
+  permission view = next->view
+}
+
+namespace level11 {
+  relation next: level12
+
+  permission view = next->view
+}
+
+namespace level12 {
+  relation next: level13
+
+  permission view = next->view
+}
+
+namespace level13 {
+  relation next: level14
+
+  permission view = next->view
+}
+
+namespace level14 {
+  relation next: level15
+
+  permission view = next->view
+}
+
+namespace level15 {
+  relation next: level16
+
+  permission view = next->view
+}
+
+namespace level16 {
+  relation next: level17
+
+  permission view = next->view
+}
+
+namespace level17 {
+  relation next: level18
+
+  permission view = next->view
+}
+
+namespace level18 {
+  relation next: level19
+
+  permission view = next->view
+}
+
+namespace level19 {
+  relation next: level20
+
+  permission view = next->view
+}
+
+namespace level20 {
+  relation next: level21
+
+  permission view = next->view
+}
+
+namespace level21 {
+  relation next: level22
+
+  permission view = next->view
+}
+
+namespace level22 {
+  relation next: level23
+
+  permission view = next->view
+}
+
+namespace level23 {
+  relation next: level24
+
+  permission view = next->view
+}
+
+namespace level24 {
+  relation next: level25
+
+  permission view = next->view
+}
+
+namespace level25 {
+  relation next: level26
+
+  permission view = next->view
+}
+
+namespace level26 {
+  relation next: level27
+
+  permission view = next->view
+}
+
+namespace level27 {
+  relation next: level28
+
+  permission view = next->view
+}
+
+namespace level28 {
+  relation next: level29
+
+  permission view = next->view
+}
+
+namespace level29 {
+  relation owner: user
+  relation self: level29
+
+  permission view = owner | self->view
+}
+
