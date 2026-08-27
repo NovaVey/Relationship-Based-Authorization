@@ -2550,3 +2550,19 @@ Shipped: a third, optional DB-backed API-key credential tier (`authz apikey crea
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean across the full combined change set (this entry plus D-151). Root fast suite: 68 files, 1015 tests (up from 62/905). Both real-Postgres integration tests this entry touched independently re-run live via LOCALVERIFY and confirmed passing. All 13 CI checks (including CodeQL) green on the final commit before merge.
 
 Full account: `docs/DECISIONS.md` D-152.
+
+## Expiring tuples wired into the main differential-soundness fuzzer, closing D-150's own named residual risk (D-154)
+
+**Owner:** a soundness-engineer agent.
+
+D-150 shipped expiring tuples end to end but deliberately never exercised them through the main fuzzer's own random tuple-graph generator, naming the exact reason: the reference resolver's `now` and the production resolver's real Postgres `now()` are two independently-timed clock reads, and a fuzz-generated `expiresAt` landing in the real (typically single-digit-millisecond) gap between them could make the two resolvers disagree for a reason unrelated to a real bug. Closed without synchronizing the two clocks: `generators.ts` marks a fraction of randomly generated tuples (never the guaranteed cycle or deep chain) `'expired'`/`'valid'`, deterministically, without ever touching a clock; `runner.ts` — the one file in this package that does real I/O — captures a single `expiryAnchor` per run and writes/backdates real timestamps a measured `EXPIRY_MARGIN_MS` (2 hours, ~600x an actually-measured 11.5–12.7s full 5,000-query run) to either side of it, and passes that same anchor to the reference resolver as `now` on every query.
+
+**Fail-checked live, the smaller/more surgical break:** `productionCheck`'s own terminal-tuple-read expiry filter (`fetchTuplesOnFrontier`) temporarily replaced with `where true`. 3/3 fresh seeds, real Postgres (LOCALVERIFY), standard 5,000-query budget: `verdict: unsound`, real nonzero `false_grant` counts (39/66/51), each traced to a `directGrant` reference correctly denied that production wrongly allowed — the exact `false_grant` class this feature exists to prevent. Reverted (`md5sum`-confirmed byte-identical); re-run, 3/3 `sound` again.
+
+**Real, live proof expiring tuples are genuinely present in the random graph, not just wired in theory:** a real run left 13 of 88 tuples carrying `expires_at` (6 valid, 7 expired); the committed, unmodified 5,000-query exit-criterion integration test independently showed 5 of 60, `1/1` passing, `verdict: sound`.
+
+Two pre-existing DB-free tests updated for the new, correct contract (`referenceCheck` now also receives `now`) rather than merely re-passed; two others' fake-`Pool` recognizers extended for the new backdating `UPDATE` statement their fixed seeds happen to draw.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Root fast suite: 68 files, 1015 tests, unchanged counts, all green. Every integration test touching `runSoundnessFuzz`/`generateFixture` (5 files, including the literal 5,000-query exit-criterion test) independently re-run live via LOCALVERIFY, one file at a time (running two together against the shared LOCALVERIFY database produces cross-file row-count contamination a real per-file ephemeral container never would — hit once, correctly diagnosed as a LOCALVERIFY-only artifact, confirmed by re-running the file alone), all passing, each restored to its exact committed form and confirmed byte-clean.
+
+Full account: `docs/DECISIONS.md` D-154.
