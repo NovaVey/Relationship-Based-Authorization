@@ -24,6 +24,14 @@
  * write that really happened, including a dry run's write-then-delete
  * pairs, and leaving it alone is deliberate, not an oversight — see
  * `SoundnessRunOptions.dryRun`'s own doc comment.
+ *
+ * **Expiring tuples (D-153, closing D-150's own named residual risk):**
+ * this file is also the only place that turns `generators.ts`'s
+ * seed-derived `GeneratedTuple.expiryKind` into a real timestamp — see
+ * `EXPIRY_MARGIN_MS`'s own doc comment for the wall-clock-race argument
+ * D-150 originally deferred this over and the measured numbers that settle
+ * it, and `backdateExpiringTuples` for how an 'expired' tuple is produced
+ * for real.
  */
 import type { Pool } from 'pg';
 
@@ -37,7 +45,10 @@ import {
 } from '../schema/publish.js';
 import { writeTuple, deleteTuple, type TupleKey } from '../store/tuples.js';
 import { referenceCheck } from '../resolve/reference/resolver.js';
-import type { ResolutionStep as ReferenceResolutionStep } from '../resolve/reference/resolver.js';
+import type {
+  ResolutionStep as ReferenceResolutionStep,
+  ReferenceTuple,
+} from '../resolve/reference/resolver.js';
 import { productionCheck } from '../resolve/production/resolver.js';
 import type { ResolutionStep as ProductionResolutionStep } from '../resolve/production/resolver.js';
 import { classifyResult, computeVerdict, type SoundnessVerdict } from './classify.js';
@@ -46,6 +57,7 @@ import {
   generateRandomSeed,
   type GeneratedEntityRef,
   type GeneratedQuery,
+  type GeneratedTuple,
 } from './generators.js';
 
 export interface SoundnessRunOptions {
@@ -251,6 +263,47 @@ export interface SoundnessRunResult {
 
 const DEFAULT_TRIGGER: NonNullable<SoundnessRunOptions['trigger']> = 'cli';
 
+/**
+ * D-153, closing D-150's own named residual risk: expiring tuples were
+ * deliberately never exercised by this harness's own random tuple-graph
+ * generator, because the reference resolver's `now` (a plain in-process
+ * parameter, `src/resolve/reference/resolver.ts`) and the production
+ * resolver's real Postgres `now()` (read at that check's own transaction
+ * start, on the database server) are two independently-timed reads of
+ * wall-clock time — D-150's own account puts the real gap between them at
+ * "typically only single-digit milliseconds apart in practice." A
+ * fuzz-generated `expiresAt` landing inside that gap could make the two
+ * resolvers genuinely, non-reproducibly disagree for a reason that has
+ * nothing to do with a real bug.
+ *
+ * The fix here is not to synchronize the two clocks (D-150 already
+ * rejected threading synthetic time into the *production* resolver, and
+ * this task's own instructions reaffirm that) — it's a safety margin wide
+ * enough that realistic execution jitter between the two resolver calls
+ * can never cross it. `runSoundnessFuzz` writes every 'valid' expiring
+ * tuple with a real `expiresAt` of `expiryAnchor + EXPIRY_MARGIN_MS`, and
+ * backdates every 'expired' one to `expiryAnchor - EXPIRY_MARGIN_MS` —
+ * both safely on one side of `expiryAnchor`, which is itself the single
+ * instant captured once, before either happens, and the same instant
+ * passed to the reference resolver as `now` for every query the run makes.
+ *
+ * **The actual margin, measured, not guessed:** a real, local-Postgres,
+ * standard-budget (`SOUNDNESS_FUZZ_QUERIES` = 5,000) `runSoundnessFuzz`
+ * call — the exact check phase this margin has to outlast — completed in
+ * 11.5s and 12.7s across two live runs (`MAX_CONCURRENCY` = 8, the
+ * documented default). `EXPIRY_MARGIN_MS` (2 hours = 7,200,000ms) is
+ * roughly 600x that observed full-run duration — comfortably wide enough
+ * to absorb a CI environment far slower than this measurement, a
+ * `--queries` run scaled up by two or three orders of magnitude, or any
+ * ordinary GC/scheduling jitter, while still being a plain, fixed instant
+ * neither resolver call needs to coordinate on in real time. Both
+ * boundaries are placed relative to `expiryAnchor`, never relative to
+ * "when this specific query happens to run" — exactly the "well in the
+ * past" / "well in the future," never "near the actual comparison moment,"
+ * shape this task's own instructions require.
+ */
+const EXPIRY_MARGIN_MS = 2 * 60 * 60 * 1000;
+
 interface CheckedQuery {
   query: GeneratedQuery;
   referenceAllowed: boolean;
@@ -321,6 +374,18 @@ export function buildDivergenceRecord(input: BuildDivergenceRecordInput): Diverg
  * is exactly what made D-069 bug 1's own `false_grant` shape structurally
  * undetectable by this harness at the standard configuration (D-070); see
  * D-071 for the live-verified fix and numbers.
+ *
+ * `expiryAnchor` (D-153, closing D-150's own named residual risk) is the
+ * single instant `runSoundnessFuzz` captured once, before any expiring
+ * tuple was written or backdated, and passed to `referenceCheck` as `now`
+ * on *every* query below, unconditionally — never `productionCheck`, which
+ * has no such option and must not get one (`ReferenceCheckOptions.now`
+ * exists specifically so *this* resolver can be pinned to test-controlled
+ * time; the production resolver's real SQL reads real Postgres `now()` at
+ * its own transaction start, exactly as D-144/D-150 shipped it, and this
+ * task's own instructions are explicit that this must stay true — see
+ * `EXPIRY_MARGIN_MS` for why a real, unsynchronized few-millisecond gap
+ * between the two never matters).
  */
 async function checkAllQueries(
   pool: Pool,
@@ -329,6 +394,7 @@ async function checkAllQueries(
   queries: readonly GeneratedQuery[],
   concurrency: number,
   maxDepth: number,
+  expiryAnchor: Date,
   onProgress?: (completed: number, total: number) => void,
 ): Promise<CheckedQuery[]> {
   const results: CheckedQuery[] = [];
@@ -342,7 +408,7 @@ async function checkAllQueries(
           query.subject,
           query.object,
           query.relationOrPermission,
-          { maxDepth },
+          { maxDepth, now: expiryAnchor },
         );
         const productionResult = await productionCheck(
           pool,
@@ -399,6 +465,69 @@ async function checkAllQueries(
  * `SoundnessRunOptions.dryRun`'s own doc comment for why that's correct,
  * not an oversight.
  */
+/**
+ * D-153: backdates every already-written `tuples` entry to `pastExpiresAt`
+ * via a raw SQL `UPDATE`, matched by the tuple's own full identity (every
+ * column `relation_tuples`' own unique index covers) — never by
+ * `object_ns`/`object_id`/`relation` alone, since two random tuples can
+ * legitimately share those three and differ only by subject, and this must
+ * only ever touch the one specific row `writeTuple` just wrote for *this*
+ * generated tuple. `subject_relation is not distinct from $7` (not `= $7`)
+ * is required because a plain subject's own `subject_relation` is SQL
+ * `NULL`, and `NULL = NULL` is never true in SQL — the identical reason
+ * `src/resolve/production/resolver.ts`'s own real SQL and every migration
+ * touching this table already use `IS NOT DISTINCT FROM`/`IS NULL OR ...`
+ * instead of bare equality wherever `subject_relation` is compared.
+ *
+ * This is the exact same "simulate real time passing via a raw SQL
+ * UPDATE, since `writeTuple`'s own `validateExpiresAt` rejects writing an
+ * already-past `expiresAt` directly" pattern
+ * `test/unit/resolve/production/expiring-tuples.integration.test.ts`
+ * already established for D-144/D-150 — this function is this file's own,
+ * `runner.ts`-owned copy of that same idea, not a shared import, since
+ * that test file has no exported helper and pulling one in would create
+ * exactly the kind of cross-file coupling between a *test* fixture helper
+ * and *production* runtime code (`runner.ts` ships in `dist/`, the test
+ * file never does) this project avoids elsewhere.
+ *
+ * Deliberately one `UPDATE` per tuple rather than one batched
+ * `= ANY(...)` statement: this only ever runs over the 'expired' subset of
+ * one fixture's randomly generated tuples (`EXPIRING_TUPLE_FRACTION` x
+ * `EXPIRING_TUPLE_EXPIRED_FRACTION` of a few dozen, in practice — see
+ * `generators.ts`), never thousands of rows, so the simplicity of "one
+ * tuple, one statement, one clear failure point" costs nothing measurable
+ * here and matches `cleanupDryRunArtifacts`'s own per-row loop shape
+ * immediately below rather than inventing a second, batched idiom this
+ * file doesn't otherwise use.
+ */
+async function backdateExpiringTuples(
+  pool: Pool,
+  tuples: readonly GeneratedTuple[],
+  pastExpiresAt: Date,
+): Promise<void> {
+  for (const tuple of tuples) {
+    await pool.query(
+      `update relation_tuples
+         set expires_at = $1
+       where object_ns = $2
+         and object_id = $3
+         and relation = $4
+         and subject_ns = $5
+         and subject_id = $6
+         and subject_relation is not distinct from $7`,
+      [
+        pastExpiresAt,
+        tuple.objectNs,
+        tuple.objectId,
+        tuple.relation,
+        tuple.subjectNs,
+        tuple.subjectId,
+        tuple.subjectRelation ?? null,
+      ],
+    );
+  }
+}
+
 async function cleanupDryRunArtifacts(
   pool: Pool,
   artifacts: {
@@ -549,15 +678,67 @@ export async function runSoundnessFuzz(
     }
     publishedForCleanup = published.published;
 
+    // D-153, closing D-150's own named residual risk. Captured once, here,
+    // before any expiring tuple is written or backdated — every real
+    // timestamp this run computes below is relative to this one instant,
+    // and it is the same instant passed to the reference resolver as `now`
+    // for every query the run makes (`checkAllQueries`, below). See
+    // `EXPIRY_MARGIN_MS`'s own doc comment for the full argument.
+    const expiryAnchor = new Date();
+    const expiringWriteExpiresAt = new Date(expiryAnchor.getTime() + EXPIRY_MARGIN_MS);
+    const expiredBackdateExpiresAt = new Date(expiryAnchor.getTime() - EXPIRY_MARGIN_MS);
+
     for (const tuple of fixture.tuples) {
-      const writeResult = await writeTuple(pool, tuple);
+      const writeKey: TupleKey = {
+        objectNs: tuple.objectNs,
+        objectId: tuple.objectId,
+        relation: tuple.relation,
+        subjectNs: tuple.subjectNs,
+        subjectId: tuple.subjectId,
+        ...(tuple.subjectRelation !== undefined ? { subjectRelation: tuple.subjectRelation } : {}),
+        // D-153: both 'valid' and 'expired' tuples are first written with
+        // one, identical, genuinely-future `expiresAt` —
+        // `validateExpiresAt` (`src/store/tuples.ts`) rejects writing
+        // anything else directly. An 'expired' tuple is backdated to a
+        // real past timestamp immediately below, exactly the same
+        // simulate-real-time-passing pattern
+        // `expiring-tuples.integration.test.ts` already established for
+        // D-144/D-150.
+        ...(tuple.expiryKind !== undefined ? { expiresAt: expiringWriteExpiresAt } : {}),
+      };
+      const writeResult = await writeTuple(pool, writeKey);
       if (!writeResult.ok) {
         throw new SoundnessFixtureError(
           `soundness run (seed=${seed}): failed to write a generated tuple ` +
-            `${JSON.stringify(tuple)}: ${JSON.stringify(writeResult.errors)}`,
+            `${JSON.stringify(writeKey)}: ${JSON.stringify(writeResult.errors)}`,
         );
       }
     }
+
+    const expiredTuples = fixture.tuples.filter((tuple) => tuple.expiryKind === 'expired');
+    if (expiredTuples.length > 0) {
+      await backdateExpiringTuples(pool, expiredTuples, expiredBackdateExpiresAt);
+    }
+
+    // D-153: the reference resolver's own tuple array. Same identity data
+    // as `fixture.tuples` (the shape `writeTuple`/`deleteTuple` need), but
+    // with a real `expiresAt` computed for exactly the two boundaries the
+    // real writes above actually produced — never re-deriving expiry
+    // classification any other way, so this can never independently drift
+    // from what real Postgres now genuinely holds for the same tuples.
+    // Built fresh here rather than mutating `fixture.tuples` in place,
+    // preserving `generators.ts`'s own "this file never computes an actual
+    // timestamp" purity guarantee for its return value.
+    const referenceTuples: ReferenceTuple[] = fixture.tuples.map((tuple) => ({
+      objectNs: tuple.objectNs,
+      objectId: tuple.objectId,
+      relation: tuple.relation,
+      subjectNs: tuple.subjectNs,
+      subjectId: tuple.subjectId,
+      ...(tuple.subjectRelation !== undefined ? { subjectRelation: tuple.subjectRelation } : {}),
+      ...(tuple.expiryKind === 'valid' ? { expiresAt: expiringWriteExpiresAt } : {}),
+      ...(tuple.expiryKind === 'expired' ? { expiresAt: expiredBackdateExpiresAt } : {}),
+    }));
 
     const criticalNamespaces = new Set(
       fixture.namespaces
@@ -569,10 +750,11 @@ export async function runSoundnessFuzz(
     const checked = await checkAllQueries(
       pool,
       schema,
-      fixture.tuples,
+      referenceTuples,
       fixture.queries,
       concurrency,
       effectiveMaxDepth,
+      expiryAnchor,
       options.onProgress,
     );
 

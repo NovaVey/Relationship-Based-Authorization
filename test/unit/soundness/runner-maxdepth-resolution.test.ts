@@ -70,6 +70,13 @@ function fakePool(): Pool {
       if (typeof sql === 'string' && sql.includes('insert into soundness_runs')) {
         return { rows: [{ id: 'maxdepth-resolution-run-id' }] };
       }
+      // D-153: backdating an 'expired' generated tuple (`backdateExpiringTuples`,
+      // `src/soundness/runner.ts`) — this test's own fixed seed can draw one or
+      // more, and this file's assertions are about `maxDepth`/`now`
+      // resolution, not expiry, so this is recognized and trivially resolved.
+      if (typeof sql === 'string' && sql.includes('update relation_tuples')) {
+        return { rows: [] };
+      }
       throw new Error(`fakePool: unexpected query: ${sql}`);
     }),
   } as unknown as Pool;
@@ -94,10 +101,21 @@ describe('runSoundnessFuzz resolves one effective maxDepth and passes it explici
       const options = call[4];
       expect(options).toEqual({ maxDepth: env.CHECK_MAX_DEPTH });
     }
-    for (const call of referenceSpy.mock.calls) {
+    // D-153: `referenceCheck` is now also called with `now` (the run's own
+    // `expiryAnchor`) on every query — `productionCheck` deliberately never
+    // gets this option at all (see `checkAllQueries`'s own doc comment on
+    // why: its real SQL reads real Postgres `now()`, unmodified). `maxDepth`
+    // is still checked for the exact literal value D-071 already
+    // established; `now` is checked for shape (`instanceof Date`) and for
+    // being the *same* single instant on every call — this task's own
+    // "a single anchor instant captured once per comparison" property.
+    const referenceNows = referenceSpy.mock.calls.map((call) => {
       const options = call[5];
-      expect(options).toEqual({ maxDepth: env.CHECK_MAX_DEPTH });
-    }
+      expect(options?.maxDepth).toBe(env.CHECK_MAX_DEPTH);
+      expect(options?.now).toBeInstanceOf(Date);
+      return options?.now?.getTime();
+    });
+    expect(new Set(referenceNows).size).toBe(1);
   });
 
   it('options.maxDepth explicitly set: both resolvers are called with that exact value uniformly, overriding env.CHECK_MAX_DEPTH — the pre-existing override contract is unchanged', async () => {
@@ -121,8 +139,14 @@ describe('runSoundnessFuzz resolves one effective maxDepth and passes it explici
     for (const call of productionSpy.mock.calls) {
       expect(call[4]).toEqual({ maxDepth: explicitMaxDepth });
     }
-    for (const call of referenceSpy.mock.calls) {
-      expect(call[5]).toEqual({ maxDepth: explicitMaxDepth });
-    }
+    // See the sibling test above for why `now` is checked separately from
+    // `maxDepth` here (D-153).
+    const referenceNows = referenceSpy.mock.calls.map((call) => {
+      const options = call[5];
+      expect(options?.maxDepth).toBe(explicitMaxDepth);
+      expect(options?.now).toBeInstanceOf(Date);
+      return options?.now?.getTime();
+    });
+    expect(new Set(referenceNows).size).toBe(1);
   });
 });

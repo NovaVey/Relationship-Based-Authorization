@@ -62,6 +62,16 @@
  * unrelated runs' tuples can never cause cross-run leakage (queries are
  * always anchored to a specific, run-unique object). See
  * `docs/DECISIONS.md`.
+ *
+ * **Expiring tuples (D-153, closing D-150's own named residual risk):**
+ * this file decides *which* randomly generated tuples get an expiry and
+ * *which kind* (`GeneratedTuple.expiryKind` — `'expired'` or `'valid'`),
+ * deterministically from `seed` like everything else here. It deliberately
+ * never computes an actual timestamp — see `GeneratedTuple.expiryKind`'s
+ * own doc comment for why that's `runner.ts`'s job (the only place in this
+ * package that touches a real clock or Postgres), and `runner.ts`'s own
+ * `EXPIRY_MARGIN_MS` for the wall-clock-race argument D-150 originally
+ * deferred this over, and the measured-latency numbers that settle it.
  */
 import { randomUUID } from 'node:crypto';
 import { integer, sample } from 'fast-check';
@@ -89,6 +99,23 @@ export interface GeneratedEntityRef {
  * resolver. `runner.ts` passes these values directly to `writeTuple` and
  * `referenceCheck` — structurally compatible, never re-mapped.
  */
+/**
+ * `'expired'` or `'valid'` (D-153, closing D-150's own named residual
+ * risk). This file never computes an actual timestamp for either — see
+ * this interface's own `expiryKind` doc comment and `runner.ts`'s
+ * `EXPIRY_MARGIN_MS` for why: an absolute `Date` computed here, at
+ * generation time, would depend on wall-clock time and break this file's
+ * own "byte-identical for a given seed" determinism guarantee (this file's
+ * own top-of-file doc comment), and would also be the wrong layer to own
+ * the actual expiry-boundary safety margin, which is fundamentally about
+ * *when checks run*, not *when the fixture is generated* — `runner.ts`,
+ * which already owns all real I/O and timing for this package (this
+ * file's own top-of-file doc comment: "This file has zero knowledge of
+ * Postgres, the reference resolver, or the production resolver"), is where
+ * that belongs.
+ */
+export type ExpiringTupleKind = 'expired' | 'valid';
+
 export interface GeneratedTuple {
   objectNs: string;
   objectId: string;
@@ -97,6 +124,27 @@ export interface GeneratedTuple {
   subjectId: string;
   /** Present only for a userset subject (`group:eng#member`). */
   subjectRelation?: string;
+  /**
+   * D-153: undefined (by far the common case, preserving this generator's
+   * pre-existing distribution) means this tuple never expires — the same
+   * "no expiry" tuples this generator has always produced. `'valid'` means
+   * `runner.ts` should write it with a real, genuinely-future `expiresAt`
+   * safely past the entire run's own comparison window (never actually
+   * expiring during this run). `'expired'` means `runner.ts` should write
+   * it with a real, genuinely-future `expiresAt` (required by
+   * `validateExpiresAt` — a tuple cannot be written already expired, see
+   * `src/store/tuples.ts`), then immediately, via a raw SQL `UPDATE`
+   * (exactly `test/unit/resolve/production/expiring-tuples.integration
+   * .test.ts`'s own established simulate-real-time-passing pattern),
+   * backdate it to a real timestamp safely *before* the run's own
+   * comparison window — so it is genuinely, unambiguously expired for the
+   * entire duration both resolvers are actually queried. This file only
+   * ever decides *which* random tuples get which kind, deterministically
+   * from `seed` — it never touches a clock. See `runner.ts`'s own
+   * `EXPIRY_MARGIN_MS` for the actual timestamp arithmetic and the
+   * measured-latency argument for why the margin is safe.
+   */
+  expiryKind?: ExpiringTupleKind;
 }
 
 /** One generated (subject, relation-or-permission, object) query to check. */
@@ -360,6 +408,26 @@ const OBJECTS_PER_NAMESPACE_MIN = 3;
 const OBJECTS_PER_NAMESPACE_MAX = 6;
 const USER_COUNT_MIN = 6;
 const USER_COUNT_MAX = 12;
+
+/**
+ * D-153, closing D-150's own named residual risk ("this feature's
+ * correctness has never been exercised by the main differential-soundness
+ * fuzzer's own random tuple-graph generator, deliberately, to avoid a
+ * wall-clock race..."). The fraction of *randomly generated* tuples (never
+ * the hand-derived guaranteed cycle or deep-chain tuples — see
+ * `randomTupleStartIndex` below) that carry an expiry at all. Of those,
+ * `EXPIRING_TUPLE_EXPIRED_FRACTION` further splits roughly half into
+ * already-expired, half into still-valid — matching this task's own
+ * "roughly half of those" wording. 0.2 is deliberately modest: high enough
+ * that a standard 5,000-query run's own tuple graph (tens of randomly
+ * assigned tuples per run, see `assignRandomTuples`) reliably contains
+ * several of each kind every run (never "got lucky this seed"), low enough
+ * to preserve "today's existing distribution otherwise" as the literal
+ * common case — most tuples still never expire, exactly as before this
+ * entry.
+ */
+const EXPIRING_TUPLE_FRACTION = 0.2;
+const EXPIRING_TUPLE_EXPIRED_FRACTION = 0.5;
 
 /**
  * The guaranteed deep chain (D-070, see `docs/DECISIONS.md`) — sizing
@@ -1120,6 +1188,16 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
     subjectId: cycleWitnessUser,
   });
 
+  // D-153: everything pushed onto `tuples` from here on is a *randomly
+  // generated* edge (`assignRandomTuples`, below) — the guaranteed cycle
+  // (3 tuples, just above) and the guaranteed deep chain (`deepChain`,
+  // built earlier) are both already in `tuples` by this point. Capturing
+  // the boundary here, rather than re-deriving "is this tuple random" some
+  // other way afterward, is what lets the expiry-marking pass below apply
+  // only to the random subset without perturbing either hand-derived
+  // construct's own exact, depended-upon shape.
+  const randomTupleStartIndex = tuples.length;
+
   for (const ns of namespaceOrder) {
     const nsConfig = requireDefined(
       schema.namespaces[ns],
@@ -1139,6 +1217,19 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
         assignRandomTuples(rng, addTuple, object, relation, objectsByNs, userIds);
       }
     }
+  }
+
+  // --- expiring tuples (D-153, closing D-150's own named residual risk) --
+  // Only the randomly generated subset (`randomTupleStartIndex` onward —
+  // never the guaranteed cycle or the guaranteed deep chain, both already
+  // in `tuples` before this index) is eligible. This assigns *which kind*
+  // each eligible tuple gets, deterministically from `rng`; it never
+  // computes an actual `Date` — see `GeneratedTuple.expiryKind`'s own doc
+  // comment for why that's `runner.ts`'s job, not this file's.
+  for (let i = randomTupleStartIndex; i < tuples.length; i += 1) {
+    if (!rng.nextBoolean(EXPIRING_TUPLE_FRACTION)) continue;
+    const tuple = requireDefined(tuples[i], 'generator: expiry-marking index out of range');
+    tuple.expiryKind = rng.nextBoolean(EXPIRING_TUPLE_EXPIRED_FRACTION) ? 'expired' : 'valid';
   }
 
   // --- queries --------------------------------------------------------
