@@ -132,7 +132,11 @@
  * shares code with `src/resolve/reference/`, and D-022's own rule was
  * never about how *this* file talks to Postgres.
  */
-import type { ConnectionSource, QueryExecutor } from '../../store/query-executor.js';
+import type {
+  ConnectionSource,
+  QueryExecutor,
+  QueryResultLike,
+} from '../../store/query-executor.js';
 
 import { env } from '../../config/env.js';
 import type { NamespaceConfig, RewriteRule } from '../../schema/dsl/types.js';
@@ -1181,10 +1185,17 @@ async function sqlRelationMembershipWithWitness(
  * "a real, testable assertion rather than an assumption" — `docs/
  * CONSISTENCY.md`'s own words for `assertTokenObserved` itself.
  */
+/**
+ * The exact SQL text `assertTokenObservedOnSnapshot` issues — pulled out as
+ * a named constant purely so `guardPinnedClientForSnapshotAnchor` below can
+ * recognize the anchor query by exact identity, not some fuzzier heuristic
+ * (a substring match, a comment tag, ...). Both live in this one file, so
+ * this is a plain same-file constant, not a shared abstraction.
+ */
+const ANCHOR_QUERY_TEXT = 'select max(token) as max_token from write_log';
+
 async function assertTokenObservedOnSnapshot(client: QueryExecutor, token: number): Promise<void> {
-  const { rows } = await client.query<{ max_token: string | null }>(
-    'select max(token) as max_token from write_log',
-  );
+  const { rows } = await client.query<{ max_token: string | null }>(ANCHOR_QUERY_TEXT);
   const raw = rows[0]?.max_token;
   const observed = raw === null || raw === undefined ? null : Number(raw);
   if (observed === null || token > observed) {
@@ -1193,6 +1204,87 @@ async function assertTokenObservedOnSnapshot(client: QueryExecutor, token: numbe
         `snapshot (highest token visible to this snapshot: ${observed ?? 'none — no writes yet'})`,
     );
   }
+}
+
+/**
+ * A real, runtime-enforced version of the ordering `assertTokenObservedOnSnapshot`'s
+ * own doc comment above depends on but, until now, only enforced by code
+ * structure — disclosed as a genuine, still-open gap in `docs/DECISIONS.md`
+ * D-139 ("a pg-side runtime check enforcing that `productionCheck`'s
+ * snapshot-anchoring query always runs first ... was applied only to the
+ * in-memory fake [`src/store/dst/connection.ts`'s `TxState.Snapshot`
+ * handling], never to the real `resolver.ts`"). This closes that gap.
+ *
+ * Wraps `productionCheck`'s pinned client, for the whole lifetime of one
+ * check, so that whenever `atToken` is set, the first non-transaction-
+ * control query Postgres actually sees on this connection must genuinely BE
+ * `assertTokenObservedOnSnapshot`'s own query (`ANCHOR_QUERY_TEXT`) — not
+ * "called first in this file's source text," but "the first statement this
+ * physical connection executes after `BEGIN`," which is the only thing that
+ * actually determines where `REPEATABLE READ`'s snapshot anchors. Any other
+ * query attempted first throws immediately, naming the offending SQL — an
+ * internal-invariant violation (a future accidental reordering inside this
+ * file, e.g. some new read added ahead of the anchor check), never
+ * something a `productionCheck` caller's own arguments could trigger, so
+ * this is deliberately not a "fails closed" / `disproof`-shaped outcome:
+ * it throws, the same way a genuinely unreachable database throws (see
+ * `productionCheck`'s own doc comment on that distinction).
+ *
+ * `BEGIN`/`COMMIT`/`ROLLBACK` are recognized by exact text match against the
+ * three literals `productionCheck` itself issues on this same client
+ * (nothing fuzzier — this wrapper only ever needs to recognize this one
+ * file's own three control statements, not "is this SQL transaction
+ * control" in general) and never count toward "has a query run yet."
+ *
+ * Only constructed when `atToken !== undefined` (see `productionCheck`
+ * below): with no token to pin there is no snapshot-anchor requirement to
+ * enforce, and the un-pinned path gets back the exact same `client`
+ * reference, not even a passthrough object — zero added overhead, per this
+ * project's own "build a thing only when the current need actually depends
+ * on it" discipline.
+ *
+ * Deliberately minimal, single-purpose machinery, not a general
+ * "instrumented connection" abstraction, and never shared with
+ * `src/resolve/reference/resolver.ts` (which has no Postgres snapshot to
+ * anchor in the first place, so this concept doesn't even apply there).
+ *
+ * Exported *only* so `test/unit/resolve/production/snapshot-anchor-
+ * invariant.test.ts` (DB-free, unit-level) can exercise the violation path
+ * directly against a hand-written fake `QueryExecutor` — `productionCheck`
+ * itself always calls this in the one order that keeps the invariant
+ * satisfied; this wrapper exists to catch a future *accidental* reordering,
+ * not because normal operation could ever trip it today. Matches this
+ * file's own established precedent for `fetchReachableFrontier`/
+ * `dedupeFrontier`/`FrontierRow` (exported for direct test access to the
+ * real mechanism, not a hand-copied stand-in).
+ */
+export function guardPinnedClientForSnapshotAnchor(client: QueryExecutor): QueryExecutor {
+  let firstNonControlQueryText: string | null = null;
+  return {
+    async query<Row = Record<string, unknown>>(
+      text: string,
+      params?: readonly unknown[],
+    ): Promise<QueryResultLike<Row>> {
+      const isTransactionControl =
+        text === 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' ||
+        text === 'COMMIT' ||
+        text === 'ROLLBACK';
+      if (!isTransactionControl && firstNonControlQueryText === null) {
+        firstNonControlQueryText = text;
+        if (text !== ANCHOR_QUERY_TEXT) {
+          throw new Error(
+            "internal invariant violation: a query ran on productionCheck's pinned " +
+              'REPEATABLE READ connection before assertTokenObservedOnSnapshot (the ' +
+              'snapshot-anchoring check) — this should never happen. Postgres anchors a ' +
+              "REPEATABLE READ snapshot at the transaction's first query, not at BEGIN, so " +
+              'assertTokenObservedOnSnapshot must always be the first non-transaction-control ' +
+              `query issued on this connection whenever atToken is set. Offending query: ${text}`,
+          );
+        }
+      }
+      return client.query<Row>(text, params);
+    },
+  };
 }
 
 /**
@@ -1284,20 +1376,26 @@ export async function productionCheck(
   const touchedExpiringTuple = { value: false };
 
   const client = await pool.connect();
+  // Wrapped at acquisition, before this connection's very first query, so
+  // the guard sees literally everything issued on it — see
+  // `guardPinnedClientForSnapshotAnchor`'s own doc comment. Only wrapped
+  // when there's an `atToken` anchor requirement to enforce; the unpinned
+  // path keeps the exact same `client` reference, zero added overhead.
+  const guardedClient = atToken !== undefined ? guardPinnedClientForSnapshotAnchor(client) : client;
   try {
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await guardedClient.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     if (atToken !== undefined) {
-      await assertTokenObservedOnSnapshot(client, atToken);
+      await assertTokenObservedOnSnapshot(guardedClient, atToken);
     }
     const ctx: WalkContext = {
-      client,
+      client: guardedClient,
       maxDepth,
       schemaCache: new Map(),
       depthReached,
       touchedExpiringTuple,
     };
     const outcome = await resolve(ctx, subject, object, relationOrPermission, new Set(), 0);
-    await client.query('COMMIT');
+    await guardedClient.query('COMMIT');
     return outcome.allowed
       ? {
           allowed: true,
@@ -1323,7 +1421,7 @@ export async function productionCheck(
     // of whatever actually made the check fail, at exactly the moment the
     // real cause matters most.
     try {
-      await client.query('ROLLBACK');
+      await guardedClient.query('ROLLBACK');
     } catch {
       // Swallowed deliberately — see comment above. Postgres releases the
       // connection (and anything it held) on its own once it's actually
