@@ -545,6 +545,34 @@ export interface BuildServerOptions {
    * mirrors this interface's own `logger` override precedent above.
    */
   authFloodStateMaxEntries?: number;
+
+  /**
+   * Test-only observer for every route this call actually registers on
+   * `app`, fired once per `{method, path}` with Fastify's own real,
+   * synchronous `onRoute` hook (D-156) — never a second, hand-maintained
+   * route list. Omitted (the default, `undefined`) preserves production
+   * behavior exactly: `serve.ts` never passes this, so a real `authz serve`
+   * registers no extra hook and pays no extra cost.
+   *
+   * Wired as literally the first hook added to `app` below, before
+   * `app.register(rateLimit, ...)` and before any `app.get`/`app.post`/
+   * `app.delete` call in this function's own body — an `onRoute` hook only
+   * fires for a route declared *after* it was added (confirmed live: a hook
+   * added after this function's route declarations never sees any of them),
+   * so this is the one position in `buildServer` that is guaranteed to
+   * observe every route this call registers, with nothing missed.
+   *
+   * Exists so `test/unit/api/openapi.test.ts` can assert the live route
+   * table `buildServer` actually produced — not a second hand-maintained
+   * list of routes masquerading as one — against what `buildOpenApiDocument()`
+   * claims to document, closing the one gap that module's own top-of-file
+   * doc comment discloses ("cannot catch a *new* route this file was never
+   * told about"). Fires for Fastify's own auto-generated `HEAD` shadow route
+   * on every `GET` route too (`exposeHeadRoutes`, on by default and never
+   * overridden here) — that test's own job to filter, by an explicit
+   * allowlist, not this function's.
+   */
+  onRouteRegistered?: (route: { method: string; path: string }) => void;
 }
 
 /**
@@ -617,6 +645,27 @@ export async function buildServer(
     trustProxy: trustExactlyOneRealProxyHop,
     bodyLimit: 262_144,
   });
+
+  // `options.onRouteRegistered` (D-156) — added as the very first hook on
+  // `app`, before anything else in this function touches it, so it observes
+  // every route declared below with nothing missed. See that option's own
+  // doc comment (`BuildServerOptions`) for why position matters here and why
+  // this is a no-op in production.
+  if (options.onRouteRegistered) {
+    const observe = options.onRouteRegistered;
+    app.addHook('onRoute', (routeOptions) => {
+      // `routeOptions.method` is `HTTPMethods | HTTPMethods[]` — every route
+      // this file registers passes a single method, but a plain
+      // `Array.isArray` guard costs nothing and keeps this correct even if
+      // that ever changes, rather than assuming the single-string shape.
+      const methods = Array.isArray(routeOptions.method)
+        ? routeOptions.method
+        : [routeOptions.method];
+      for (const method of methods) {
+        observe({ method, path: routeOptions.url });
+      }
+    });
+  }
 
   // The default for `request.authScopes` (this file's own top-of-file
   // module augmentation) — `null` (unscoped), matching what an ungated

@@ -818,13 +818,14 @@ const API_VERSION = '0.1.0';
  * (`src/api/server.ts`) can both call it and get byte-for-byte the same
  * result every time.
  */
-// As of this writing, `src/api/server.ts` has no `POST /check/batch` route
-// (checked directly against that file's current content, not assumed) —
-// so it has no entry below. If/when that route (or any other new route) is
-// added to `server.ts`, add a matching operation builder and `paths` entry
-// here by hand at the same time; see this file's own top-of-file
-// "Disclosed, not automatic" note for why nothing catches that
-// automatically.
+// `POST /check/batch` (checked directly against `src/api/server.ts`'s
+// current content, not assumed) has an entry below — see
+// `checkBatchOperation()` above and its own `paths` entry below. If/when a
+// new route is added to `server.ts`, add a matching operation builder and
+// `paths` entry here by hand at the same time; see this file's own
+// top-of-file "Disclosed, not automatic" note for why nothing catches that
+// automatically, and `test/unit/api/openapi.test.ts`'s live-route-table
+// comparison (D-156) for the closest thing this has to a backstop.
 export function buildOpenApiDocument(): OpenApiDocument {
   return {
     openapi: '3.0.3',
