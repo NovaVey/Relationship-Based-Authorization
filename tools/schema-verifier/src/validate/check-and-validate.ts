@@ -31,23 +31,32 @@ import type { Invariant } from '../invariants/types.js';
 import { checkInvariant, scanReachability } from '../reachability/index.js';
 import type { CheckResult } from '../reachability/types.js';
 import type { SchemaGraph } from '../ir/types.js';
+import { tryChcTier } from '../smt/chc.js';
 import { trySmtTier } from '../smt/index.js';
 import { fuzzHolds, type FuzzHoldsOptions } from './fuzz.js';
 import { replayWitness } from './replay.js';
 import type { ValidationOutcome } from './types.js';
 
-// New tier (`../smt/index.ts`) — not part of the build spec's own five
-// phases; see `docs/DECISIONS.md` for the SMT sketch this closes part of.
-// Tried after `checkInvariant` and its short-circuits leave `UNKNOWN` on a
-// structurally non-monotone schema, before falling back to bounded search.
-// Applies only to a non-recursive goal (the sketch's own named obstacle)
-// and only ever returns a decisive verdict once its own reconstructed
-// witness has been independently confirmed against the real engine, for
-// `VIOLATED` — see that module's own header comment for the exact three
-// outcomes. `undefined` from it means "this tier does not apply," and
-// `checkAndValidate` falls through to bounded search exactly as it did
-// before this tier existed — the bounded-search branch itself is
-// untouched.
+// Two new tiers, neither part of the build spec's own five phases; see
+// `docs/DECISIONS.md` for the SMT sketch these close, in two parts. Both
+// tried after `checkInvariant` and its short-circuits leave `UNKNOWN` on a
+// structurally non-monotone schema, before falling back to bounded search,
+// and both only ever return a decisive verdict once their own
+// reconstructed witness has been independently confirmed against the real
+// engine, for `VIOLATED` — see each module's own header comment for the
+// exact three outcomes. `undefined` from either means "this tier does not
+// apply," and `checkAndValidate` falls through to the next one (and
+// ultimately to bounded search) exactly as if that tier didn't exist.
+//   1. `../smt/index.ts`'s `trySmtTier` — the non-recursive fragment,
+//      exact.
+//   2. `../smt/chc.ts`'s `tryChcTier` — the recursive fragment `trySmtTier`
+//      itself declines on, decided instead via a genuine Horn-clause/CHC
+//      encoding and Z3's own PDR/Spacer fixpoint engine. Mutually
+//      exclusive with `trySmtTier` by construction (gated on
+//      `isRecursive`, one way or the other), and with its own further,
+//      disclosed scope boundary (no exclusion, no `notRelationEquals` —
+//      see that module's own header comment for why).
+// The bounded-search branch itself is untouched by either.
 
 export interface CheckAndValidateOptions {
   readonly fuzz?: FuzzHoldsOptions;
@@ -95,12 +104,33 @@ export async function checkAndValidate(
 
   // scan.fragment === 'non-monotone' and checkInvariant itself couldn't
   // decide — the exact search genuinely reached an intersection/exclusion
-  // edge neither short-circuit above could resolve. Try the new SMT tier
-  // next (non-recursive goals only, self-validated internally before it
-  // ever returns a decisive verdict — see `../smt/index.ts`); only if it
-  // doesn't apply does this fall back to §7's bounded search, unchanged.
+  // edge neither short-circuit above could resolve. Try the non-recursive
+  // SMT tier next (self-validated internally before it ever returns a
+  // decisive verdict — see `../smt/index.ts`); it declines outright the
+  // moment the goal is recursive, which is exactly the fragment the CHC
+  // tier below picks up instead — the two are mutually exclusive by
+  // construction (`../smt/recursion.ts`'s own `isRecursive` gates one in
+  // and the other out), so trying them in either order would decide the
+  // same set of goals; this order costs nothing extra since a `undefined`
+  // from either is cheap (`isRecursive` alone, no solver call) compared to
+  // the case that actually applies.
   const smt = await trySmtTier(graph, schema, invariant, options?.fuzz);
   if (smt !== undefined) return smt;
+
+  // The CHC tier (`../smt/chc.ts`) — the recursive counterpart to the
+  // tier just above, closing the gap D-151 (`docs/DECISIONS.md`) left
+  // open: a genuinely recursive goal (`isRecursive` true) is compiled
+  // into Horn clauses and decided via Z3's own PDR/Spacer fixpoint
+  // engine instead of declining outright. Same self-validation discipline
+  // as every tier above it — a `VIOLATED` verdict is never reported until
+  // its own reconstructed witness independently replays against the real,
+  // unmodified engine (see that module's own header comment for its own
+  // disclosed scope boundary: no exclusion, no `notRelationEquals` —
+  // Horn-clause negation is confirmed unusable in this z3-solver build).
+  // `undefined` from it falls through to bounded search exactly as if
+  // this tier didn't exist either.
+  const chc = await tryChcTier(graph, schema, invariant, options?.fuzz);
+  if (chc !== undefined) return chc;
 
   const k = options?.bound ?? 1;
   const candidates = generateCandidateTuples(schema, scan.relations, invariant, k);

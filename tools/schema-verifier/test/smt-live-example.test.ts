@@ -6,28 +6,35 @@
  * worked example of a real goal reaching 25 candidates at k = 1, over
  * `MAX_BOUNDED_CANDIDATES`, previously refused with `UNKNOWN`.
  *
- * **A real, disclosed finding, checked directly rather than assumed:**
+ * **A real, disclosed finding, checked directly rather than assumed —
+ * true when this file was first written, and still exactly correct as a
+ * historical account, but no longer the end of the story.**
  * `folder#sensitive_review`'s own reachable subgraph turns out to be
  * genuinely recursive — `edit = editor | owner | parent->edit` is
  * self-referential (`parent->edit` targets `folder#edit` again, a real
  * back-edge, confirmed by `../src/smt/recursion.ts` against the actual
  * built graph — see `test/smt-recursion.test.ts`), and `viewer`/
  * `sensitive_reviewer` are each declared `user | group#member`, itself
- * self-referential via nested group membership. Per this tier's own
- * explicit, non-negotiable scope (recursion is the sketch's own named,
- * out-of-scope obstacle), the SMT tier correctly declines on this exact
- * goal and this exact invariant continues to report `UNKNOWN`, unchanged
- * from before this tier existed — the first test below confirms that
- * directly, rather than silently working around it.
+ * self-referential via nested group membership. The non-recursive SMT
+ * tier (`../src/smt/index.ts`) correctly declines on this exact goal, per
+ * its own explicit, non-negotiable scope. `docs/DECISIONS.md`'s entry
+ * adding `../src/smt/chc.ts` is the sequel: this is precisely the
+ * fragment that new, Horn-clause/CHC tier exists to decide, and it does —
+ * this exact fixture and this exact invariant, unmodified, now come back
+ * `VIOLATED, proof: 'exact'`, independently confirmed through the real
+ * engine, where before it was `UNKNOWN`. The first describe block's third
+ * test below is that live proof, updated in place rather than left to
+ * silently pass on a stale assumption.
  *
- * The second test demonstrates the same underlying claim — a small,
- * non-recursive intersection whose candidate count exceeds
- * `MAX_BOUNDED_CANDIDATES` is now decided *exactly*, where bounded search
- * alone could only refuse to run — against `fixtures/schemas/sensitive-
- * review-non-recursive.authz`, a new fixture with the identical shape
- * (`(viewer | edit) & sensitive_reviewer`) and the identical
- * over-the-ceiling candidate count, with the two recursion sources
- * removed. See that fixture's own header comment for the full account.
+ * The second describe block demonstrates the complementary claim for the
+ * *non-recursive* tier specifically — a small, non-recursive intersection
+ * whose candidate count exceeds `MAX_BOUNDED_CANDIDATES` is decided
+ * *exactly*, where bounded search alone could only refuse to run —
+ * against `fixtures/schemas/sensitive-review-non-recursive.authz`, a new
+ * fixture with the identical shape (`(viewer | edit) & sensitive_
+ * reviewer`) and the identical over-the-ceiling candidate count, with the
+ * two recursion sources removed. See that fixture's own header comment
+ * for the full account.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -94,12 +101,24 @@ describe('the real, literal fixture named for this proof: schema/example.authz �
     expect(candidates.length).toBeGreaterThan(MAX_BOUNDED_CANDIDATES);
   });
 
-  it('remains UNKNOWN, unchanged — the SMT tier correctly declines on a recursive goal rather than mis-scoping onto it', async () => {
+  it('is now decided exactly — VIOLATED, proof: exact, independently confirmed through the real engine — by the new CHC tier, where it used to remain UNKNOWN', async () => {
     const { result, validation } = await checkAndValidate(graph, schema, invariant);
-    expect(result.verdict).toBe('UNKNOWN');
-    expect(result.reason).toContain('25 candidate tuples');
-    expect(result.reason).toContain(`${MAX_BOUNDED_CANDIDATES}-candidate ceiling`);
-    expect(validation).toEqual({ kind: 'not-applicable' });
+    expect(result.verdict).toBe('VIOLATED');
+    expect(result.fragment).toBe('non-monotone');
+    expect(result.proof).toBe('exact');
+    expect(result.witness).toBeDefined();
+    expect(result.witness!.length).toBeGreaterThan(0);
+    // Every witness tuple actually appears in the two relations the
+    // intersection names — not some unrelated artifact of the encoding.
+    const relations = new Set(result.witness!.map((t) => t.relation));
+    for (const r of relations) {
+      expect(['viewer', 'edit', 'editor', 'owner', 'sensitive_reviewer']).toContain(r);
+    }
+    expect(validation.kind).toBe('confirmed');
+    if (validation.kind === 'confirmed') {
+      expect(validation.engineResult.allowed).toBe(true);
+      expect(validation.engineResult.path?.kind).toBe('intersection');
+    }
   });
 });
 

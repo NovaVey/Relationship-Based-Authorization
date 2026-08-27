@@ -1,0 +1,31 @@
+// Genuinely recursive AND exclusion-reaching, deliberately, for
+// `test/validate.test.ts`'s own "an UNKNOWN verdict gets no
+// self-validation attempt at all" regression case (docs/DECISIONS.md,
+// the entry adding `src/smt/chc.ts`). The new CHC tier decides a
+// genuinely recursive, intersection-shaped goal exactly now (see
+// `sensitive-review-non-recursive.authz` and, live, `schema/
+// example.authz`'s own `folder#sensitive_review`) — but it declines
+// outright the moment exclusion is reachable from the goal (Horn-clause
+// negation is confirmed unusable in this z3-solver build's `Fixedpoint`
+// engine; see `../../src/smt/chc-encode.ts`'s own header comment), and
+// the non-recursive SMT tier already declines on any recursive goal
+// regardless of exclusion. This fixture combines both — a real
+// `parent->edit`/`parent->view` self-reference (making the goal
+// recursive) and `blocked` as an exclusion subtract, sized to reach the
+// same "over MAX_BOUNDED_CANDIDATES" shape `sensitive-review-non-
+// recursive.authz` already established — so bounded search refuses to
+// run too, and the verdict genuinely stays `UNKNOWN`, for a disclosed,
+// bound-specific reason, exactly the case this fixture exists to pin.
+namespace docx {
+  relation parent: docx
+  relation viewer: user
+  relation editor: user
+  relation owner: user
+  relation commenter: user
+  relation approver: user
+  relation blocked: user
+
+  permission edit = editor | owner | commenter | approver | parent->edit
+  permission view = viewer | edit | parent->view
+  permission sensitive_review = (viewer | edit) - blocked
+}

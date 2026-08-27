@@ -1,0 +1,25 @@
+// A small, dedicated fixture for the CHC tier's own unit tests
+// (`test/chc.test.ts`, docs/DECISIONS.md, the entry adding
+// `src/smt/chc.ts`) — deliberately not the real `schema/example.authz`
+// (that fixture is `test/smt-live-example.test.ts`'s own job: a real,
+// committed, executable live proof, not a fast unit-test fixture). Same
+// shape as `schema/example.authz`'s own `group#member`/`folder#
+// sensitive_review` (nested-group self-reference intersected with a
+// second, narrower gate), minimized to exactly the two relations this
+// tier's own encoder needs to exercise: a genuine cycle (`groupx#member`
+// targets itself) reachable from an intersection (so `checkInvariant`'s
+// own AND-infeasibility/exclusion-reduction short-circuits — D-130 — do
+// not resolve it, and the goal genuinely reaches this new tier through
+// `checkAndValidate`'s real routing, not merely a direct, isolated call).
+namespace groupx {
+  relation member: user | groupx#member
+
+  permission view = member
+}
+
+namespace docx2 {
+  relation viewer: user | groupx#member
+  relation sensitive_reviewer: user | groupx#member
+
+  permission sensitive_review = viewer & sensitive_reviewer
+}
