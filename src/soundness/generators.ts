@@ -492,6 +492,129 @@ export const DEEP_CHAIN_COMBO_INSIDE_USER = 'deep_chain_combo_inside_witness';
 export const DEEP_CHAIN_COMBO_OUTSIDE_USER = 'deep_chain_combo_outside_witness';
 
 /**
+ * The guaranteed exclusion-subtract deep chain (closing D-159/D-160's own
+ * disclosed follow-up gap — `docs/DECISIONS.md`) — sizing constants only;
+ * the construction itself is `buildExclusionSubtractDeepChain`, below. This
+ * is a SEPARATE derivation from `DEEP_CHAIN_*` above, deliberately not
+ * reusing those numbers — the task that added this construct required
+ * re-deriving them, and the derivation really is different, not just
+ * relabeled: `DEEP_CHAIN_*` sizes a `tupleToUserset` walk through
+ * `resolve()`'s own TS-level recursion (mechanism 1), where the reference
+ * resolver's `depth` and production's `depth` both advance in lock-step,
+ * one increment per rewrite-rule hop, and neither ever hands off to an
+ * independent, separately-budgeted recursion. This construct instead sizes
+ * a plain declared RELATION's real userset-membership chain, reached from
+ * INSIDE an `exclusion`'s `subtract` branch — the one path that hands off
+ * to mechanism 2 (`sqlRelationMembershipWithWitness`'s own recursive SQL
+ * `WITH RECURSIVE`, `src/resolve/production/resolver.ts`), a structurally
+ * different recursion with its own zero-based frontier `depth` column,
+ * bounded by `remainingDepth = ctx.maxDepth - depth` (the TS-level depth
+ * already spent getting there) rather than by the raw, unreduced ceiling.
+ *
+ * **The derivation, worked by hand, the same way `DEEP_CHAIN_*`'s own doc
+ * comment above works its numbers — re-verify this if `CHECK_MAX_DEPTH`'s
+ * documented default (25, `src/config/env.ts`/`.env.example`) ever
+ * changes, exactly like that comment's own "Revisit if.":**
+ *
+ * 1. **TS-level depth at the point `resolve()`/`resolveMembership` enters
+ *    the `banned` relation lookup, for a top-level `unbanned_view` query,
+ *    is exactly 1 — on BOTH resolvers, not just production.** A fuzz
+ *    query calls `productionCheck(pool, subject, object, 'unbanned_view',
+ *    { maxDepth })`/`referenceCheck(schema, tuples, subject, object,
+ *    'unbanned_view', { maxDepth })` directly, so the top-level walk
+ *    always starts at `depth = 0`. `unbanned_view` is a PERMISSION (not a
+ *    relation), so both resolvers' own permission-dispatch branch fires:
+ *    production's `resolve()` spends `+1` entering `evalRewrite` for a
+ *    permission (`evalRewrite(ctx, permission.rewrite, ..., depth + 1)`),
+ *    landing on `evalRewrite`'s `exclusion` case at `depth = 1`; reference's
+ *    `resolveMembership` spends its OWN `+1` one level lower instead — at
+ *    `evalRewrite`'s `computedUserset` leaf (`resolveMembership(ctx, ns,
+ *    id, node.name, visiting, depth + 1)`), not at permission-entry itself
+ *    (`resolveMembership`'s own permission branch: `evalRewrite(ctx,
+ *    permission.rewrite, ns, id, visiting, depth)`, unchanged) — a
+ *    different NODE spends the "+1," but the net cost per real hop is
+ *    identical, confirmed by tracing both engines through `unbanned_view`'s
+ *    fixed `viewer - banned` shape: both land on the `banned` relation
+ *    lookup at TS-level `depth = 1`, exactly. (This identical-net-cost
+ *    property is exactly what D-069's own report already established for
+ *    every rewrite-rule kind once its three bugs were fixed — re-derived
+ *    here specifically for the exclusion/subtract path, not assumed from
+ *    that report alone.)
+ * 2. **Production's own `remainingDepth` handed to
+ *    `sqlRelationMembershipWithWitness` for that `banned` lookup is
+ *    therefore `ctx.maxDepth - 1`** (`resolve()`'s own `const
+ *    remainingDepth = Math.max(0, ctx.maxDepth - depth)`) — at the
+ *    documented default `CHECK_MAX_DEPTH` of 25, that's `24`.
+ * 3. **Reference's own effective ceiling for the identical chain is the
+ *    same 24 additional hops past that same entry point** — not because
+ *    it shares any code with mechanism 2 (it never does, D-005), but
+ *    because its own unified `depth` counter keeps advancing by exactly 1
+ *    per real userset-subject hop inside `resolveRelation`'s own recursive
+ *    `resolveMembership` calls, checked against the SAME single
+ *    `ctx.maxDepth`: reaching the chain's `k`-th group happens at
+ *    reference `depth = 1 + k` (1 for the relation-entry cost above, plus
+ *    one per hop) — so the last group reference can still ENTER is `k =
+ *    24` (`depth = 25 = ctx.maxDepth`, still `<= maxDepth`, so processed),
+ *    while recursing one hop further (`k = 25`) requires `depth = 26 >
+ *    ctx.maxDepth`, rejected. This is not a coincidence; it's the
+ *    necessary consequence of `runSoundnessFuzz` resolving ONE
+ *    `effectiveMaxDepth` and passing it to BOTH resolvers, unconditionally,
+ *    on every query (D-071) — the two engines' own internal bookkeeping
+ *    differs, but the real external boundary this construct depends on
+ *    (production's mechanism-2 SQL depth ceiling, and reference's
+ *    equivalent-cost in-memory walk) lands on the identical hop count.
+ *    Both are therefore expected to independently reach the chain's 24th
+ *    group and no further — the point of this construct is not "reference
+ *    can see further than production," it's "production's `certain` flag
+ *    on its own truncation must be `false` here, matching reference's own
+ *    already-correct `subtractUnprovable` fail-closed denial for the exact
+ *    same reason" (see `docs/DECISIONS.md` D-158/D-159).
+ *
+ * `EXCLUSION_DEEP_CHAIN_REACHABLE_HOPS` (24) is therefore the deepest
+ * nested-group hop both resolvers can still discover from the `banned`
+ * relation's own seed. `EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS` (25) is one
+ * hop further — where the real plain grant to the "unprovable" witness
+ * sits, genuinely reachable by neither resolver's own walk at the standard
+ * configuration, but the ceiling is only *genuinely binding* (per
+ * `depthCeilingGenuinelyBinding`, `src/resolve/production/resolver.ts`) —
+ * and so mechanism 2's own mistaken `certain: true` bug is only actually
+ * exercised — because the 24th group has a REAL further edge into it, not
+ * merely "no further edge happened to exist." Placing the grant exactly
+ * one hop past the reachable boundary, rather than merely "somewhere
+ * deep," is what makes this a genuine truncation rather than a chain that
+ * simply happens to dead-end early.
+ */
+export const EXCLUSION_DEEP_CHAIN_REACHABLE_HOPS = 24;
+export const EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS = EXCLUSION_DEEP_CHAIN_REACHABLE_HOPS + 1;
+
+/**
+ * Dedicated, never-shared-with-`userIds` witness subjects for the
+ * guaranteed exclusion-subtract deep chain — see
+ * `buildExclusionSubtractDeepChain`.
+ *
+ * - `_UNPROVABLE_WITNESS_USER` sits at `EXCLUSION_DEEP_CHAIN
+ *   _UNREACHABLE_HOPS` — the D-159 bug-shape trigger: a real, genuine
+ *   `banned` membership neither resolver's own walk can actually discover
+ *   at the standard configuration, so a correct engine must (and does)
+ *   deny `unbanned_view` for this witness by failing closed on its own
+ *   uncertainty, never by having disproven `banned` outright.
+ * - `_BOUNDARY_WITNESS_USER` sits exactly at `EXCLUSION_DEEP_CHAIN
+ *   _REACHABLE_HOPS` — a real, genuinely DISCOVERABLE grant, found by both
+ *   resolvers regardless of the D-159 bug (a positive match short-circuits
+ *   before `certain` is ever consulted) — proves the reachable/unreachable
+ *   boundary this construct depends on is exactly where the derivation
+ *   above says it is, not off by one.
+ * - `_CLEAN_WITNESS_USER` has zero `banned` tuples anywhere in the fixture
+ *   — a plain, ordinary "never banned" positive control, proving
+ *   `unbanned_view`'s own `viewer` grant path still functions normally on
+ *   this new construct's own dedicated object.
+ */
+export const EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER =
+  'exclusion_deep_chain_unprovable_witness';
+export const EXCLUSION_DEEP_CHAIN_BOUNDARY_WITNESS_USER = 'exclusion_deep_chain_boundary_witness';
+export const EXCLUSION_DEEP_CHAIN_CLEAN_WITNESS_USER = 'exclusion_deep_chain_clean_witness';
+
+/**
  * The group-shaped namespace — always namespace #0. Its `member` relation
  * accepts `user | <self>#member`, the exact shape a nested-group cycle
  * needs (§6.4's own worked example: `group:a` nests `group:b` nests
@@ -530,6 +653,17 @@ function buildHierNamespaceSource(name: string, groupName: string): string {
  * constructs, plus a second `tupleToUserset` (`parent_link->view`,
  * crossing into the hierarchical namespace) for realism — mirrors §5's own
  * `document`/`folder` worked example shape.
+ *
+ * `banned`'s own declared type includes `${groupName}#member` (not just
+ * `user`) specifically so `unbanned_view`'s `subtract` branch
+ * (`buildExclusionSubtractDeepChain`, below) can be wired into a real,
+ * nested-userset membership chain deep enough to interact with mechanism
+ * 2's own SQL relation-membership depth ceiling (`sqlRelationMembership
+ * WithWitness`, `src/resolve/production/resolver.ts`) — D-159/D-160's own
+ * disclosed follow-up gap. Before this, `banned` only ever accepted a
+ * direct `user` grant, so a `banned` lookup was always a single, trivially
+ * shallow SQL frontier-seed match — it could never touch that mechanism's
+ * own recursive frontier walk at all, let alone its depth ceiling.
  */
 function buildResourceNamespaceSource(name: string, groupName: string, hierName: string): string {
   return [
@@ -537,7 +671,7 @@ function buildResourceNamespaceSource(name: string, groupName: string, hierName:
     '  relation owner: user',
     `  relation editor: user | ${groupName}#member`,
     `  relation viewer: user | ${groupName}#member`,
-    '  relation banned: user',
+    `  relation banned: user | ${groupName}#member`,
     `  relation parent_link: ${hierName}`,
     '',
     '  permission view = viewer | editor | owner | parent_link->view',
@@ -906,6 +1040,178 @@ function buildGuaranteedDeepChain(
   };
 }
 
+/** The three hand-derivable query witnesses `buildExclusionSubtractDeepChain` produces — see that function's own doc comment and the `EXCLUSION_DEEP_CHAIN_*` constants' doc comments for the full numeric derivation. */
+export interface ExclusionDeepChainWitnesses {
+  /** The dedicated resource-namespace object hosting `unbanned_view`'s guaranteed exclusion, `banned` wired into the deep chain — never touched by `assignRandomTuples`. */
+  resource: GeneratedEntityRef;
+  /**
+   * A SEPARATE dedicated resource-namespace object whose `banned` relation
+   * has zero tuples at all — see this function's own doc comment for why
+   * the "clean" witness cannot share `resource` with the other two: a
+   * genuinely-binding depth ceiling on a `(object, relation)` pair taints
+   * `certain` for EVERY not-yet-found subject checked against that same
+   * pair, not just the one this construct is deliberately probing, so a
+   * "never banned" control needs its own, chain-free `banned` relation to
+   * actually be invariant to the bug it's meant to guard against.
+   */
+  cleanResource: GeneratedEntityRef;
+  /** Real `banned` membership, one hop past what either resolver's own walk can discover at the standard configuration — the D-159 bug-shape trigger. */
+  unprovableWitness: string;
+  /** Real `banned` membership exactly at the reachable boundary — found by both resolvers regardless of the D-159 bug; a boundary sanity control. */
+  boundaryWitness: string;
+  /** Zero `banned` tuples anywhere — a plain "never banned" positive control for `unbanned_view`'s own grant path, checked against `cleanResource`. */
+  cleanWitness: string;
+  reserved: DeepChainReservedKeys;
+}
+
+/**
+ * The guaranteed exclusion-subtract deep chain (closing D-159/D-160's own
+ * disclosed follow-up gap, `docs/DECISIONS.md`) — built the same
+ * deliberate way `buildGuaranteedDeepChain` above is: created first, in
+ * strictly increasing `order`, entirely independent of any randomly drawn
+ * structure, hand-wired via `addTuple` directly (never routed through
+ * `assignRandomTuples`), and excluded from that function's own
+ * per-object randomization loop via `reserved`. See the
+ * `EXCLUSION_DEEP_CHAIN_*` constants' own doc comment for the full
+ * numeric derivation this shape depends on.
+ *
+ * Shape:
+ *
+ * ```
+ * <resource>#banned -> edc_g1#member -> edc_g2#member -> ... -> edc_g25#member
+ * ```
+ *
+ * — a single, straight-line, hand-built nested-group chain, provably
+ * acyclic by inspection (every edge points from a just-created node to the
+ * next, never repeating one), disjoint from every other guaranteed
+ * construct in this file by object id (`edc_g*`/`edc_resource*`, never
+ * `dc_h*`/`dc_g*`/`cycle_a`/`cycle_b`). `edc_g{EXCLUSION_DEEP_CHAIN
+ * _REACHABLE_HOPS}` (`edc_g24`) carries a real, independent, directly
+ * discoverable plain grant to `_BOUNDARY_WITNESS_USER` — found by both
+ * resolvers regardless of the D-159 bug, since it's a genuine match, never
+ * a truncation. `edc_g{EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS}` (`edc_g25`)
+ * — one hop past what either resolver's own walk can discover at the
+ * standard configuration — carries the real plain grant to
+ * `_UNPROVABLE_WITNESS_USER`, the actual D-159 bug-shape trigger.
+ *
+ * **Why the "clean" (never-banned) witness lives on a SEPARATE object
+ * (`edc_resource_clean`), not `edc_resource` — found live, verified
+ * directly against the real reference resolver before this shape was
+ * trusted, not assumed.** A depth-ceiling truncation that's genuinely
+ * binding for `(object, relation)` taints `certain` for EVERY subject
+ * `resolveRelation`/`sqlRelationMembershipWithWitness` fails to find a
+ * match for on that pair — not only the specific subject this construct
+ * means to probe — because the reachability walk that could prove "no"
+ * is itself subject-independent; only a POSITIVE match (found before the
+ * walk ever needs to go past the ceiling) is unaffected. A "clean" witness
+ * checked against `edc_resource` would therefore ALSO come back
+ * `certain: false` on `banned` (never finding a match, same as the
+ * `_UNPROVABLE_WITNESS_USER` case) and so ALSO flip to a `false_grant`
+ * when the D-159 bug is reintroduced — which is not wrong, exactly, but
+ * defeats this witness's actual purpose (a control that stays invariant
+ * to the bug, proving `unbanned_view`'s own grant path still functions
+ * normally). `edc_resource_clean`'s own `banned` relation carries zero
+ * tuples at all, so its own membership walk never recurses and never
+ * touches the ceiling regardless of subject — `certain: true` always, on
+ * both resolvers, with or without the bug.
+ *
+ * Both resource objects' own `viewer` relation carries a direct grant to
+ * their respective witness(es) so `unbanned_view`'s `base` branch is
+ * unconditionally true for every one of them — the only variable this
+ * construct's three reserved queries actually exercise is the `subtract`
+ * (`banned`) branch's own certainty, not whether `viewer` holds.
+ */
+function buildExclusionSubtractDeepChain(
+  createObject: (ns: string, id: string) => ObjectEntity,
+  addTuple: (t: GeneratedTuple) => void,
+  groupNs: string,
+  resourceNs: string,
+): ExclusionDeepChainWitnesses {
+  const reservedKeys = new Set<string>();
+  const reserve = (ns: string, id: string): void => {
+    reservedKeys.add(deepChainReservationKey(ns, id));
+  };
+
+  const resource = createObject(resourceNs, 'edc_resource');
+  reserve(resource.ns, resource.id);
+  const cleanResource = createObject(resourceNs, 'edc_resource_clean');
+  reserve(cleanResource.ns, cleanResource.id);
+
+  const chain: ObjectEntity[] = [];
+  for (let i = 1; i <= EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS; i += 1) {
+    const g = createObject(groupNs, `edc_g${i}`);
+    reserve(g.ns, g.id);
+    chain.push(g);
+  }
+
+  const firstGroup = requireDefined(
+    chain[0],
+    'generator: exclusion deep chain first group missing',
+  );
+  addTuple({
+    objectNs: resource.ns,
+    objectId: resource.id,
+    relation: 'banned',
+    subjectNs: groupNs,
+    subjectId: firstGroup.id,
+    subjectRelation: 'member',
+  });
+  for (let i = 1; i < EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS; i += 1) {
+    addTuple({
+      objectNs: groupNs,
+      objectId: `edc_g${i}`,
+      relation: 'member',
+      subjectNs: groupNs,
+      subjectId: `edc_g${i + 1}`,
+      subjectRelation: 'member',
+    });
+  }
+
+  addTuple({
+    objectNs: groupNs,
+    objectId: `edc_g${EXCLUSION_DEEP_CHAIN_REACHABLE_HOPS}`,
+    relation: 'member',
+    subjectNs: 'user',
+    subjectId: EXCLUSION_DEEP_CHAIN_BOUNDARY_WITNESS_USER,
+  });
+  addTuple({
+    objectNs: groupNs,
+    objectId: `edc_g${EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS}`,
+    relation: 'member',
+    subjectNs: 'user',
+    subjectId: EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER,
+  });
+
+  for (const witness of [
+    EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER,
+    EXCLUSION_DEEP_CHAIN_BOUNDARY_WITNESS_USER,
+  ]) {
+    addTuple({
+      objectNs: resource.ns,
+      objectId: resource.id,
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: witness,
+    });
+  }
+  addTuple({
+    objectNs: cleanResource.ns,
+    objectId: cleanResource.id,
+    relation: 'viewer',
+    subjectNs: 'user',
+    subjectId: EXCLUSION_DEEP_CHAIN_CLEAN_WITNESS_USER,
+  });
+
+  return {
+    resource: { ns: resource.ns, id: resource.id },
+    cleanResource: { ns: cleanResource.ns, id: cleanResource.id },
+    unprovableWitness: EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER,
+    boundaryWitness: EXCLUSION_DEEP_CHAIN_BOUNDARY_WITNESS_USER,
+    cleanWitness: EXCLUSION_DEEP_CHAIN_CLEAN_WITNESS_USER,
+    reserved: { keys: reservedKeys },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Coverage self-check
 // ---------------------------------------------------------------------------
@@ -1137,6 +1443,21 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
   // loop below.
   const deepChain = buildGuaranteedDeepChain(createObject, addTuple, groupNs, hierNs);
 
+  // The guaranteed exclusion-subtract deep chain (closing D-159/D-160's own
+  // disclosed follow-up gap, `docs/DECISIONS.md`) — created immediately
+  // after the D-070 deep chain, for the identical reason: `edc_g*`/
+  // `edc_resource` must also land at the lowest `order` values in
+  // `groupNs`/`resourceNs` (after the cycle and the D-070 chain, before
+  // anything random) so no randomly drawn edge can ever attach to one of
+  // its objects — see `DeepChainReservedKeys` and the (now combined) skip
+  // check in the tuple-generation loop below.
+  const exclusionDeepChain = buildExclusionSubtractDeepChain(
+    createObject,
+    addTuple,
+    groupNs,
+    resourceNs,
+  );
+
   for (const ns of namespaceOrder) {
     const already = requireDefined(
       objectsByNs.get(ns),
@@ -1205,14 +1526,22 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
     );
     const objects = objectsByNs.get(ns) ?? [];
     for (const object of objects) {
-      // The guaranteed deep chain's own objects are hand-wired above and
-      // must never receive an *additional*, randomly drawn tuple on top of
-      // what `buildGuaranteedDeepChain` deliberately placed — an extra
-      // `parent`/`editor`/`member` edge here could shorten (or otherwise
-      // change) the hand-derived real chain length the reserved deep-chain
-      // queries below depend on, silently invalidating their hand-derived
-      // expected answers for whichever seed happened to draw it.
-      if (deepChain.reserved.keys.has(deepChainReservationKey(object.ns, object.id))) continue;
+      // The guaranteed deep chain's own objects (D-070) and the guaranteed
+      // exclusion-subtract deep chain's own objects (D-159/D-160's own
+      // follow-up gap) are hand-wired above and must never receive an
+      // *additional*, randomly drawn tuple on top of what those two
+      // functions deliberately placed — an extra `parent`/`editor`/
+      // `member`/`banned` edge here could shorten (or otherwise change) the
+      // hand-derived real chain lengths the reserved queries below depend
+      // on, silently invalidating their hand-derived expected answers for
+      // whichever seed happened to draw it.
+      const objectKey = deepChainReservationKey(object.ns, object.id);
+      if (
+        deepChain.reserved.keys.has(objectKey) ||
+        exclusionDeepChain.reserved.keys.has(objectKey)
+      ) {
+        continue;
+      }
       for (const relation of Object.values(nsConfig.relations)) {
         assignRandomTuples(rng, addTuple, object, relation, objectsByNs, userIds);
       }
@@ -1383,7 +1712,63 @@ export function generateFixture(seed: string, queryCount: number): GeneratedFixt
     });
   }
 
-  const reserved = Math.min(6, Math.max(0, queryCount));
+  // Reserved exclusion-subtract-deep-chain queries (closing D-159/D-160's
+  // own disclosed follow-up gap, `docs/DECISIONS.md`) — indices 6-8,
+  // appended after the six pre-existing reserved queries above so none of
+  // their own indices change. Each is hand-derived against
+  // `buildExclusionSubtractDeepChain`'s exact, deterministic structure —
+  // see that function's own doc comment and the `EXCLUSION_DEEP_CHAIN_*`
+  // constants for the full numeric derivation.
+  //
+  // - Query 6 (`_UNPROVABLE_WITNESS_USER`): the D-159 bug-shape trigger — a
+  //   real, genuine `banned` membership one hop past what either
+  //   resolver's own walk can discover at the standard configuration.
+  //   Hand-derived DENIED under a CORRECT production resolver (fails
+  //   closed on its own genuine uncertainty, exactly matching the
+  //   reference resolver's own already-correct `subtractUnprovable` denial
+  //   for the identical reason — agreement, not a divergence) — and
+  //   reliably flips to a new, isolated `false_grant` if D-159's own fix
+  //   (`sqlRelationMembershipWithWitness`'s `certain` computation) is
+  //   reverted, since a wrongly-`certain` "no" on `banned` lets
+  //   `unbanned_view`'s exclusion grant unsoundly.
+  // - Query 7 (`_BOUNDARY_WITNESS_USER`): the identical chain, one hop
+  //   shallower — a real, genuinely DISCOVERABLE `banned` grant, found by
+  //   both resolvers regardless of the D-159 bug (a positive match never
+  //   consults `certain` at all). Hand-derived DENIED on both resolvers,
+  //   invariant to the bug — proves the reachable/unreachable boundary
+  //   this construct depends on is exactly where the derivation above says
+  //   it is, not off by one in either direction.
+  // - Query 8 (`_CLEAN_WITNESS_USER`, on `cleanResource` — a SEPARATE
+  //   object from the other two, see `buildExclusionSubtractDeepChain`'s
+  //   own doc comment for exactly why): zero `banned` tuples anywhere at
+  //   all on this object, so its own membership walk never recurses and
+  //   never touches any ceiling. Hand-derived ALLOWED on both resolvers,
+  //   genuinely invariant to the bug — proves `unbanned_view`'s own
+  //   `viewer` grant path still functions normally, i.e. this construct
+  //   doesn't itself introduce a spurious divergence.
+  if (queryCount >= 7) {
+    queries.push({
+      subject: { ns: 'user', id: exclusionDeepChain.unprovableWitness },
+      object: exclusionDeepChain.resource,
+      relationOrPermission: 'unbanned_view',
+    });
+  }
+  if (queryCount >= 8) {
+    queries.push({
+      subject: { ns: 'user', id: exclusionDeepChain.boundaryWitness },
+      object: exclusionDeepChain.resource,
+      relationOrPermission: 'unbanned_view',
+    });
+  }
+  if (queryCount >= 9) {
+    queries.push({
+      subject: { ns: 'user', id: exclusionDeepChain.cleanWitness },
+      object: exclusionDeepChain.cleanResource,
+      relationOrPermission: 'unbanned_view',
+    });
+  }
+
+  const reserved = Math.min(9, Math.max(0, queryCount));
   for (let i = reserved; i < queryCount; i += 1) {
     if (tuples.length > 0 && rng.nextBoolean(0.5)) {
       // "Likely positive": derive a query from a real tuple's own object,

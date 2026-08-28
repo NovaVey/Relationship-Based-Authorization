@@ -569,8 +569,41 @@ describe("Property 5 — exclusion-subtract-anti-monotonicity, scoped narrowly t
           )
           .map((t) => `${t.objectId}\0${t.subjectId}`),
       );
+      // Closing D-159/D-160's own follow-up gap (`docs/DECISIONS.md`) widened
+      // `banned`'s declared type from `user`-only to `user |
+      // <groupName>#member` (`buildResourceNamespaceSource`,
+      // `src/soundness/generators.ts`) so `unbanned_view`'s subtract branch
+      // can be wired into a real nested-userset chain. That means "no
+      // DIRECT `user`-typed `banned` tuple for this exact (object, subject)
+      // pair" is no longer sufficient to conclude `unbanned_view` must be
+      // allowed for every subject on that object: an object whose `banned`
+      // relation ALSO carries a userset-subject tuple can be genuinely
+      // uncertain (depth-ceiling-cut, `certain: false`, exclusion fails
+      // closed) for a subject who was never actually a member at all —
+      // exactly the guaranteed exclusion-subtract deep chain's own
+      // `edc_resource` object (its `unprovableWitness`/`boundaryWitness`
+      // each hold a real, direct `viewer` grant but no direct `banned`
+      // tuple, yet neither resolves `unbanned_view` allowed). Any object
+      // with a userset-typed `banned` tuple — this construct's own
+      // `edc_resource`, or, in principle, any randomly generated object
+      // that happens to draw one too — is therefore excluded from this
+      // property's own "found a real, definitely-unbanned witness" search
+      // entirely, rather than assumed safe from a purely-direct-tuple check
+      // that predates `banned` accepting a userset subject type at all.
+      const objectsWithUsersetBannedTuple = new Set(
+        fixture.tuples
+          .filter(
+            (t) =>
+              t.objectNs === resourceNsName &&
+              t.relation === 'banned' &&
+              t.subjectRelation !== undefined,
+          )
+          .map((t) => t.objectId),
+      );
       const unbannedViewerTuples = directViewerTuples.filter(
-        (t) => !bannedPairKeys.has(`${t.objectId}\0${t.subjectId}`),
+        (t) =>
+          !bannedPairKeys.has(`${t.objectId}\0${t.subjectId}`) &&
+          !objectsWithUsersetBannedTuple.has(t.objectId),
       );
 
       let witnessSubject: string;
