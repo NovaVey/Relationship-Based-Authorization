@@ -2596,3 +2596,45 @@ A real bug found via live verification, not assumed correct because it compiled:
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Root suite: 69 files, 1026 tests (up from 1015, +11 new). Both real-Postgres integration tests independently re-run live via LOCALVERIFY and confirmed passing, restored to their exact committed form afterward.
 
 Full account: `docs/DECISIONS.md` D-155.
+
+## `openapi-document.ts` checked against Fastify's real, live route table (D-156)
+
+**Owner:** a general-purpose agent in an isolated worktree.
+
+`EXPECTED_ROUTES` (the test's own comparison target for `buildOpenApiDocument()`) was itself a second hand-maintained route list — the same drift risk `openapi-document.ts`'s own top-of-file comment discloses about itself, just moved one level over. `BuildServerOptions` gains a test-only `onRouteRegistered` observer wired to Fastify's real `onRoute` event, first hook on `app`, so the test can capture the actual registered route table and assert exact set equality against `doc.paths` in both directions — no new dependency, `serve.ts` unaffected. Also fixed a stale comment in `openapi-document.ts` claiming `POST /check/batch` had no entry below it, when one has existed since that route was added — a live instance of the exact drift this file exists to guard against.
+
+**Fail-checked live, both directions, then reverted:** a scratch undocumented route added to `server.ts`, caught; a scratch phantom `paths` entry, caught; the real `/check/batch` entry removed, caught — each with the exact offending route named.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Root suite: 69 files, 1028 tests (up from 1026, +2, both in the existing `openapi.test.ts`).
+
+Full account: `docs/DECISIONS.md` D-156.
+
+## Runtime-enforced snapshot-anchoring query order for `productionCheck`, closing D-139's disclosed gap (D-157)
+
+**Owner:** a soundness-engineer agent in an isolated worktree.
+
+D-139 disclosed that `assertTokenObservedOnSnapshot`'s "must be the first query on the pinned connection" requirement was enforced only by code structure — and, on closer inspection this task did that D-139 itself hadn't, that the in-memory DST fake didn't actually assert this either, only mirror the timing. `guardPinnedClientForSnapshotAnchor` now wraps the pinned client (only when `atToken` is set, zero overhead otherwise) and throws a clear internal-invariant error if any other query runs first. Traced through the code: the realistic failure mode of a future accidental reordering is a spurious throw (fails closed), not a false grant — genuine, disclosed insurance, not a fix for an active bug. This exact function had already been safely touched twice since D-139 (D-143, D-150) with the ordering preserved correctly both times.
+
+**Fail-checked live, both directions:** a decoy query before the anchor throws with the expected message; the correct order passes through unimpeded. Re-verified via LOCALVERIFY across 87 real-Postgres integration tests touching `atToken`, including the 5,000-query differential-soundness fuzz suite, all passing, zero regressions.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Root suite: 70 files, 1030 tests (up from 1026, +1 file/+4 tests).
+
+Full account: `docs/DECISIONS.md` D-157.
+
+## A real, previously-undiscovered soundness bug found and fixed: exclusion + a tuple-data cycle could flip a fail-closed deny into an unsound grant (D-158)
+
+**Owner:** a soundness-engineer agent in an isolated worktree, the highest-stakes of a three-agent batch dispatched together.
+
+Both resolvers' cycle guard fails closed (`false`, "cannot prove") on a data-driven cycle — correct everywhere except inside an `exclusion` rule's `subtract` branch, where the old code treated any `false` there as "disproven, not excluded," so a cycle-guard hit flipped, via exclusion's own `NOT`, into an unsound grant. This project's own SMT/CHC work (D-153) had already concluded this exact hazard in theory ("loses soundness the moment exclusion sits anywhere in the cycle") — never before live-tested against this specific implementation.
+
+**Reproduced live first, on an ordinary fixture, not an exotic one:** `folder { permission view = grant - parent->view }` with a self-referencing `folder:a#parent@folder:a` and a real grant — both resolvers returned `allowed: true` before any fix. Fixed by threading a `certain: boolean` alongside every recursive outcome in both resolvers (independently, per D-022): `false` from an exhaustive disproof is `certain: true`; `false` from a cycle/depth-cut is `certain: false`. Every non-negated combinator already treats either the same; the one behavior change is `exclusion`, where an uncertain `subtract` now denies (fail-closed) and marks the exclusion's own result uncertain too, so a further containing exclusion can't unsoundly negate it either.
+
+**Fail-checked live, independently, twice.** The implementing agent reverted just the two resolver files, confirmed exactly the two cyclic-repro tests failed (two controls — a subtract failing before reaching the cycle, and a genuine non-cyclic exclusion — stayed green, proving no over-conservative regression); restored, all green. This session's own main agent independently reproduced it a second time, live against real Postgres via LOCALVERIFY, through the real unmodified CLI on the identical fixture: fix in place → `DENIED`; fix's own condition bypassed → `ALLOWED`, the false grant reproduced firsthand; fix restored, file confirmed byte-clean, `DENIED` again; a real `authz soundness run --queries 2000` against the same database reported `SOUND`.
+
+**A structural finding, not just a bug fix:** because the bug was identical in both independently-coded resolvers, they agreed with each other on the wrong answer — a 5,000-query differential fuzz run with only this fix reverted still reported `sound, false_grant: 0`. Differential fuzzing cannot catch a bug both resolvers share, at any budget — demonstrated live for the first time, not just argued in the abstract (D-140's own preamble named this exact failure mode when justifying metamorphic testing). A deliberately-broken `intersection` case, as a control, was still caught immediately (58 false grants), confirming the harness has real power for asymmetric bugs. `test/metamorphic/` has no permanent property for this specific shape yet — real, separately-scoped follow-up work this finding surfaces.
+
+**Deliberately not fixed:** mechanism 2's (SQL relation-membership) depth-ceiling case shares the same theoretical risk but has no "was the ceiling still binding" signal to build the fix on yet — disclosed as separate follow-up work, not silently assumed closed.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Root suite: 70 files, 1040 tests (up from 1026 across this whole three-item batch). Real-Postgres re-run via LOCALVERIFY: cross-resolver-agreement (27/27), production-resolution-path (13/13, including a pre-existing exclusion-cycle regression, still green), metamorphic algebraic-properties (6/6) and monotonicity (3/3), and the flagship differential-soundness fuzz suite (5,000 queries, `false_grant: 0`) — all passing, zero regressions.
+
+Full account: `docs/DECISIONS.md` D-158.

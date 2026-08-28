@@ -183,7 +183,18 @@ type RenderDisproofNode =
       object: RenderEntity;
       reason:
         | { kind: 'baseDisproven'; base: RenderDisproofNode }
-        | { kind: 'subtractProven'; subtract: RenderProofNode };
+        | { kind: 'subtractProven'; subtract: RenderProofNode }
+        // The fix for the exclusion/cycle-guard soundness gap — see both
+        // resolvers' own `ExclusionDisproof` doc comment. Structurally
+        // unreachable through this file's own real callers today (a
+        // top-level check's own disproof is never surfaced; this reason
+        // can only ever appear *inside* the disproof tree that already
+        // shows up in that scenario — never inside a winning proof's own
+        // `subtractDisproof`, since anything tainting `subtract` also taints
+        // the containing exclusion itself, which then can't be `allowed:
+        // true` either) — handled anyway for type-level exhaustiveness and
+        // in case a future feature surfaces a bare disproof directly.
+        | { kind: 'subtractUnprovable'; subtract: RenderDisproofNode };
     }
   | {
       kind: 'tupleToUsersetDisproof';
@@ -311,7 +322,12 @@ function normalizeReferenceDisproof(step: ReferenceDisproofStep): RenderDisproof
         reason:
           step.reason.kind === 'baseDisproven'
             ? { kind: 'baseDisproven', base: normalizeReferenceDisproof(step.reason.base) }
-            : { kind: 'subtractProven', subtract: normalizeReferenceProof(step.reason.subtract) },
+            : step.reason.kind === 'subtractProven'
+              ? { kind: 'subtractProven', subtract: normalizeReferenceProof(step.reason.subtract) }
+              : {
+                  kind: 'subtractUnprovable',
+                  subtract: normalizeReferenceDisproof(step.reason.subtract),
+                },
       };
     case 'tupleToUsersetDisproof':
       return {
@@ -455,10 +471,15 @@ function normalizeProductionDisproof(step: ProductionDisproofStep): RenderDispro
         reason:
           step.reason.kind === 'baseDisproven'
             ? { kind: 'baseDisproven', base: normalizeProductionDisproof(step.reason.base) }
-            : {
-                kind: 'subtractProven',
-                subtract: normalizeProductionProof(step.reason.subtract),
-              },
+            : step.reason.kind === 'subtractProven'
+              ? {
+                  kind: 'subtractProven',
+                  subtract: normalizeProductionProof(step.reason.subtract),
+                }
+              : {
+                  kind: 'subtractUnprovable',
+                  subtract: normalizeProductionDisproof(step.reason.subtract),
+                },
       };
     case 'tupleToUsersetDisproof':
       return {
@@ -666,15 +687,28 @@ function renderDisproofStructured(node: RenderDisproofNode, indent: string): str
         ...renderDisproofStructured(node.branch, `${indent}  `),
       ];
     case 'exclusionDisproof':
-      return node.reason.kind === 'baseDisproven'
-        ? [
-            `${indent}- the base does not hold for ${entityLabel(node.object)}:`,
-            ...renderDisproofStructured(node.reason.base, `${indent}  `),
-          ]
-        : [
-            `${indent}- the excluded set holds for ${entityLabel(node.object)} (exclusion fails):`,
-            ...renderStructuredProof(node.reason.subtract, `${indent}  `),
-          ];
+      if (node.reason.kind === 'baseDisproven') {
+        return [
+          `${indent}- the base does not hold for ${entityLabel(node.object)}:`,
+          ...renderDisproofStructured(node.reason.base, `${indent}  `),
+        ];
+      }
+      if (node.reason.kind === 'subtractProven') {
+        return [
+          `${indent}- the excluded set holds for ${entityLabel(node.object)} (exclusion fails):`,
+          ...renderStructuredProof(node.reason.subtract, `${indent}  `),
+        ];
+      }
+      // `subtractUnprovable` — see both resolvers' own `ExclusionDisproof`
+      // doc comment. Structurally unreachable through this file's own real
+      // callers today (see `RenderDisproofNode`'s own doc comment on this
+      // variant) — rendered anyway with real, honest wording rather than
+      // treated as unreachable, in case a future feature ever surfaces a
+      // bare top-level disproof.
+      return [
+        `${indent}- the excluded set for ${entityLabel(node.object)} could not be conclusively resolved (cycle/depth cutoff) — denied conservatively, not proven excluded:`,
+        ...renderDisproofStructured(node.reason.subtract, `${indent}  `),
+      ];
     case 'tupleToUsersetDisproof':
       if (node.followed.length === 0) {
         return [

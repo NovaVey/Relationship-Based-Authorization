@@ -132,7 +132,11 @@
  * shares code with `src/resolve/reference/`, and D-022's own rule was
  * never about how *this* file talks to Postgres.
  */
-import type { ConnectionSource, QueryExecutor } from '../../store/query-executor.js';
+import type {
+  ConnectionSource,
+  QueryExecutor,
+  QueryResultLike,
+} from '../../store/query-executor.js';
 
 import { env } from '../../config/env.js';
 import type { NamespaceConfig, RewriteRule } from '../../schema/dsl/types.js';
@@ -293,12 +297,50 @@ export interface IntersectionDisproof {
   branch: DisproofStep;
 }
 
+/**
+ * Either the exclusion's own base is disproven, its own subtract is proven
+ * (either genuinely denies it), or — the third, previously-missing case —
+ * `subtract` could not be conclusively resolved at all (it hit the TS-level
+ * `visited`-Set cycle guard or the depth ceiling somewhere inside it):
+ * `subtractUnprovable`.
+ *
+ * **Why this third case exists — the soundness gap it closes.** Before it
+ * existed, `evalRewrite`'s `exclusion` case treated `!subtract.allowed` as
+ * "subtract is disproven, so this exclusion holds" unconditionally — but
+ * `subtract.allowed === false` is exactly what `resolve`'s own cycle guard
+ * (the `visited`-Set check) and the depth ceiling ALSO return the instant
+ * they cut a branch off, per this file's own fail-closed convention for
+ * every *non-negated* position. Consumed here, inside exclusion's own
+ * `NOT`, that fail-closed "can't prove" `false` was silently
+ * indistinguishable from a genuine, exhaustively-proven "no" — and `NOT
+ * (can't-prove)` is not `true`, even though `NOT false` is. A permission
+ * shaped like `view = grant - parent->view` on a self-referencing `parent`
+ * (an ordinary hierarchy tuple, nothing exotic — self-referencing `parent`
+ * tuples are this DSL's own headline use case) reproduces this concretely:
+ * the cycle guard's fail-closed `false` for the unresolvable `parent->view`
+ * branch used to flip, via exclusion's own negation, into an unsound
+ * `allowed: true` — a real `false_grant`, confirmed live against this exact
+ * shape (against the DST in-memory fake, and against the reference
+ * resolver independently — both share the identical flaw, which is why
+ * differential fuzzing alone could never have caught this) before this fix
+ * existed — see the regression test this fix shipped with.
+ * `subtractUnprovable` is the distinguishing signal this file's own
+ * fail-closed philosophy already uses everywhere else: "cannot prove" now
+ * propagates as its own outcome (see `WalkContext`-adjacent
+ * `ProductionOutcome`'s own `certain` field below), never silently
+ * collapsing into a boolean a negation can flip. It also covers the depth
+ * ceiling, not only the cycle guard, for the identical reason (both
+ * `reason: 'cycle'` and `reason: 'depth'` hit the exact same `resolve`
+ * early-return shape below, so both are covered uniformly, not
+ * special-cased apart).
+ */
 export interface ExclusionDisproof {
   kind: 'exclusionDisproof';
   object: EntityRef;
   reason:
     | { kind: 'baseDisproven'; base: DisproofStep }
-    | { kind: 'subtractProven'; subtract: ResolutionStep };
+    | { kind: 'subtractProven'; subtract: ResolutionStep }
+    | { kind: 'subtractUnprovable'; subtract: DisproofStep };
 }
 
 export interface TupleToUsersetDisproof {
@@ -308,6 +350,22 @@ export interface TupleToUsersetDisproof {
   followed: Array<{ through: EntityRef; disproof: DisproofStep }>;
 }
 
+/**
+ * The TS-level depth ceiling or the TS-level `visited`-Set cycle guard cut
+ * this branch off — both are a real, defined "no" for that branch in any
+ * *non-negated* position (a plain union/intersection/tupleToUserset branch,
+ * or an exclusion's own `base`), but NOT a legitimate disproof of a
+ * *negated* one (an exclusion's own `subtract`) — see `ExclusionDisproof`'s
+ * own doc comment for the concrete unsoundness this distinction closes, and
+ * `ProductionOutcome`'s own `certain` field for the mechanism. Mechanism 2
+ * (`sqlRelationMembershipWithWitness`'s own SQL-level path-array cycle
+ * guard) never produces this shape at all — its own disproof is always a
+ * `RelationDisproof`, never a `BoundReachedDisproof` — see D-026/D-021 for
+ * why that mechanism's cycle-pruning is exact/lossless on its own terms and
+ * genuinely out of scope for this fix (documented as a residual, distinct,
+ * not-yet-addressed risk in this fix's own report, not silently assumed
+ * safe).
+ */
 export interface BoundReachedDisproof {
   kind: 'boundReached';
   object: EntityRef;
@@ -357,9 +415,51 @@ export interface ProductionCheckResult {
   touchedExpiringTuple: boolean;
 }
 
-/** `{ allowed: true; proof }` or `{ allowed: false; disproof }` — the one return shape every recursive step below produces. */
+/**
+ * `{ allowed: true; certain: true; proof }` or `{ allowed: false; certain;
+ * disproof }` — the one return shape every recursive step below produces.
+ *
+ * **`certain` — the fix for the exclusion/cycle-guard soundness gap (see
+ * `ExclusionDisproof`'s own doc comment for the concrete bug).** `true` for
+ * every `allowed: true` outcome, by construction, everywhere in this file
+ * (a positive result is only ever produced from a real, verified fact — a
+ * SQL-witnessed grant, or every child of a combinator *also* being
+ * certainly true — never from an unresolved branch) — a load-bearing
+ * invariant every combinator below maintains, not merely a convention. For
+ * `allowed: false`, `certain: true` means "exhaustively proven false"
+ * (every branch that could have made this true was checked and
+ * definitively didn't, including mechanism 2's own SQL-side relation scan —
+ * see below); `certain: false` means "the TS-level `visited`-Set cycle
+ * guard or the TS-level depth ceiling cut this subtree off, without ever
+ * fully proving or disproving it." The distinction is inert everywhere
+ * `false` is already the conservative, fail-closed answer (union,
+ * intersection, tupleToUserset, an exclusion's own `base`) — it only
+ * changes behavior at the ONE place a `false` gets negated:
+ * `evalRewrite`'s `exclusion` case, where `subtract.certain === false`
+ * must NOT be treated as "subtract disproven, so the exclusion holds"
+ * (exactly the unsound flip this fix closes) but as its own outcome,
+ * `subtractUnprovable` — the exclusion itself resolves `allowed: false,
+ * certain: false`, propagating the same "cannot prove" signal transitively
+ * to whatever combinator consumes it next, exactly like the cycle guard's
+ * own signal already does everywhere else in this file.
+ *
+ * **Mechanism 2 (`sqlRelationMembershipWithWitness`) always reports
+ * `certain: true` on its own `false` — a deliberate, disclosed scope
+ * decision, not an oversight.** Its own SQL-level path-array cycle guard is
+ * exact/lossless (D-021/D-026: pruning an already-visited identity can
+ * never drop real reachability, so exhausting the frontier is a genuine,
+ * complete proof of absence) — no taint needed there. Its own depth
+ * ceiling, unlike mechanism 1's, has no analogous fix here: `RelationDisproof`
+ * carries no "was the ceiling actually still binding" signal today (unlike
+ * `BoundReachedDisproof`'s explicit `reason`), and adding one would be a
+ * genuinely separate, more invasive structural change — this file's own
+ * fix report discloses this explicitly as a residual, distinct,
+ * not-yet-confirmed-or-fixed risk sharing the identical algebraic shape,
+ * deliberately out of scope for this minimal fix.
+ */
 type ProductionOutcome =
-  { allowed: true; proof: ResolutionStep } | { allowed: false; disproof: DisproofStep };
+  | { allowed: true; certain: true; proof: ResolutionStep }
+  | { allowed: false; certain: boolean; disproof: DisproofStep };
 
 /**
  * Per-check-call state threaded through the recursive walk. `schemaCache`
@@ -478,18 +578,32 @@ async function resolve(
   depth: number,
 ): Promise<ProductionOutcome> {
   ctx.depthReached.value = Math.max(ctx.depthReached.value, depth);
+  // `certain: false` — see `ProductionOutcome`'s own doc comment: this is a
+  // truncation, not a proof, and must not be silently treated as one by a
+  // containing exclusion's own `NOT`.
   if (depth > ctx.maxDepth) {
-    return { allowed: false, disproof: { kind: 'boundReached', object, name, reason: 'depth' } };
+    return {
+      allowed: false,
+      certain: false,
+      disproof: { kind: 'boundReached', object, name, reason: 'depth' },
+    };
   }
 
   const key = entityNameKey(object, name);
   if (visited.has(key)) {
-    return { allowed: false, disproof: { kind: 'boundReached', object, name, reason: 'cycle' } };
+    // `certain: false` — same reasoning as the depth backstop above.
+    return {
+      allowed: false,
+      certain: false,
+      disproof: { kind: 'boundReached', object, name, reason: 'cycle' },
+    };
   }
   visited.add(key);
   try {
     const config = await getConfig(ctx, object.ns);
-    if (!config) return { allowed: false, disproof: { kind: 'undeclared', object, name } };
+    if (!config) {
+      return { allowed: false, certain: true, disproof: { kind: 'undeclared', object, name } };
+    }
 
     const relation = config.relations[name];
     if (relation) {
@@ -503,9 +617,12 @@ async function resolve(
       );
       ctx.depthReached.value = Math.max(ctx.depthReached.value, sqlOutcome.depthReached);
       ctx.touchedExpiringTuple.value ||= sqlOutcome.touchedExpiringTuple;
+      // Mechanism 2 always reports `certain: true` on its own `false` — a
+      // deliberate, disclosed scope decision; see `ProductionOutcome`'s own
+      // doc comment for why.
       return sqlOutcome.allowed
-        ? { allowed: true, proof: sqlOutcome.proof }
-        : { allowed: false, disproof: sqlOutcome.disproof };
+        ? { allowed: true, certain: true, proof: sqlOutcome.proof }
+        : { allowed: false, certain: true, disproof: sqlOutcome.disproof };
     }
 
     const permission = config.permissions[name];
@@ -514,7 +631,7 @@ async function resolve(
     }
 
     // Undeclared relation/permission name — fail closed, never throw.
-    return { allowed: false, disproof: { kind: 'undeclared', object, name } };
+    return { allowed: false, certain: true, disproof: { kind: 'undeclared', object, name } };
   } finally {
     visited.delete(key);
   }
@@ -541,6 +658,11 @@ async function evalRewrite(
     }
     case 'union': {
       const disproofs: DisproofStep[] = [];
+      // See `ProductionOutcome`'s own doc comment — union is a plain
+      // (non-negated) OR, so `false` here is certain only if every branch
+      // consulted was itself certain; one cycle/depth-cut branch taints the
+      // whole union's own "no" without changing the "no" itself.
+      let allCertain = true;
       for (let i = 0; i < rule.children.length; i += 1) {
         const child = rule.children[i];
         if (child === undefined) continue; // unreachable given the loop bound
@@ -548,12 +670,18 @@ async function evalRewrite(
         if (outcome.allowed) {
           return {
             allowed: true,
+            certain: true,
             proof: { kind: 'union', object, branchIndex: i, branch: outcome.proof },
           };
         }
+        allCertain &&= outcome.certain;
         disproofs.push(outcome.disproof);
       }
-      return { allowed: false, disproof: { kind: 'unionDisproof', object, branches: disproofs } };
+      return {
+        allowed: false,
+        certain: allCertain,
+        disproof: { kind: 'unionDisproof', object, branches: disproofs },
+      };
     }
     case 'intersection': {
       const proofs: ResolutionStep[] = [];
@@ -562,8 +690,14 @@ async function evalRewrite(
         if (child === undefined) continue; // unreachable given the loop bound
         const outcome = await evalRewrite(ctx, child, subject, object, visited, depth);
         if (!outcome.allowed) {
+          // Kleene AND: a `false` branch makes the whole intersection
+          // `false` regardless of any other (possibly still-unevaluated)
+          // branch's own value — so this short-circuit is exact, and the
+          // stopping branch's own `certain` flag is exactly the
+          // intersection's own.
           return {
             allowed: false,
+            certain: outcome.certain,
             disproof: {
               kind: 'intersectionDisproof',
               object,
@@ -574,13 +708,24 @@ async function evalRewrite(
         }
         proofs.push(outcome.proof);
       }
-      return { allowed: true, proof: { kind: 'intersection', object, branches: proofs } };
+      return {
+        allowed: true,
+        certain: true,
+        proof: { kind: 'intersection', object, branches: proofs },
+      };
     }
     case 'exclusion': {
       const base = await evalRewrite(ctx, rule.base, subject, object, visited, depth);
       if (!base.allowed) {
+        // Short-circuit unchanged from before this fix — `NOT` never sits
+        // between `base` and the top here, so a `base` that's `false`
+        // (certain OR merely cut-off/uncertain) safely makes the whole
+        // exclusion `false` either way (Kleene AND: `false` dominates
+        // regardless of the other, unevaluated operand's own value) —
+        // `certain` is simply carried forward unchanged, never re-derived.
         return {
           allowed: false,
+          certain: base.certain,
           disproof: {
             kind: 'exclusionDisproof',
             object,
@@ -592,6 +737,7 @@ async function evalRewrite(
       if (subtract.allowed) {
         return {
           allowed: false,
+          certain: true,
           disproof: {
             kind: 'exclusionDisproof',
             object,
@@ -599,8 +745,33 @@ async function evalRewrite(
           },
         };
       }
+      // *** The fix for the exclusion/cycle-guard soundness gap. ***
+      // `subtract.allowed === false` alone is NOT sufficient to conclude
+      // "subtract disproven, so this exclusion holds" — that reasoning is
+      // exactly what let a cycle-guard (or depth-ceiling) hit inside
+      // `subtract` flip, via this very `NOT`, into an unsound `allowed:
+      // true`. Only a *certain* `false` (an exhaustive disproof) may be
+      // treated as "not excluded." An *uncertain* one propagates its own
+      // "cannot prove" signal instead — this exclusion itself resolves
+      // `allowed: false, certain: false`, denying it (fail-closed, matching
+      // this file's own convention everywhere else) while still letting
+      // any FURTHER containing exclusion see that this "no" is not safe to
+      // negate either. See `ExclusionDisproof`'s own doc comment for the
+      // concrete reproduction this closes.
+      if (!subtract.certain) {
+        return {
+          allowed: false,
+          certain: false,
+          disproof: {
+            kind: 'exclusionDisproof',
+            object,
+            reason: { kind: 'subtractUnprovable', subtract: subtract.disproof },
+          },
+        };
+      }
       return {
         allowed: true,
+        certain: true,
         proof: { kind: 'exclusion', object, base: base.proof, subtractDisproof: subtract.disproof },
       };
     }
@@ -612,6 +783,9 @@ async function evalRewrite(
       );
       ctx.touchedExpiringTuple.value ||= touchedExpiringTuple;
       const followed: Array<{ through: EntityRef; disproof: DisproofStep }> = [];
+      // Same "union over every followed tuple" shape as `evalRewrite`'s own
+      // `union` case above — see `ProductionOutcome`'s own doc comment.
+      let allCertain = true;
       for (const newObject of subjects) {
         const outcome = await resolve(
           ctx,
@@ -624,6 +798,7 @@ async function evalRewrite(
         if (outcome.allowed) {
           return {
             allowed: true,
+            certain: true,
             proof: {
               kind: 'tupleToUserset',
               object,
@@ -634,10 +809,12 @@ async function evalRewrite(
             },
           };
         }
+        allCertain &&= outcome.certain;
         followed.push({ through: newObject, disproof: outcome.disproof });
       }
       return {
         allowed: false,
+        certain: allCertain,
         disproof: { kind: 'tupleToUsersetDisproof', object, relation: rule.relation, followed },
       };
     }
@@ -1181,10 +1358,17 @@ async function sqlRelationMembershipWithWitness(
  * "a real, testable assertion rather than an assumption" — `docs/
  * CONSISTENCY.md`'s own words for `assertTokenObserved` itself.
  */
+/**
+ * The exact SQL text `assertTokenObservedOnSnapshot` issues — pulled out as
+ * a named constant purely so `guardPinnedClientForSnapshotAnchor` below can
+ * recognize the anchor query by exact identity, not some fuzzier heuristic
+ * (a substring match, a comment tag, ...). Both live in this one file, so
+ * this is a plain same-file constant, not a shared abstraction.
+ */
+const ANCHOR_QUERY_TEXT = 'select max(token) as max_token from write_log';
+
 async function assertTokenObservedOnSnapshot(client: QueryExecutor, token: number): Promise<void> {
-  const { rows } = await client.query<{ max_token: string | null }>(
-    'select max(token) as max_token from write_log',
-  );
+  const { rows } = await client.query<{ max_token: string | null }>(ANCHOR_QUERY_TEXT);
   const raw = rows[0]?.max_token;
   const observed = raw === null || raw === undefined ? null : Number(raw);
   if (observed === null || token > observed) {
@@ -1193,6 +1377,87 @@ async function assertTokenObservedOnSnapshot(client: QueryExecutor, token: numbe
         `snapshot (highest token visible to this snapshot: ${observed ?? 'none — no writes yet'})`,
     );
   }
+}
+
+/**
+ * A real, runtime-enforced version of the ordering `assertTokenObservedOnSnapshot`'s
+ * own doc comment above depends on but, until now, only enforced by code
+ * structure — disclosed as a genuine, still-open gap in `docs/DECISIONS.md`
+ * D-139 ("a pg-side runtime check enforcing that `productionCheck`'s
+ * snapshot-anchoring query always runs first ... was applied only to the
+ * in-memory fake [`src/store/dst/connection.ts`'s `TxState.Snapshot`
+ * handling], never to the real `resolver.ts`"). This closes that gap.
+ *
+ * Wraps `productionCheck`'s pinned client, for the whole lifetime of one
+ * check, so that whenever `atToken` is set, the first non-transaction-
+ * control query Postgres actually sees on this connection must genuinely BE
+ * `assertTokenObservedOnSnapshot`'s own query (`ANCHOR_QUERY_TEXT`) — not
+ * "called first in this file's source text," but "the first statement this
+ * physical connection executes after `BEGIN`," which is the only thing that
+ * actually determines where `REPEATABLE READ`'s snapshot anchors. Any other
+ * query attempted first throws immediately, naming the offending SQL — an
+ * internal-invariant violation (a future accidental reordering inside this
+ * file, e.g. some new read added ahead of the anchor check), never
+ * something a `productionCheck` caller's own arguments could trigger, so
+ * this is deliberately not a "fails closed" / `disproof`-shaped outcome:
+ * it throws, the same way a genuinely unreachable database throws (see
+ * `productionCheck`'s own doc comment on that distinction).
+ *
+ * `BEGIN`/`COMMIT`/`ROLLBACK` are recognized by exact text match against the
+ * three literals `productionCheck` itself issues on this same client
+ * (nothing fuzzier — this wrapper only ever needs to recognize this one
+ * file's own three control statements, not "is this SQL transaction
+ * control" in general) and never count toward "has a query run yet."
+ *
+ * Only constructed when `atToken !== undefined` (see `productionCheck`
+ * below): with no token to pin there is no snapshot-anchor requirement to
+ * enforce, and the un-pinned path gets back the exact same `client`
+ * reference, not even a passthrough object — zero added overhead, per this
+ * project's own "build a thing only when the current need actually depends
+ * on it" discipline.
+ *
+ * Deliberately minimal, single-purpose machinery, not a general
+ * "instrumented connection" abstraction, and never shared with
+ * `src/resolve/reference/resolver.ts` (which has no Postgres snapshot to
+ * anchor in the first place, so this concept doesn't even apply there).
+ *
+ * Exported *only* so `test/unit/resolve/production/snapshot-anchor-
+ * invariant.test.ts` (DB-free, unit-level) can exercise the violation path
+ * directly against a hand-written fake `QueryExecutor` — `productionCheck`
+ * itself always calls this in the one order that keeps the invariant
+ * satisfied; this wrapper exists to catch a future *accidental* reordering,
+ * not because normal operation could ever trip it today. Matches this
+ * file's own established precedent for `fetchReachableFrontier`/
+ * `dedupeFrontier`/`FrontierRow` (exported for direct test access to the
+ * real mechanism, not a hand-copied stand-in).
+ */
+export function guardPinnedClientForSnapshotAnchor(client: QueryExecutor): QueryExecutor {
+  let firstNonControlQueryText: string | null = null;
+  return {
+    async query<Row = Record<string, unknown>>(
+      text: string,
+      params?: readonly unknown[],
+    ): Promise<QueryResultLike<Row>> {
+      const isTransactionControl =
+        text === 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' ||
+        text === 'COMMIT' ||
+        text === 'ROLLBACK';
+      if (!isTransactionControl && firstNonControlQueryText === null) {
+        firstNonControlQueryText = text;
+        if (text !== ANCHOR_QUERY_TEXT) {
+          throw new Error(
+            "internal invariant violation: a query ran on productionCheck's pinned " +
+              'REPEATABLE READ connection before assertTokenObservedOnSnapshot (the ' +
+              'snapshot-anchoring check) — this should never happen. Postgres anchors a ' +
+              "REPEATABLE READ snapshot at the transaction's first query, not at BEGIN, so " +
+              'assertTokenObservedOnSnapshot must always be the first non-transaction-control ' +
+              `query issued on this connection whenever atToken is set. Offending query: ${text}`,
+          );
+        }
+      }
+      return client.query<Row>(text, params);
+    },
+  };
 }
 
 /**
@@ -1284,20 +1549,26 @@ export async function productionCheck(
   const touchedExpiringTuple = { value: false };
 
   const client = await pool.connect();
+  // Wrapped at acquisition, before this connection's very first query, so
+  // the guard sees literally everything issued on it — see
+  // `guardPinnedClientForSnapshotAnchor`'s own doc comment. Only wrapped
+  // when there's an `atToken` anchor requirement to enforce; the unpinned
+  // path keeps the exact same `client` reference, zero added overhead.
+  const guardedClient = atToken !== undefined ? guardPinnedClientForSnapshotAnchor(client) : client;
   try {
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await guardedClient.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     if (atToken !== undefined) {
-      await assertTokenObservedOnSnapshot(client, atToken);
+      await assertTokenObservedOnSnapshot(guardedClient, atToken);
     }
     const ctx: WalkContext = {
-      client,
+      client: guardedClient,
       maxDepth,
       schemaCache: new Map(),
       depthReached,
       touchedExpiringTuple,
     };
     const outcome = await resolve(ctx, subject, object, relationOrPermission, new Set(), 0);
-    await client.query('COMMIT');
+    await guardedClient.query('COMMIT');
     return outcome.allowed
       ? {
           allowed: true,
@@ -1323,7 +1594,7 @@ export async function productionCheck(
     // of whatever actually made the check fail, at exactly the moment the
     // real cause matters most.
     try {
-      await client.query('ROLLBACK');
+      await guardedClient.query('ROLLBACK');
     } catch {
       // Swallowed deliberately — see comment above. Postgres releases the
       // connection (and anything it held) on its own once it's actually

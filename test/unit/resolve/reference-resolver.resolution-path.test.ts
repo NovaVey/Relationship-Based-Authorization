@@ -393,15 +393,27 @@ function verifyDisproofAgainstRule(
           state,
         );
       }
-      return verifyAgainstRule(
-        schema,
-        tuples,
-        subject,
-        object,
-        rule.subtract,
-        disproof.reason.subtract,
-        state,
-      );
+      if (disproof.reason.kind === 'subtractProven') {
+        return verifyAgainstRule(
+          schema,
+          tuples,
+          subject,
+          object,
+          rule.subtract,
+          disproof.reason.subtract,
+          state,
+        );
+      }
+      // `subtractUnprovable` — the exclusion/cycle-guard soundness fix (see
+      // the resolver's own `ExclusionDisproof` doc comment). Structurally
+      // unreachable here: this function only ever walks a WINNING proof's
+      // own `subtractDisproof` field, and anything that taints `subtract`
+      // also taints the containing exclusion itself, which then can't be
+      // `allowed: true` (and so can never be embedded in a winning proof)
+      // either — see `MembershipOutcome.certain`'s own doc comment for why.
+      // A verifier reaching this branch at all means that invariant broke;
+      // fail the verification rather than silently accept it.
+      return false;
     }
     case 'tupleToUserset': {
       if (disproof.kind !== 'tupleToUsersetDisproof' || !entityEq(disproof.object, object))
