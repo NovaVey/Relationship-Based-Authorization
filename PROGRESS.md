@@ -2664,3 +2664,21 @@ Closes D-158's own named follow-up: a general-shape, randomly-generated regressi
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Both properties re-run live via LOCALVERIFY after the D-159 merge: 2/2 passing (40 + 10 seeds, all green). Property A's own detection power independently confirmed by temporarily bypassing D-158's guard and observing an immediate, reproducible catch, then restoring byte-identical.
 
 Full account: `docs/DECISIONS.md` D-160.
+
+## The main fuzzer's own random generation now reliably constructs the D-159 bug shape, closing the standard-config gap D-159/D-160 both disclosed (D-161)
+
+**Owner:** a soundness-engineer agent in an isolated worktree.
+
+D-159's and D-160's own write-ups both measured the same fact: the standard-budget fuzzer (5,000 queries, real default `maxDepth`, the actual CI configuration) never caught the D-159 bug class even with it reintroduced — the random generator's existing guaranteed-deep-chain construction never happened to wire an exclusion's subtract into a relation-only chain deep enough. D-160's dedicated metamorphic property closed this as a standing guard, but the fuzzer CI actually runs on every PR still couldn't.
+
+**Fixed by adding a new guaranteed structure** (same reliability class as the existing guaranteed cycle and deep chain) to `src/soundness/generators.ts`: `banned`'s declared type widens to accept a nested userset chain, and a new 25-group guaranteed deep chain wires a real, reachable-only-past-the-boundary membership into `unbanned_view`'s own exclusion. The depth-accounting derivation was done fresh (mechanism 2's own formula, not assumed from D-070's), verified by hand and empirically before trusting it.
+
+**A real design flaw found and fixed mid-work, not shipped and found later:** the first version's "clean" control witness shared an object with the deep chain — testing against the real reference resolver showed a genuinely-binding truncation on one `(object, relation)` pair taints every not-found subject checked against it, not just the probed one. Moved the control to a separate, chain-free object.
+
+**Fail-checked live, independently, twice, with exact numbers.** Implementing agent: 5/5 clean seeds sound; bug reintroduced, 10/10 fresh seeds unsound, every single false_grant across all 10 runs traced to exactly the new construct — a dramatic jump from D-159's own 0/10 at this same standard config. This session's own main agent reproduced a second time on a freshly reset database (ruling out a real, disclosed sandbox-only artifact — the flagship fuzz test's hardcoded seed accumulating stale tuples across sessions in this reused local Postgres): 3/3 clean sound, then 5/5 with the bug reintroduced, all caught, all naming the exact new witness; restored, byte-clean, sound again.
+
+**A real regression caught and fixed as a disclosed side effect:** the monotonicity metamorphic property's own Property 5 implicitly assumed no direct `banned` grant meant definitely-unbanned — no longer true once `banned` accepted a userset type. Fixed by excluding genuinely-uncertain objects from that property's witness search.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Fast suite: 70 files, 1077 tests (up from 1040). Full LOCALVERIFY re-run on a freshly reset database: the flagship fuzz suite, both existing metamorphic property files, the D-159 regression suite, and both D-160 properties — 16 tests combined, all passing, zero regressions.
+
+Full account: `docs/DECISIONS.md` D-161.
