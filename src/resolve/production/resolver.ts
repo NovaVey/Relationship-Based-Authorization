@@ -361,10 +361,14 @@ export interface TupleToUsersetDisproof {
  * (`sqlRelationMembershipWithWitness`'s own SQL-level path-array cycle
  * guard) never produces this shape at all — its own disproof is always a
  * `RelationDisproof`, never a `BoundReachedDisproof` — see D-026/D-021 for
- * why that mechanism's cycle-pruning is exact/lossless on its own terms and
- * genuinely out of scope for this fix (documented as a residual, distinct,
- * not-yet-addressed risk in this fix's own report, not silently assumed
- * safe).
+ * why that mechanism's cycle-pruning is exact/lossless on its own terms.
+ * Its own depth ceiling is a separate matter, genuinely out of scope for
+ * *this* fix (the cycle-guard fix) at the time it shipped, and disclosed as
+ * a residual risk sharing this identical algebraic shape — since closed;
+ * see `SqlRelationOutcome`'s own doc comment and `depthCeilingGenuinelyBinding`
+ * for how `sqlRelationMembershipWithWitness` now signals a genuinely
+ * truncated `false` via its own `certain` field, without ever needing a
+ * `BoundReachedDisproof`-shaped leaf of its own.
  */
 export interface BoundReachedDisproof {
   kind: 'boundReached';
@@ -443,19 +447,30 @@ export interface ProductionCheckResult {
  * to whatever combinator consumes it next, exactly like the cycle guard's
  * own signal already does everywhere else in this file.
  *
- * **Mechanism 2 (`sqlRelationMembershipWithWitness`) always reports
- * `certain: true` on its own `false` — a deliberate, disclosed scope
- * decision, not an oversight.** Its own SQL-level path-array cycle guard is
- * exact/lossless (D-021/D-026: pruning an already-visited identity can
- * never drop real reachability, so exhausting the frontier is a genuine,
- * complete proof of absence) — no taint needed there. Its own depth
- * ceiling, unlike mechanism 1's, has no analogous fix here: `RelationDisproof`
- * carries no "was the ceiling actually still binding" signal today (unlike
- * `BoundReachedDisproof`'s explicit `reason`), and adding one would be a
- * genuinely separate, more invasive structural change — this file's own
- * fix report discloses this explicitly as a residual, distinct,
- * not-yet-confirmed-or-fixed risk sharing the identical algebraic shape,
- * deliberately out of scope for this minimal fix.
+ * **Mechanism 2 (`sqlRelationMembershipWithWitness`) — the identical
+ * `certain` reasoning now applies here too, closing a residual risk this
+ * file's own D-158 fix originally disclosed but did not fix.** Its own
+ * SQL-level path-array cycle guard is exact/lossless (D-021/D-026: pruning
+ * an already-visited identity can never drop real reachability, so
+ * exhausting the frontier *via cycle-pruning alone* is a genuine, complete
+ * proof of absence) — no taint needed there, and none is applied. Its own
+ * depth ceiling, however, is exactly as capable of truncating before a real
+ * match is found as mechanism 1's TS-level ceiling always was — confirmed
+ * live: an exclusion whose `subtract` is a plain relation with a real,
+ * tuple-reachable userset-membership chain deeper than the effective
+ * budget reproduced a real, live `false_grant` before this fix (subject
+ * genuinely IS a member of `subtract`, just beyond the SQL frontier scan's
+ * own truncated depth, which used to be unconditionally reported
+ * `certain: true`). `depthCeilingGenuinelyBinding` (below
+ * `SqlRelationOutcome`) now distinguishes "the frontier scan's own depth
+ * ceiling was never actually reached, or was reached but had nothing real
+ * left to explore" (still `certain: true`) from "the ceiling cut off a
+ * real, unread edge" (`certain: false`) — cheaply, from data
+ * `sqlRelationMembershipWithWitness` already fetches for the disproof
+ * certificate itself, no new query. See that function's own doc comment
+ * for the full reasoning and `test/unit/resolve/production/mechanism-2-
+ * exclusion-depth-ceiling.integration.test.ts` for the live regression this
+ * fix shipped with.
  */
 type ProductionOutcome =
   | { allowed: true; certain: true; proof: ResolutionStep }
@@ -617,12 +632,12 @@ async function resolve(
       );
       ctx.depthReached.value = Math.max(ctx.depthReached.value, sqlOutcome.depthReached);
       ctx.touchedExpiringTuple.value ||= sqlOutcome.touchedExpiringTuple;
-      // Mechanism 2 always reports `certain: true` on its own `false` — a
-      // deliberate, disclosed scope decision; see `ProductionOutcome`'s own
-      // doc comment for why.
+      // `sqlOutcome.certain` — see `SqlRelationOutcome`'s own doc comment
+      // for why mechanism 2's own `false` is no longer unconditionally
+      // reported certain (the D-158 residual risk this closes).
       return sqlOutcome.allowed
         ? { allowed: true, certain: true, proof: sqlOutcome.proof }
-        : { allowed: false, certain: true, disproof: sqlOutcome.disproof };
+        : { allowed: false, certain: sqlOutcome.certain, disproof: sqlOutcome.disproof };
     }
 
     const permission = config.permissions[name];
@@ -1233,10 +1248,98 @@ function buildRelationDisproof(
  * whether it was the one that matched; see `ProductionCheckResult
  * .touchedExpiringTuple`'s own doc comment for why this is deliberately
  * over-approximate.
+ *
+ * **`certain` on the `allowed: false` branch — closes the residual D-158
+ * risk this file's own top-of-file doc comment used to disclose as
+ * not-yet-addressed.** Previously this function's own `false` outcome was
+ * *always* treated as an exhaustive disproof by its caller (`resolve`),
+ * regardless of whether `fetchReachableFrontier`'s own `depth < maxDepth`
+ * ceiling actually cut off real, unexplored frontier before the search
+ * naturally exhausted itself. That was safe reasoning for the SQL
+ * path-array cycle guard (D-021/D-026: exact and lossless, pruning an
+ * already-visited identity never drops real reachability) but never for
+ * the depth ceiling, which — exactly like mechanism 1's own TS-level
+ * ceiling before the D-158 fix — can genuinely truncate before a real
+ * match is found. Consumed inside an exclusion's own `NOT` (`evalRewrite`'s
+ * `exclusion` case, via `resolve`), a depth-truncated `false` wrongly
+ * reported as `certain: true` reproduces the identical unsound flip D-158
+ * fixed for mechanism 1: `NOT (can't-prove)` silently became `true`. See
+ * `depthCeilingGenuinelyBinding` below for how this is now detected —
+ * cheaply, from data this function already fetched, no new query.
  */
 type SqlRelationOutcome =
   | { allowed: true; proof: ResolutionStep; depthReached: number; touchedExpiringTuple: boolean }
-  | { allowed: false; disproof: DisproofStep; depthReached: number; touchedExpiringTuple: boolean };
+  | {
+      allowed: false;
+      disproof: DisproofStep;
+      depthReached: number;
+      touchedExpiringTuple: boolean;
+      certain: boolean;
+    };
+
+/**
+ * Detects whether `fetchReachableFrontier`'s own `depth < maxDepth` ceiling
+ * genuinely suppressed real, unexplored frontier — as opposed to the search
+ * simply having nowhere further to go and coincidentally stopping right at
+ * the ceiling. This is the "was the ceiling actually still binding" signal
+ * `RelationDisproof` itself has no field for (this file's own top-of-file
+ * doc comment) — computed here instead, from data `sqlRelationMembershipWithWitness`
+ * already fetched for the disproof certificate itself, so no new query is
+ * needed.
+ *
+ * **Why only nodes at exactly `depth === maxDepth` can ever be the site of
+ * a genuine truncation.** `fetchReachableFrontier`'s recursive term only
+ * ever refuses to expand a frontier row `m` when `m.depth < maxDepth` is
+ * false, i.e. exactly when `m.depth === maxDepth` (a row can never be
+ * present in the frontier with `depth > maxDepth` at all — the same clause
+ * excludes it from ever being added). Any row with `depth < maxDepth` was
+ * always free to expand as far as its own real tuples allowed, so it can
+ * never be the site of a budget-caused gap — only cycle-pruning (D-021,
+ * already accounted for separately) could have stopped it there, and that
+ * is exact/lossless.
+ *
+ * **Why checking against `frontier` (every node this call ever reached, at
+ * its own minimum discovered depth) rather than just each node's own
+ * `path`/`ancestorPath` is the correct comparison.** What matters for
+ * soundness is only "was every real tuple that could contain a match ever
+ * actually read?" — not "did this exact lineage's own edge get walked by
+ * the CTE." If a deepest node's outgoing userset edge points at an
+ * identity already present in `frontier` (discovered via any other,
+ * possibly shorter, route), that identity's own tuples were already read
+ * by `fetchTuplesOnFrontier` regardless of whether this specific edge was
+ * ever traversed — no gap. Only an edge pointing somewhere `frontier` has
+ * never heard of at all is evidence of a real, unexplored branch.
+ *
+ * **Why only nodes whose *minimum* discovered depth equals `maxDepth`
+ * matter.** `frontier` (via `dedupeFrontier`) already keeps the smallest
+ * depth ever recorded for each identity. A node that also happens to
+ * appear at `maxDepth` via some other, longer lineage but has a *shorter*
+ * real lineage too was already given a chance to expand via that shorter
+ * lineage (since its own depth there is `< maxDepth`) — so it is never
+ * flagged here, correctly: nothing about it was actually left unexplored.
+ */
+function depthCeilingGenuinelyBinding(
+  frontier: ReadonlyMap<string, FrontierRow>,
+  depthReached: number,
+  maxDepth: number,
+  tuplesByFrontierKey: ReadonlyMap<string, FrontierTupleRow[]>,
+): boolean {
+  if (depthReached !== maxDepth) return false; // never even reached the ceiling — nothing to suppress
+  for (const row of frontier.values()) {
+    if (row.depth !== maxDepth) continue;
+    const tuples = tuplesByFrontierKey.get(frontierKeyStr(row)) ?? [];
+    for (const t of tuples) {
+      if (t.subject_relation === null) continue; // a plain grant, not an outgoing userset edge
+      const targetKey = frontierKeyStr({
+        ns: t.subject_ns,
+        id: t.subject_id,
+        relation: t.subject_relation,
+      });
+      if (!frontier.has(targetKey)) return true; // a real edge to somewhere never actually read
+    }
+  }
+  return false;
+}
 
 /**
  * Answers "is `subject` a transitive member of the set granted by
@@ -1307,6 +1410,7 @@ async function sqlRelationMembershipWithWitness(
     disproof: buildRelationDisproof(object, relation, maxDepth, frontier, tuplesByFrontierKey),
     depthReached,
     touchedExpiringTuple,
+    certain: !depthCeilingGenuinelyBinding(frontier, depthReached, maxDepth, tuplesByFrontierKey),
   };
 }
 
