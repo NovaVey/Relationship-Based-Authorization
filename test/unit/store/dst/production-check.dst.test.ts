@@ -654,3 +654,208 @@ describe("the tuple-to-userset hop (parent->view) — listTupleSubjects's own SQ
     expect(result.allowed).toBe(true);
   });
 });
+
+/**
+ * The exclusion/cycle-guard soundness fix. `evalRewrite`'s `exclusion` case
+ * used to treat `!subtract.allowed` as "subtract disproven, so this
+ * exclusion holds" unconditionally — but `resolve`'s own TS-level
+ * `visited`-Set cycle guard (and its depth ceiling) ALSO return
+ * `allowed: false` the instant they cut a branch off, per this project's own
+ * fail-closed convention. Consumed here, inside exclusion's own `NOT`, that
+ * fail-closed "can't prove" `false` was silently indistinguishable from a
+ * genuine, exhaustively-proven "no" — `NOT (can't-prove)` is not `true`,
+ * even though `NOT false` is. `view = grant - parent->view` on a
+ * self-referencing `parent` (an ordinary hierarchy pattern — self-
+ * referencing `parent` tuples are this DSL's own headline use case)
+ * reproduces this concretely. Mirrors
+ * `test/unit/resolve/reference-resolver.graph-shape.test.ts`'s own
+ * identically-named describe block — independently written, not shared,
+ * per D-022 — proving both resolvers agree on the fixed behavior.
+ */
+describe('a-cycle-inside-an-exclusions-subtract-branch-must-not-flip-a-fail-closed-cycle-guard-into-an-unsound-grant', () => {
+  const EXCLUSION_CYCLE_SCHEMA_SOURCE = [
+    'namespace folder {',
+    '  relation parent: folder',
+    '  relation grant: user',
+    '  permission view = grant - parent->view',
+    '}',
+  ].join('\n');
+
+  it('a-self-referencing-parent-tuple-inside-an-exclusions-subtract-resolves-denied-not-an-unsound-grant', async () => {
+    // folder:a is its own parent (a one-node cycle). Hand-derived answer:
+    // view(a) = grant(a) AND NOT(parent->view(a)) = grant(a) AND NOT(view(a))
+    // — a self-referential equation with no consistent grounding once the
+    // cycle is set aside. Confirmed live, with this fix reverted, before it
+    // existed: this exact fixture resolved `allowed: true`, an unsound
+    // false_grant — see this file's own doc comment and this describe
+    // block's own doc comment for the full reasoning.
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(EXCLUSION_CYCLE_SCHEMA_SOURCE, 'folder'));
+    const source = createFakeConnectionSource(state);
+
+    const parentWrite = await writeTuple(source, {
+      objectNs: 'folder',
+      objectId: 'a',
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: 'a',
+    });
+    expect(parentWrite.ok).toBe(true);
+    const grantWrite = await writeTuple(source, {
+      objectNs: 'folder',
+      objectId: 'a',
+      relation: 'grant',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(grantWrite.ok).toBe(true);
+
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'alice' },
+      { ns: 'folder', id: 'a' },
+      'view',
+      { maxDepth: 20 },
+    );
+    expect(result.allowed).toBe(false);
+  });
+
+  it('a-three-node-ring-inside-an-exclusions-subtract-resolves-denied-not-an-unsound-grant-at-every-node-in-the-ring', async () => {
+    // folder:a -> parent -> folder:b -> parent -> folder:c -> parent ->
+    // folder:a, every node granted. Deliberately an ODD-length ring — see
+    // the reference resolver's own identically-named test for the full
+    // "even-length rings can accidentally self-cancel" reasoning, confirmed
+    // by hand-tracing and then independently confirmed live against the
+    // reverted (pre-fix) code for this exact production/DST fixture too:
+    // with the fix reverted, querying `view` on EVERY node in this 3-node
+    // ring returned an unsound `allowed: true`.
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(EXCLUSION_CYCLE_SCHEMA_SOURCE, 'folder'));
+    const source = createFakeConnectionSource(state);
+
+    const edges: Array<[string, string]> = [
+      ['a', 'b'],
+      ['b', 'c'],
+      ['c', 'a'],
+    ];
+    for (const [from, to] of edges) {
+      const w = await writeTuple(source, {
+        objectNs: 'folder',
+        objectId: from,
+        relation: 'parent',
+        subjectNs: 'folder',
+        subjectId: to,
+      });
+      expect(w.ok).toBe(true);
+    }
+    for (const id of ['a', 'b', 'c']) {
+      const gw = await writeTuple(source, {
+        objectNs: 'folder',
+        objectId: id,
+        relation: 'grant',
+        subjectNs: 'user',
+        subjectId: 'alice',
+      });
+      expect(gw.ok).toBe(true);
+    }
+
+    for (const id of ['a', 'b', 'c']) {
+      const result = await productionCheck(
+        source,
+        { ns: 'user', id: 'alice' },
+        { ns: 'folder', id },
+        'view',
+        { maxDepth: 20 },
+      );
+      expect(result.allowed).toBe(false);
+    }
+  });
+
+  it('control-the-identical-cyclic-shape-but-the-subtract-branch-is-certainly-grounded-false-still-resolves-allowed-no-regression', async () => {
+    // folder:b has NO `grant` tuple at all, so view(b) = false AND ... =
+    // false, certainly (Kleene AND: a certain false dominates regardless of
+    // the unevaluated recursive term), without ever needing to chase b's
+    // own `parent->view` back to folder:a — the cycle is structurally
+    // present in the tuple graph but never actually walked for this query.
+    // Proves the fix doesn't turn a genuinely-resolvable case into a new,
+    // over-conservative false_deny.
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(EXCLUSION_CYCLE_SCHEMA_SOURCE, 'folder'));
+    const source = createFakeConnectionSource(state);
+
+    const w1 = await writeTuple(source, {
+      objectNs: 'folder',
+      objectId: 'a',
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: 'b',
+    });
+    expect(w1.ok).toBe(true);
+    const w2 = await writeTuple(source, {
+      objectNs: 'folder',
+      objectId: 'b',
+      relation: 'parent',
+      subjectNs: 'folder',
+      subjectId: 'a',
+    });
+    expect(w2.ok).toBe(true);
+    const grantWrite = await writeTuple(source, {
+      objectNs: 'folder',
+      objectId: 'a',
+      relation: 'grant',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(grantWrite.ok).toBe(true);
+    // deliberately no folder:b grant tuple for alice or anyone else.
+
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'alice' },
+      { ns: 'folder', id: 'a' },
+      'view',
+      { maxDepth: 20 },
+    );
+    expect(result.allowed).toBe(true);
+  });
+
+  it('control-a-real-non-cyclic-exclusion-still-correctly-denies-when-the-excluded-set-genuinely-holds', async () => {
+    // No cycle at all — mallory is directly, certainly banned. Proves the
+    // fix didn't weaken the ordinary, non-cyclic exclusion path.
+    const bannedSource = [
+      'namespace document {',
+      '  relation grant: user',
+      '  relation banned: user',
+      '  permission view = grant - banned',
+      '}',
+    ].join('\n');
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(bannedSource, 'document'));
+    const source = createFakeConnectionSource(state);
+
+    const grantWrite = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'grant',
+      subjectNs: 'user',
+      subjectId: 'mallory',
+    });
+    expect(grantWrite.ok).toBe(true);
+    const banWrite = await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'banned',
+      subjectNs: 'user',
+      subjectId: 'mallory',
+    });
+    expect(banWrite.ok).toBe(true);
+
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'mallory' },
+      { ns: 'document', id: 'readme' },
+      'view',
+    );
+    expect(result.allowed).toBe(false);
+  });
+});
