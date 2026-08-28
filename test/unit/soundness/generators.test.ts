@@ -37,6 +37,11 @@ import {
   DEEP_CHAIN_DIRECT_GRANT_USER,
   DEEP_CHAIN_COMBO_INSIDE_USER,
   DEEP_CHAIN_COMBO_OUTSIDE_USER,
+  EXCLUSION_DEEP_CHAIN_REACHABLE_HOPS,
+  EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS,
+  EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER,
+  EXCLUSION_DEEP_CHAIN_BOUNDARY_WITNESS_USER,
+  EXCLUSION_DEEP_CHAIN_CLEAN_WITNESS_USER,
   type GeneratedFixture,
   type GeneratedTuple,
 } from '../../../src/soundness/generators.js';
@@ -64,12 +69,17 @@ function compileOk(source: string): CompiledSchema {
   return result.schema;
 }
 
-/** `namespaces[0]` is always the group-shaped namespace, `namespaces[1]` always the hierarchical one — `generators.ts`'s own stated, tested guarantee (see `buildGroupNamespaceSource`/`buildHierNamespaceSource`'s doc comments). */
-function namespaces(fixture: GeneratedFixture): { groupNs: string; hierNs: string } {
+/** `namespaces[0]` is always the group-shaped namespace, `namespaces[1]` always the hierarchical one, `namespaces[2]` always the resource one — `generators.ts`'s own stated, tested guarantee (see `buildGroupNamespaceSource`/`buildHierNamespaceSource`/`buildResourceNamespaceSource`'s doc comments). */
+function namespaces(fixture: GeneratedFixture): {
+  groupNs: string;
+  hierNs: string;
+  resourceNs: string;
+} {
   const groupNs = fixture.namespaces[0]?.namespace;
   const hierNs = fixture.namespaces[1]?.namespace;
-  if (!groupNs || !hierNs) throw new Error('expected at least two namespaces');
-  return { groupNs, hierNs };
+  const resourceNs = fixture.namespaces[2]?.namespace;
+  if (!groupNs || !hierNs || !resourceNs) throw new Error('expected at least three namespaces');
+  return { groupNs, hierNs, resourceNs };
 }
 
 function findTuple(
@@ -319,6 +329,275 @@ describe('the guaranteed deep chain (D-070) — generateFixture always builds it
     for (let queryCount = 0; queryCount <= 6; queryCount += 1) {
       const fixture = generateFixture('deep-chain-small-query-count-seed', queryCount);
       expect(fixture.queries.length).toBe(queryCount <= 6 ? queryCount : 6);
+    }
+  });
+});
+
+/**
+ * The guaranteed exclusion-subtract deep chain (closing D-159/D-160's own
+ * disclosed follow-up gap, `docs/DECISIONS.md`) — the same discipline as
+ * the D-070 suite above: every assertion is either a direct tuple/query
+ * shape check against `generateFixture`'s own return value, or a call to
+ * the *reference* resolver at an EXPLICIT `maxDepth` matching what
+ * `runSoundnessFuzz`'s own standard invocation actually resolves
+ * (`env.CHECK_MAX_DEPTH`'s documented default, 25 — D-071 unifies this
+ * across both resolvers), never the reference resolver's own generous
+ * `DEFAULT_REFERENCE_MAX_DEPTH` default, which would silently prove the
+ * wrong thing here (this construct's whole point depends on the DEPTH
+ * ACTUALLY USED, not "is there eventually a real path somewhere").
+ * Postgres-backed verification of the *production* resolver's specific
+ * behavior against this exact chain, and the D-159-bug-reintroduced
+ * catch-rate at the real standard fuzz configuration, lives elsewhere (a
+ * throwaway, never-committed LOCALVERIFY probe — see this file's own
+ * top-of-file doc comment for the identical argument applied to D-070's
+ * construct).
+ */
+describe('the guaranteed exclusion-subtract deep chain (D-159/D-160 follow-up) — generateFixture always builds it, deterministically, regardless of seed', () => {
+  const STANDARD_MAX_DEPTH = 25; // env.CHECK_MAX_DEPTH's documented default (.env.example, src/config/env.ts) — see EXCLUSION_DEEP_CHAIN_* constants' own doc comment for the full derivation this depends on.
+
+  it.each(SEEDS)(
+    'seed=%s: the banned-membership chain (edc_g1..edc_g%i) is exactly EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS groups, every edge present, resource#banned wired into edc_g1',
+    (seed) => {
+      const fixture = generateFixture(seed, QUERY_COUNT);
+      const { groupNs, resourceNs } = namespaces(fixture);
+
+      const seedEdge = findTuple(fixture.tuples, {
+        objectNs: resourceNs,
+        objectId: 'edc_resource',
+        relation: 'banned',
+        subjectNs: groupNs,
+        subjectId: 'edc_g1',
+        subjectRelation: 'member',
+      });
+      expect(seedEdge, 'expected a real resource#banned -> edc_g1#member edge').toBeDefined();
+
+      for (let i = 1; i < EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS; i += 1) {
+        const edge = findTuple(fixture.tuples, {
+          objectNs: groupNs,
+          objectId: `edc_g${i}`,
+          relation: 'member',
+          subjectNs: groupNs,
+          subjectId: `edc_g${i + 1}`,
+          subjectRelation: 'member',
+        });
+        expect(edge, `expected a real edc_g${i} -> edc_g${i + 1}#member edge`).toBeDefined();
+      }
+
+      // No edge one hop past the chain's own length — the chain's length is
+      // exactly EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS, not "at least".
+      const oneTooFar = findTuple(fixture.tuples, {
+        objectNs: groupNs,
+        objectId: `edc_g${EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS}`,
+        relation: 'member',
+        subjectRelation: 'member',
+      });
+      expect(oneTooFar).toBeUndefined();
+    },
+  );
+
+  it.each(SEEDS)(
+    'seed=%s: edc_g%i (the reachable boundary) carries a real plain grant to the boundary witness; edc_g%i (one hop past it) carries the real plain grant to the unprovable witness',
+    (seed) => {
+      const fixture = generateFixture(seed, QUERY_COUNT);
+      const { groupNs } = namespaces(fixture);
+
+      const boundaryGrant = findTuple(fixture.tuples, {
+        objectNs: groupNs,
+        objectId: `edc_g${EXCLUSION_DEEP_CHAIN_REACHABLE_HOPS}`,
+        relation: 'member',
+        subjectNs: 'user',
+        subjectId: EXCLUSION_DEEP_CHAIN_BOUNDARY_WITNESS_USER,
+      });
+      expect(boundaryGrant).toBeDefined();
+
+      const unprovableGrant = findTuple(fixture.tuples, {
+        objectNs: groupNs,
+        objectId: `edc_g${EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS}`,
+        relation: 'member',
+        subjectNs: 'user',
+        subjectId: EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER,
+      });
+      expect(unprovableGrant).toBeDefined();
+    },
+  );
+
+  it.each(SEEDS)(
+    'seed=%s: no exclusion-deep-chain object ever receives an additional, randomly drawn tuple on top of the hand-placed ones — the chain\'s real length is exact, not "at least"',
+    (seed) => {
+      const fixture = generateFixture(seed, QUERY_COUNT);
+      const { groupNs, resourceNs } = namespaces(fixture);
+
+      // A representative interior chain node: exactly one tuple (its own
+      // `member` edge to the next node).
+      const interior = tuplesOnObject(fixture.tuples, groupNs, 'edc_g5');
+      expect(interior).toHaveLength(1);
+      expect(interior[0]?.relation).toBe('member');
+
+      // edc_g24 ("reachable boundary") carries exactly two tuples: its own
+      // chain edge to edc_g25 AND its plain grant to the boundary witness.
+      const boundaryNode = tuplesOnObject(
+        fixture.tuples,
+        groupNs,
+        `edc_g${EXCLUSION_DEEP_CHAIN_REACHABLE_HOPS}`,
+      );
+      expect(boundaryNode).toHaveLength(2);
+
+      // edc_g25 (the chain's last node) carries exactly one tuple: its own
+      // plain grant to the unprovable witness — no further chain edge.
+      const unreachableNode = tuplesOnObject(
+        fixture.tuples,
+        groupNs,
+        `edc_g${EXCLUSION_DEEP_CHAIN_UNREACHABLE_HOPS}`,
+      );
+      expect(unreachableNode).toHaveLength(1);
+
+      // `edc_resource` carries exactly three tuples: the one `banned` seed
+      // edge into the chain, plus two direct `viewer` grants (unprovable
+      // and boundary witnesses only — the clean witness lives on a SEPARATE
+      // object, see buildExclusionSubtractDeepChain's own doc comment).
+      const resourceTuples = tuplesOnObject(fixture.tuples, resourceNs, 'edc_resource');
+      expect(resourceTuples).toHaveLength(3);
+
+      // `edc_resource_clean` carries exactly one tuple: the clean witness's
+      // own direct `viewer` grant — zero `banned` tuples, by construction.
+      const cleanResourceTuples = tuplesOnObject(fixture.tuples, resourceNs, 'edc_resource_clean');
+      expect(cleanResourceTuples).toHaveLength(1);
+      expect(cleanResourceTuples[0]?.relation).toBe('viewer');
+      const cleanBannedTuples = cleanResourceTuples.filter((t) => t.relation === 'banned');
+      expect(cleanBannedTuples).toHaveLength(0);
+    },
+  );
+
+  it.each(SEEDS)(
+    'seed=%s: the three reserved exclusion-deep-chain queries (indices 6-8) are present, in order, with the exact hand-derived subject/object/relation shape',
+    (seed) => {
+      const fixture = generateFixture(seed, QUERY_COUNT);
+      const { resourceNs } = namespaces(fixture);
+
+      expect(fixture.queries[6]).toEqual({
+        subject: { ns: 'user', id: EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER },
+        object: { ns: resourceNs, id: 'edc_resource' },
+        relationOrPermission: 'unbanned_view',
+      });
+      expect(fixture.queries[7]).toEqual({
+        subject: { ns: 'user', id: EXCLUSION_DEEP_CHAIN_BOUNDARY_WITNESS_USER },
+        object: { ns: resourceNs, id: 'edc_resource' },
+        relationOrPermission: 'unbanned_view',
+      });
+      expect(fixture.queries[8]).toEqual({
+        subject: { ns: 'user', id: EXCLUSION_DEEP_CHAIN_CLEAN_WITNESS_USER },
+        object: { ns: resourceNs, id: 'edc_resource_clean' },
+        relationOrPermission: 'unbanned_view',
+      });
+    },
+  );
+
+  it.each(SEEDS)(
+    "seed=%s: at the standard fuzz configuration's own effective maxDepth (25), the reference resolver DENIES the unprovable witness (fails closed on genuine uncertainty, never a certain disproof) and the boundary witness (a real, certain, found grant), and ALLOWS the clean witness",
+    (seed) => {
+      const fixture = generateFixture(seed, QUERY_COUNT);
+      const schema = compileOk(fixture.schemaSource);
+
+      const unprovableQuery = fixture.queries[6];
+      const boundaryQuery = fixture.queries[7];
+      const cleanQuery = fixture.queries[8];
+      expect(unprovableQuery).toBeDefined();
+      expect(boundaryQuery).toBeDefined();
+      expect(cleanQuery).toBeDefined();
+      if (!unprovableQuery || !boundaryQuery || !cleanQuery) return;
+
+      const unprovableResult = referenceCheck(
+        schema,
+        fixture.tuples,
+        unprovableQuery.subject,
+        unprovableQuery.object,
+        unprovableQuery.relationOrPermission,
+        { maxDepth: STANDARD_MAX_DEPTH },
+      );
+      expect(
+        unprovableResult.allowed,
+        'a correct resolver must deny the unprovable witness at the real standard depth — this is the exact D-159 bug-shape trigger; ALLOWED here would mean the construct itself is unsound',
+      ).toBe(false);
+
+      const boundaryResult = referenceCheck(
+        schema,
+        fixture.tuples,
+        boundaryQuery.subject,
+        boundaryQuery.object,
+        boundaryQuery.relationOrPermission,
+        { maxDepth: STANDARD_MAX_DEPTH },
+      );
+      expect(boundaryResult.allowed).toBe(false);
+
+      const cleanResult = referenceCheck(
+        schema,
+        fixture.tuples,
+        cleanQuery.subject,
+        cleanQuery.object,
+        cleanQuery.relationOrPermission,
+        { maxDepth: STANDARD_MAX_DEPTH },
+      );
+      expect(cleanResult.allowed).toBe(true);
+    },
+  );
+
+  it.each(SEEDS)(
+    "seed=%s: the unprovable witness's own real chain to `banned` is genuinely findable at a generous depth — a real, hand-built path, not a phantom one",
+    (seed) => {
+      const fixture = generateFixture(seed, QUERY_COUNT);
+      const schema = compileOk(fixture.schemaSource);
+      const { resourceNs } = namespaces(fixture);
+
+      const generousResult = referenceCheck(
+        schema,
+        fixture.tuples,
+        { ns: 'user', id: EXCLUSION_DEEP_CHAIN_UNPROVABLE_WITNESS_USER },
+        { ns: resourceNs, id: 'edc_resource' },
+        'banned',
+        { maxDepth: 1000 },
+      );
+      expect(
+        generousResult.allowed,
+        'expected the unprovable witness to be a real, findable banned-member at a generous depth — proving the chain this construct depends on is real, not a phantom the reference resolver could never confirm either',
+      ).toBe(true);
+    },
+  );
+
+  it.each(SEEDS)(
+    'seed=%s: the exclusion-deep-chain does not disturb the pre-existing reserved queries (indices 0-5) or the guaranteed cycle/coverage invariants',
+    (seed) => {
+      const fixture = generateFixture(seed, QUERY_COUNT);
+      const { hierNs } = namespaces(fixture);
+
+      expect(fixture.queries[3]).toEqual({
+        subject: { ns: 'user', id: DEEP_CHAIN_DIRECT_GRANT_USER },
+        object: { ns: hierNs, id: `dc_h${DEEP_CHAIN_HIER_HOPS}` },
+        relationOrPermission: 'view',
+      });
+      expect(fixture.coverage.hasCycle).toBe(true);
+      expect(fixture.coverage.ok).toBe(true);
+    },
+  );
+
+  it('is a pure function of (seed, queryCount) — replaying the same seed reproduces the exact same exclusion-deep-chain tuples and reserved queries, byte-identical', () => {
+    const seed = 'exclusion-deep-chain-reproducibility-seed';
+    const first = generateFixture(seed, QUERY_COUNT);
+    const second = generateFixture(seed, QUERY_COUNT);
+
+    const exclusionChainTuples1 = first.tuples.filter(
+      (t) => t.objectId.startsWith('edc_g') || t.objectId.startsWith('edc_resource'),
+    );
+    const exclusionChainTuples2 = second.tuples.filter(
+      (t) => t.objectId.startsWith('edc_g') || t.objectId.startsWith('edc_resource'),
+    );
+    expect(exclusionChainTuples2).toEqual(exclusionChainTuples1);
+    expect(second.queries.slice(6, 9)).toEqual(first.queries.slice(6, 9));
+  });
+
+  it('a queryCount below 9 omits whichever reserved exclusion-deep-chain queries do not fit, without throwing — the same graceful-degradation shape the pre-existing reserved queries already have', () => {
+    for (let queryCount = 0; queryCount <= 9; queryCount += 1) {
+      const fixture = generateFixture('exclusion-deep-chain-small-query-count-seed', queryCount);
+      expect(fixture.queries.length).toBe(queryCount);
     }
   });
 });
