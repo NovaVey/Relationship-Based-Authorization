@@ -2638,3 +2638,29 @@ Both resolvers' cycle guard fails closed (`false`, "cannot prove") on a data-dri
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Root suite: 70 files, 1040 tests (up from 1026 across this whole three-item batch). Real-Postgres re-run via LOCALVERIFY: cross-resolver-agreement (27/27), production-resolution-path (13/13, including a pre-existing exclusion-cycle regression, still green), metamorphic algebraic-properties (6/6) and monotonicity (3/3), and the flagship differential-soundness fuzz suite (5,000 queries, `false_grant: 0`) — all passing, zero regressions.
 
 Full account: `docs/DECISIONS.md` D-158.
+
+## The D-158 residual in mechanism 2 was real: a live false grant, confirmed and fixed (D-159)
+
+**Owner:** a soundness-engineer agent in an isolated worktree, the higher-stakes of two agents dispatched together as D-158's own named follow-up work.
+
+D-158 fixed mechanism 1 (the TS-level walk) but explicitly disclosed mechanism 2 (`sqlRelationMembershipWithWitness`, production's SQL-backed relation-membership fast path) as an unverified residual sharing the identical algebraic shape — its `false` outcome was always reported `certain: true`, even when its own depth ceiling (not its cycle guard, which is exact/lossless) genuinely truncated the frontier scan. Confirmed reachable (an exclusion's subtract branch routing through a plain declared relation hits mechanism 2 directly) and confirmed real: a fixture with a genuine 3-hop nested-group chain, pinned `maxDepth: 3` on both resolvers, produced a real `allowed: true` from production against a correct `allowed: false` from reference — a live false grant, not derived, not assumed.
+
+**Fixed** by giving `sqlRelationMembershipWithWitness`'s own `false` a real `certain` signal (`depthCeilingGenuinelyBinding`), reusing data already fetched for the disproof certificate — no new query. **Fail-checked live, independently, twice** — the implementing agent via `git stash` revert/restore (md5sum-verified both ways) against both the repro script and a new 4-test permanent regression suite; this session's own main agent a second time, live against real Postgres through the unmodified CLI, reproducing the exact false grant firsthand before confirming the fix closes it, plus a real `authz soundness run` reporting `SOUND`.
+
+**Fuzz-harness power checked honestly:** the standard 5,000-query budget never caught this even with the fix reverted (mirrors D-069's own disclosed gap — the random generator doesn't happen to wire this narrow shape at standard scale); pinning `maxDepth: 3` (the established D-069/D-070 technique) did — 2 of 10 fresh seeds went `unsound` with real false-grant counts, closing to `sound` with the fix restored.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Fast suite: 70 files, 1040 tests, unchanged (new test is `.integration.test.ts`, excluded by design). Full real-Postgres re-run via LOCALVERIFY: 49/49 combined cross-resolver/frontier/production-check/production-resolution-path tests, 4/4 new, and the standard-budget differential-soundness fuzz suite (`false_grant: 0`) — all passing, zero regressions.
+
+Full account: `docs/DECISIONS.md` D-159.
+
+## A permanent metamorphic property for the exclusion + unprovable-cut bug shape, covering both mechanisms (D-160)
+
+**Owner:** a soundness-engineer agent in an isolated worktree, dispatched alongside D-159's own agent, informed by its findings.
+
+Closes D-158's own named follow-up: a general-shape, randomly-generated regression guard (not D-158's own two fixed fixtures) asserting an exclusion's subtract branch hitting an unprovable cut must never grant, run against the real production engine. New pure generator `src/metamorphic/unprovable-exclusion-fixtures.ts` (reusing `SeededRng` from the soundness fuzzer, not a new PRNG) plus `test/metamorphic/exclusion-subtract-unprovable-cut.integration.test.ts` — Property A (mechanism 1, 40 random seeds, cycle rings and depth-cut chains, each with an ALLOWED control) and Property B (mechanism 2, 10 seeds, self-referential relation chains).
+
+**A genuine, honest cross-check between two parallel agents.** Property B was built in a worktree without D-159's own not-yet-merged fix — it correctly, plainly FAILED on the core cutoff case, exactly the residual D-158 disclosed and D-159 independently confirmed and fixed. Per its own instructions, this was reported as-is, not weakened or worked around. Once both worktrees merged, this session's own main agent re-ran Property B live and confirmed it now passes — the two independent pieces converging exactly as designed, itself a second confirmation of D-159's own claim.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Both properties re-run live via LOCALVERIFY after the D-159 merge: 2/2 passing (40 + 10 seeds, all green). Property A's own detection power independently confirmed by temporarily bypassing D-158's guard and observing an immediate, reproducible catch, then restoring byte-identical.
+
+Full account: `docs/DECISIONS.md` D-160.
