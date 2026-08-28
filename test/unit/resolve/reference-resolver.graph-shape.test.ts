@@ -336,3 +336,157 @@ describe('a-sibling-branchs-completed-visit-to-a-node-and-relation-does-not-supp
     expect(result.allowed).toBe(false);
   });
 });
+
+describe('a-cycle-inside-an-exclusions-subtract-branch-must-not-flip-a-fail-closed-cycle-guard-into-an-unsound-grant', () => {
+  // The exclusion/cycle-guard soundness fix. Every cycle-termination test
+  // above involves ONLY plain union/tupleToUserset recursion — no
+  // `exclusion` rewrite rule anywhere in the loop. That distinction matters:
+  // for a purely positive (non-negated) recursive walk, "this branch
+  // revisits a name already being resolved, treat it as false" is exactly
+  // the correct least-fixpoint answer (no independent grounding exists
+  // through the cycle, so the correct value really is false) — the tests
+  // above already prove this holds. But the instant an `exclusion` sits
+  // anywhere in the cycle, `NOT` is now part of the recursive system, and
+  // "cannot prove" is no longer safe to negate into "proven absent": doing
+  // so is exactly the classic recursion-through-negation problem
+  // (non-stratified negation) Datalog-with-negation has, and it manufactures
+  // a real, unsound grant here — confirmed live (with the fix reverted) via
+  // this exact fixture before the fix existed.
+  //
+  // `view = grant - parent->view` on a self-referencing `parent` — an
+  // ordinary hierarchy pattern, nothing exotic: self-referencing `parent`
+  // tuples are this DSL's own headline use case.
+  const source = [
+    'namespace folder {',
+    '  relation parent: folder',
+    '  relation grant: user',
+    '',
+    '  permission view = grant - parent->view',
+    '}',
+  ].join('\n');
+
+  it('a-self-referencing-parent-tuple-inside-an-exclusions-subtract-resolves-denied-not-an-unsound-grant', () => {
+    // folder:a is its own parent (a one-node cycle, zero hops before the
+    // walk revisits `folder:a#view`, already being resolved). Hand-derived
+    // answer: view(a) = grant(a) AND NOT(parent->view(a)) = grant(a) AND
+    // NOT(view(a)) — a self-referential equation with no consistent
+    // grounding once the cycle is set aside (the only real fact is
+    // grant(a), which the exclusion's own subtract can neither confirm nor
+    // rule out through this ungrounded loop). Per this project's own
+    // fail-closed philosophy (§6.4 — "cannot prove" is never treated as a
+    // license to grant), the correct answer is denied, not allowed.
+    const schema = compileOk(source);
+    const tuples: ReferenceTuple[] = [
+      tuple('folder', 'a', 'parent', 'folder', 'a'),
+      tuple('folder', 'a', 'grant', 'user', 'alice'),
+    ];
+    const result = referenceCheck(
+      schema,
+      tuples,
+      ref('user', 'alice'),
+      ref('folder', 'a'),
+      'view',
+      {
+        maxDepth: 20,
+      },
+    );
+    expect(result.allowed).toBe(false);
+  });
+
+  it('a-three-node-ring-inside-an-exclusions-subtract-resolves-denied-not-an-unsound-grant-at-every-node-in-the-ring', () => {
+    // folder:a -> parent -> folder:b -> parent -> folder:c -> parent ->
+    // folder:a, every node granted. An ODD-length ring — deliberately, not
+    // arbitrarily: for this exact `grant - parent->view` shape, an EVEN-
+    // length ring (e.g. a plain two-node mutual `parent` pair) has a
+    // structural quirk worth naming explicitly, confirmed by hand-tracing
+    // and then independently confirmed live against the reverted
+    // (pre-fix) code: the unsound flip still happens internally at the
+    // "inner" node the raw cycle guard hits, but gets re-negated exactly
+    // once more by the "outer" (queried) node's own exclusion, which
+    // coincidentally lands back on the correct `denied` answer at the TOP
+    // level regardless of which of the two nodes is queried — the bug is
+    // real but invisible at the top level for that specific even-length
+    // shape. An ODD-length ring has no such accidental cancellation: with
+    // the fix reverted, querying `view` on EVERY node in this exact 3-node
+    // ring returned an unsound `allowed: true`, confirmed live. This test
+    // is the odd-length case precisely because it cannot be satisfied by
+    // accident the way a 2-node mutual cycle sometimes can.
+    const schema = compileOk(source);
+    const tuples: ReferenceTuple[] = [
+      tuple('folder', 'a', 'parent', 'folder', 'b'),
+      tuple('folder', 'b', 'parent', 'folder', 'c'),
+      tuple('folder', 'c', 'parent', 'folder', 'a'),
+      tuple('folder', 'a', 'grant', 'user', 'alice'),
+      tuple('folder', 'b', 'grant', 'user', 'alice'),
+      tuple('folder', 'c', 'grant', 'user', 'alice'),
+    ];
+    for (const id of ['a', 'b', 'c']) {
+      const result = referenceCheck(
+        schema,
+        tuples,
+        ref('user', 'alice'),
+        ref('folder', id),
+        'view',
+        { maxDepth: 20 },
+      );
+      expect(result.allowed).toBe(false);
+    }
+  });
+
+  it('control-the-identical-cyclic-shape-but-the-subtract-branch-is-certainly-grounded-false-still-resolves-allowed-no-regression', () => {
+    // Not every cycle inside a subtract branch is unprovable — if the
+    // subtract branch's OWN base fails before the cycle is ever reached
+    // (Kleene AND: a certain `false` dominates, regardless of the
+    // unevaluated recursive term), the exclusion is genuinely, certainly
+    // "not excluded," and the fix must not turn this into a new,
+    // over-conservative false_deny. folder:b has NO `grant` tuple at all,
+    // so view(b) = false AND ... = false, certainly, without ever needing
+    // to chase b's own `parent->view` back to folder:a — the cycle is
+    // structurally present in the tuple graph but never actually walked
+    // for this particular query.
+    const schema = compileOk(source);
+    const tuples: ReferenceTuple[] = [
+      tuple('folder', 'a', 'parent', 'folder', 'b'),
+      tuple('folder', 'b', 'parent', 'folder', 'a'),
+      tuple('folder', 'a', 'grant', 'user', 'alice'),
+      // deliberately no folder:b grant tuple for alice or anyone else.
+    ];
+    const result = referenceCheck(
+      schema,
+      tuples,
+      ref('user', 'alice'),
+      ref('folder', 'a'),
+      'view',
+      {
+        maxDepth: 20,
+      },
+    );
+    expect(result.allowed).toBe(true);
+  });
+
+  it('control-a-real-non-cyclic-exclusion-still-correctly-denies-when-the-excluded-set-genuinely-holds', () => {
+    // No cycle at all here — mallory is directly, certainly banned. Proves
+    // the fix didn't weaken the ordinary, non-cyclic exclusion path.
+    const bannedSource = [
+      'namespace document {',
+      '  relation grant: user',
+      '  relation banned: user',
+      '',
+      '  permission view = grant - banned',
+      '}',
+    ].join('\n');
+    const schema = compileOk(bannedSource);
+    const tuples: ReferenceTuple[] = [
+      tuple('document', 'readme', 'grant', 'user', 'mallory'),
+      tuple('document', 'readme', 'banned', 'user', 'mallory'),
+    ];
+    const result = referenceCheck(
+      schema,
+      tuples,
+      ref('user', 'mallory'),
+      ref('document', 'readme'),
+      'view',
+    );
+    expect(result.allowed).toBe(false);
+  });
+});

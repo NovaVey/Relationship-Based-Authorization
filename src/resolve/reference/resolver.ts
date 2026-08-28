@@ -241,13 +241,47 @@ export interface IntersectionDisproof {
   branch: DisproofStep;
 }
 
-/** Either the exclusion's own base is disproven, or its own subtract is proven — either denies it. */
+/**
+ * Either the exclusion's own base is disproven, its own subtract is proven
+ * (either genuinely denies it), or — the third, previously-missing case —
+ * `subtract` could not be conclusively resolved at all (it hit the cycle
+ * guard or the depth ceiling somewhere inside it): `subtractUnprovable`.
+ *
+ * **Why this third case exists — the soundness gap it closes.** Before it
+ * existed, `evalRewrite`'s `exclusion` case treated `!subtract.allowed` as
+ * "subtract is disproven, so this exclusion holds" unconditionally — but
+ * `subtract.allowed === false` is exactly what the cycle guard
+ * (`resolveMembership`'s `visiting`-Set check) and the depth ceiling ALSO
+ * return the instant they cut a branch off, per §6.4's own fail-closed
+ * convention for every *non-negated* position. Consumed here, inside
+ * exclusion's own `NOT`, that fail-closed "can't prove" `false` was silently
+ * indistinguishable from a genuine, exhaustively-proven "no" — and `NOT
+ * (can't-prove)` is not `true`, even though `NOT false` is. A permission
+ * shaped like `view = grant - parent->view` on a self-referencing `parent`
+ * (an ordinary hierarchy tuple, nothing exotic) reproduces this concretely:
+ * the cycle guard's fail-closed `false` for the unresolvable `parent->view`
+ * branch used to flip, via exclusion's own negation, into an unsound
+ * `allowed: true` — a real `false_grant`, confirmed live against this exact
+ * shape before this fix existed (see the regression test this fix shipped
+ * with). `subtractUnprovable` is the distinguishing signal §6.4's own
+ * fail-closed philosophy already uses everywhere else: "cannot prove" now
+ * propagates as its own outcome (see `MembershipOutcome.certain` below),
+ * never silently collapsing into a boolean a negation can flip. It also
+ * covers the depth ceiling, not only the cycle guard, for the identical
+ * reason (`.claude/worktrees/.../resolver.ts`'s own doc comment on
+ * `BoundReachedDisproof` already groups `cycle`/`depth` together as "both...
+ * a real, defined 'no' for that branch" in every *non-negated* position —
+ * true there, but not once a `NOT` sits between that leaf and the top; both
+ * reasons hit the identical `boundReached` leaf below, so both are covered
+ * uniformly, not special-cased apart).
+ */
 export interface ExclusionDisproof {
   kind: 'exclusionDisproof';
   object: EntityRef;
   reason:
     | { kind: 'baseDisproven'; base: DisproofStep }
-    | { kind: 'subtractProven'; subtract: ResolutionStep };
+    | { kind: 'subtractProven'; subtract: ResolutionStep }
+    | { kind: 'subtractUnprovable'; subtract: DisproofStep };
 }
 
 /** Every tuple `relation` on `object` was followed, and none of them resolved `computedUserset` true. */
@@ -261,10 +295,19 @@ export interface TupleToUsersetDisproof {
 /**
  * The independent depth ceiling or the cycle guard cut this branch off —
  * both are, by §6.4's own stated semantics, a real, defined "no" for that
- * branch (not an "unknown"), so both are legitimate disproof leaves. A
- * verifier confirms a `cycle` claim by re-threading the SAME (object,
- * name)-keyed visiting set down the SAME path the disproof tree describes
- * (see the verification test) — it is not accepted on faith.
+ * branch (not an "unknown"), so both are legitimate disproof leaves in any
+ * *non-negated* position (a plain union/intersection/tupleToUserset branch,
+ * or an exclusion's own `base`) — a verifier confirms a `cycle` claim by
+ * re-threading the SAME (object, name)-keyed visiting set down the SAME
+ * path the disproof tree describes (see the verification test); it is not
+ * accepted on faith.
+ *
+ * **Not a legitimate disproof of a NEGATED position** (an exclusion's own
+ * `subtract`), which is exactly why `MembershipOutcome.certain` exists:
+ * "cut off, cannot prove either way" is a fundamentally different claim
+ * than "exhaustively proven false," and only the second one is safe for
+ * `NOT` to turn into "proven true" — see `ExclusionDisproof`'s own doc
+ * comment for the concrete unsoundness this distinction closes.
  */
 export interface BoundReachedDisproof {
   kind: 'boundReached';
@@ -335,9 +378,35 @@ interface WalkContext {
   readonly now: Date;
 }
 
-/** `{ allowed: true; proof }` or `{ allowed: false; disproof }` — the one return shape every recursive step below produces. */
+/**
+ * `{ allowed: true; certain: true; proof }` or `{ allowed: false; certain;
+ * disproof }` — the one return shape every recursive step below produces.
+ *
+ * **`certain` — the fix for the exclusion/cycle-guard soundness gap
+ * (see `ExclusionDisproof`'s own doc comment for the concrete bug).**
+ * `true` for every `allowed: true` outcome, by construction, everywhere in
+ * this file (a positive result is only ever produced from a real, verified
+ * fact or from every child of a combinator *also* being certainly true —
+ * never from an unresolved branch) — this is a load-bearing invariant every
+ * combinator below maintains, not merely a convention. For `allowed: false`,
+ * `certain: true` means "exhaustively proven false" (every branch that could
+ * have made this true was checked and definitively didn't); `certain: false`
+ * means "cut off by the cycle guard or the depth ceiling somewhere in this
+ * subtree, without ever fully proving or disproving it." The distinction is
+ * inert everywhere `false` is already the conservative, fail-closed answer
+ * (union, intersection, tupleToUserset, an exclusion's own `base`) — it only
+ * changes behavior at the ONE place a `false` gets negated: `evalRewrite`'s
+ * `exclusion` case, where `subtract.certain === false` must NOT be treated
+ * as "subtract disproven, so the exclusion holds" (that's exactly the
+ * unsound flip this fix closes) but as its own outcome, `subtractUnprovable`
+ * — the exclusion itself resolves `allowed: false, certain: false`,
+ * propagating the same "cannot prove" signal transitively to whatever
+ * combinator consumes it next, exactly like the cycle guard's own signal
+ * already does everywhere else in this file.
+ */
 type MembershipOutcome =
-  { allowed: true; proof: ResolutionStep } | { allowed: false; disproof: DisproofStep };
+  | { allowed: true; certain: true; proof: ResolutionStep }
+  | { allowed: false; certain: boolean; disproof: DisproofStep };
 
 /**
  * The one recursion "unit" every mechanism in this file funnels through:
@@ -371,9 +440,15 @@ function resolveMembership(
 
   // Independent depth backstop (§6.4) — a hard ceiling regardless of
   // whether cycle detection alone would eventually have caught this
-  // branch too.
+  // branch too. `certain: false` — see `MembershipOutcome.certain`'s own
+  // doc comment: this is a truncation, not a proof, and must not be
+  // silently treated as one by a containing exclusion's own `NOT`.
   if (depth > ctx.maxDepth) {
-    return { allowed: false, disproof: { kind: 'boundReached', object, name, reason: 'depth' } };
+    return {
+      allowed: false,
+      certain: false,
+      disproof: { kind: 'boundReached', object, name, reason: 'depth' },
+    };
   }
 
   // `\0` (not a space or `:`) joins the three parts on purpose: it can
@@ -383,12 +458,22 @@ function resolveMembership(
   // by accident — a composite string key is only as safe as its delimiter.
   const key = `${ns}\0${id}\0${name}`;
   if (visiting.has(key)) {
-    return { allowed: false, disproof: { kind: 'boundReached', object, name, reason: 'cycle' } };
+    // `certain: false` — same reasoning as the depth backstop above: a
+    // cycle hit means "this branch requires itself to already be resolved,"
+    // which is a real, defined "no" in every non-negated position (§6.4)
+    // but NOT a fact a containing exclusion's `NOT` may safely invert.
+    return {
+      allowed: false,
+      certain: false,
+      disproof: { kind: 'boundReached', object, name, reason: 'cycle' },
+    };
   }
   visiting.add(key);
   try {
     const nsConfig = ctx.schema.namespaces[ns];
-    if (!nsConfig) return { allowed: false, disproof: { kind: 'undeclared', object, name } };
+    if (!nsConfig) {
+      return { allowed: false, certain: true, disproof: { kind: 'undeclared', object, name } };
+    }
 
     const relation = nsConfig.relations[name];
     if (relation) {
@@ -398,7 +483,7 @@ function resolveMembership(
     if (permission) {
       return evalRewrite(ctx, permission.rewrite, ns, id, visiting, depth);
     }
-    return { allowed: false, disproof: { kind: 'undeclared', object, name } };
+    return { allowed: false, certain: true, disproof: { kind: 'undeclared', object, name } };
   } finally {
     visiting.delete(key);
   }
@@ -435,6 +520,14 @@ function resolveRelation(
 ): MembershipOutcome {
   const object: EntityRef = { ns, id };
   const tupleDisproofs: TupleDisproof[] = [];
+  // See `MembershipOutcome.certain`'s own doc comment. This relation scan is
+  // itself a union over every stored tuple (a plain-grant match, or a
+  // recursive userset-subject match) — its own `false` is certain (an
+  // exhaustive proof of absence) only if EVERY tuple examined was itself
+  // certainly not a match; one tainted (cycle/depth-cut) userset-subject
+  // check taints the whole relation's own "no", the same way one tainted
+  // union branch taints `evalRewrite`'s own union case below.
+  let allCertain = true;
 
   for (const tuple of ctx.tuples) {
     if (tuple.objectNs !== ns || tuple.objectId !== id || tuple.relation !== relationName) {
@@ -446,6 +539,7 @@ function resolveRelation(
       if (subject.ns === ctx.subject.ns && subject.id === ctx.subject.id) {
         return {
           allowed: true,
+          certain: true,
           proof: { kind: 'directGrant', object, relation: relationName, subject },
         };
       }
@@ -464,6 +558,7 @@ function resolveRelation(
     if (outcome.allowed) {
       return {
         allowed: true,
+        certain: true,
         proof: {
           kind: 'usersetMembership',
           object,
@@ -474,6 +569,7 @@ function resolveRelation(
         },
       };
     }
+    allCertain &&= outcome.certain;
     tupleDisproofs.push({
       kind: 'usersetNotMember',
       userset,
@@ -483,6 +579,7 @@ function resolveRelation(
   }
   return {
     allowed: false,
+    certain: allCertain,
     disproof: { kind: 'relationDisproof', object, relation: relationName, tupleDisproofs },
   };
 }
@@ -515,6 +612,11 @@ function evalRewrite(
 
     case 'union': {
       const disproofs: DisproofStep[] = [];
+      // See `MembershipOutcome.certain`'s own doc comment — union is a
+      // plain (non-negated) OR, so `false` here is certain only if every
+      // branch consulted was itself certain; one cycle/depth-cut branch
+      // taints the whole union's own "no" without changing the "no" itself.
+      let allCertain = true;
       for (let i = 0; i < node.children.length; i += 1) {
         const child = node.children[i];
         if (child === undefined) continue; // unreachable given the loop bound
@@ -522,12 +624,18 @@ function evalRewrite(
         if (outcome.allowed) {
           return {
             allowed: true,
+            certain: true,
             proof: { kind: 'union', object, branchIndex: i, branch: outcome.proof },
           };
         }
+        allCertain &&= outcome.certain;
         disproofs.push(outcome.disproof);
       }
-      return { allowed: false, disproof: { kind: 'unionDisproof', object, branches: disproofs } };
+      return {
+        allowed: false,
+        certain: allCertain,
+        disproof: { kind: 'unionDisproof', object, branches: disproofs },
+      };
     }
 
     case 'intersection': {
@@ -537,8 +645,17 @@ function evalRewrite(
         if (child === undefined) continue; // unreachable given the loop bound
         const outcome = evalRewrite(ctx, child, ns, id, visiting, depth);
         if (!outcome.allowed) {
+          // Kleene AND: a `false` branch makes the whole intersection
+          // `false` regardless of any other (possibly still-unevaluated)
+          // branch's own value — so this short-circuit is exact, and the
+          // stopping branch's own `certain` flag is exactly the
+          // intersection's own: a *certain* `false` branch makes the
+          // intersection certainly false no matter what; an *uncertain*
+          // one means the intersection itself can't be certain either
+          // (that branch might really have been true).
           return {
             allowed: false,
+            certain: outcome.certain,
             disproof: {
               kind: 'intersectionDisproof',
               object,
@@ -549,14 +666,25 @@ function evalRewrite(
         }
         proofs.push(outcome.proof);
       }
-      return { allowed: true, proof: { kind: 'intersection', object, branches: proofs } };
+      return {
+        allowed: true,
+        certain: true,
+        proof: { kind: 'intersection', object, branches: proofs },
+      };
     }
 
     case 'exclusion': {
       const base = evalRewrite(ctx, node.base, ns, id, visiting, depth);
       if (!base.allowed) {
+        // Short-circuit unchanged from before this fix — `NOT` never sits
+        // between `base` and the top here, so a `base` that's `false`
+        // (certain OR merely cut-off/uncertain) safely makes the whole
+        // exclusion `false` either way (Kleene AND: `false` dominates
+        // regardless of the other, unevaluated operand's own value) —
+        // `certain` is simply carried forward unchanged, never re-derived.
         return {
           allowed: false,
+          certain: base.certain,
           disproof: {
             kind: 'exclusionDisproof',
             object,
@@ -568,6 +696,7 @@ function evalRewrite(
       if (subtract.allowed) {
         return {
           allowed: false,
+          certain: true,
           disproof: {
             kind: 'exclusionDisproof',
             object,
@@ -575,8 +704,33 @@ function evalRewrite(
           },
         };
       }
+      // *** The fix for the exclusion/cycle-guard soundness gap. ***
+      // `subtract.allowed === false` alone is NOT sufficient to conclude
+      // "subtract disproven, so this exclusion holds" — that reasoning is
+      // exactly what let a cycle-guard (or depth-ceiling) hit inside
+      // `subtract` flip, via this very `NOT`, into an unsound `allowed:
+      // true`. Only a *certain* `false` (an exhaustive disproof) may be
+      // treated as "not excluded." An *uncertain* one propagates its own
+      // "cannot prove" signal instead — this exclusion itself resolves
+      // `allowed: false, certain: false`, denying it (fail-closed, matching
+      // this file's own convention everywhere else) while still letting
+      // any FURTHER containing exclusion see that this "no" is not safe to
+      // negate either. See `ExclusionDisproof`'s own doc comment for the
+      // concrete reproduction this closes.
+      if (!subtract.certain) {
+        return {
+          allowed: false,
+          certain: false,
+          disproof: {
+            kind: 'exclusionDisproof',
+            object,
+            reason: { kind: 'subtractUnprovable', subtract: subtract.disproof },
+          },
+        };
+      }
       return {
         allowed: true,
+        certain: true,
         proof: { kind: 'exclusion', object, base: base.proof, subtractDisproof: subtract.disproof },
       };
     }
@@ -593,6 +747,9 @@ function evalRewrite(
       // folder:child#parent@X, recursively check whether the subject
       // resolves for view on X."
       const followed: Array<{ through: EntityRef; disproof: DisproofStep }> = [];
+      // Same "union over every followed tuple" shape as `resolveRelation`'s
+      // own doc comment describes — see `MembershipOutcome.certain`.
+      let allCertain = true;
       for (const tuple of ctx.tuples) {
         if (tuple.objectNs !== ns || tuple.objectId !== id || tuple.relation !== node.relation) {
           continue;
@@ -610,6 +767,7 @@ function evalRewrite(
         if (outcome.allowed) {
           return {
             allowed: true,
+            certain: true,
             proof: {
               kind: 'tupleToUserset',
               object,
@@ -620,10 +778,12 @@ function evalRewrite(
             },
           };
         }
+        allCertain &&= outcome.certain;
         followed.push({ through, disproof: outcome.disproof });
       }
       return {
         allowed: false,
+        certain: allCertain,
         disproof: { kind: 'tupleToUsersetDisproof', object, relation: node.relation, followed },
       };
     }
