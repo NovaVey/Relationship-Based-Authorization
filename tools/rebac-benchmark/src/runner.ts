@@ -70,7 +70,8 @@ function buildAdapter(name: string): EngineAdapter {
     case 'authz':
       return new AuthzAdapter({
         baseUrl: process.env.AUTHZ_BASE_URL ?? 'http://localhost:3001',
-        adminApiKey: process.env.AUTHZ_ADMIN_API_KEY ?? 'benchmark-admin-key-0123456789-abcdefghijklmnop',
+        adminApiKey:
+          process.env.AUTHZ_ADMIN_API_KEY ?? 'benchmark-admin-key-0123456789-abcdefghijklmnop',
       });
     case 'openfga':
       return new OpenfgaAdapter({ apiUrl: process.env.OPENFGA_API_URL ?? 'http://localhost:8080' });
@@ -92,8 +93,12 @@ interface HasDefaultConsistencyCheck {
   checkDefaultConsistency(q: CanonicalCheckQuery): Promise<boolean>;
 }
 
-function hasDefaultConsistencyCheck(adapter: EngineAdapter): adapter is EngineAdapter & HasDefaultConsistencyCheck {
-  return typeof (adapter as Partial<HasDefaultConsistencyCheck>).checkDefaultConsistency === 'function';
+function hasDefaultConsistencyCheck(
+  adapter: EngineAdapter,
+): adapter is EngineAdapter & HasDefaultConsistencyCheck {
+  return (
+    typeof (adapter as Partial<HasDefaultConsistencyCheck>).checkDefaultConsistency === 'function'
+  );
 }
 
 /**
@@ -143,7 +148,12 @@ async function runConsistencyProbe(
   const trialMs: number[] = [];
   let timeouts = 0;
   for (let i = 0; i < trials; i++) {
-    const elapsed = await timeToConsistentRead(adapter, `${seed}_${i}_${Date.now().toString(36)}`, 5, 8000);
+    const elapsed = await timeToConsistentRead(
+      adapter,
+      `${seed}_${i}_${Date.now().toString(36)}`,
+      5,
+      8000,
+    );
     if (elapsed < 0) timeouts++;
     else trialMs.push(elapsed);
   }
@@ -193,7 +203,9 @@ async function runEngine(name: string, args: Args): Promise<EngineResult> {
       errors.push(`cross-validation '${note}': ${(err as Error).message}`);
     }
   }
-  console.log(markdownCrossValidationTable(result.crossValidation.map((r) => ({ engine: name, ...r }))));
+  console.log(
+    markdownCrossValidationTable(result.crossValidation.map((r) => ({ engine: name, ...r }))),
+  );
 
   // --- Depth-latency benchmark ---
   const cases = depthChainWorkload(args.seed, args.depths, args.runsPerDepth);
@@ -258,7 +270,9 @@ async function main(): Promise<void> {
 
   if (args.engines.length > 1) {
     console.log('\n=== Combined depth-latency table ===');
-    const combined = results.flatMap((r) => r.depthSummary.map((d) => ({ engine: r.engine, ...d })));
+    const combined = results.flatMap((r) =>
+      r.depthSummary.map((d) => ({ engine: r.engine, ...d })),
+    );
     console.log(markdownDepthTable(combined));
   }
 

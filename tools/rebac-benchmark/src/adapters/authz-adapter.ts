@@ -63,7 +63,10 @@ export class AuthzAdapter implements EngineAdapter {
     this.adminApiKey = opts.adminApiKey;
   }
 
-  private async post(path: string, body: unknown): Promise<{ status: number; json: unknown; headers: Headers }> {
+  private async post(
+    path: string,
+    body: unknown,
+  ): Promise<{ status: number; json: unknown; headers: Headers }> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
       headers: {
@@ -85,13 +88,21 @@ export class AuthzAdapter implements EngineAdapter {
    * immediately, unretried — only rate-limiting itself is treated as
    * "wait, don't fail."
    */
-  private async postWithBackoff(path: string, body: unknown): Promise<{ status: number; json: unknown }> {
+  private async postWithBackoff(
+    path: string,
+    body: unknown,
+  ): Promise<{ status: number; json: unknown }> {
     for (;;) {
       const { status, json, headers } = await this.post(path, body);
       if (status !== 429) return { status, json };
       const resetSeconds = Number(headers.get('x-ratelimit-reset') ?? '60');
-      const waitMs = Math.max(1000, (Number.isFinite(resetSeconds) ? resetSeconds : 60) * 1000 + 250);
-      console.error(`authz: 429 rate_limited on ${path} — waiting ${(waitMs / 1000).toFixed(1)}s (x-ratelimit-reset)`);
+      const waitMs = Math.max(
+        1000,
+        (Number.isFinite(resetSeconds) ? resetSeconds : 60) * 1000 + 250,
+      );
+      console.error(
+        `authz: 429 rate_limited on ${path} — waiting ${(waitMs / 1000).toFixed(1)}s (x-ratelimit-reset)`,
+      );
       await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
@@ -117,11 +128,15 @@ export class AuthzAdapter implements EngineAdapter {
     const source = readFileSync(EXAMPLE_SCHEMA_PATH, 'utf8');
     const example = await this.postWithBackoff('/schema/publish', { source });
     if (example.status !== 200) {
-      throw new Error(`authz: /schema/publish (example) failed: ${example.status} ${JSON.stringify(example.json)}`);
+      throw new Error(
+        `authz: /schema/publish (example) failed: ${example.status} ${JSON.stringify(example.json)}`,
+      );
     }
     const chain = await this.postWithBackoff('/schema/publish', { source: DEPTH_CHAIN_SCHEMA });
     if (chain.status !== 200) {
-      throw new Error(`authz: /schema/publish (depth-chain) failed: ${chain.status} ${JSON.stringify(chain.json)}`);
+      throw new Error(
+        `authz: /schema/publish (depth-chain) failed: ${chain.status} ${JSON.stringify(chain.json)}`,
+      );
     }
   }
 

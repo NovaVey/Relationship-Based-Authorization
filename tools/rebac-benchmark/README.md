@@ -34,6 +34,7 @@ nothing here is simulated or estimated.
   install. Generic GitHub access is not required for either — only the Go
   module proxy (`proxy.golang.org`), which is reachable even in sandboxes
   that block `github.com`/`api.github.com` directly.
+
 - Node 22+ (matches the root project's own `.nvmrc`).
 
 ## Install
@@ -102,13 +103,13 @@ npx tsx src/runner.ts --engine authz,openfga,spicedb \
   --depths 1,3,5,10 --runs-per-depth 3 --seed 42 --consistency-trials 3
 ```
 
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--engine` | `authz,openfga,spicedb` | comma-separated list |
-| `--depths` | `1,3,5,10` | permission-chain depths for the latency benchmark |
-| `--runs-per-depth` | `30` | independent, freshly-written chains measured per depth (see below for why not one repeated query) |
-| `--seed` | `42` | seeds the depth-chain generator — same seed ⇒ byte-identical tuples/checks, any engine, any host |
-| `--consistency-trials` | `5` | write-then-poll trials for the consistency probe |
+| Flag                   | Default                 | Meaning                                                                                           |
+| ---------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `--engine`             | `authz,openfga,spicedb` | comma-separated list                                                                              |
+| `--depths`             | `1,3,5,10`              | permission-chain depths for the latency benchmark                                                 |
+| `--runs-per-depth`     | `30`                    | independent, freshly-written chains measured per depth (see below for why not one repeated query) |
+| `--seed`               | `42`                    | seeds the depth-chain generator — same seed ⇒ byte-identical tuples/checks, any engine, any host  |
+| `--consistency-trials` | `5`                     | write-then-poll trials for the consistency probe                                                  |
 
 Connection details default to the ports above; override with
 `AUTHZ_BASE_URL`/`AUTHZ_ADMIN_API_KEY`, `OPENFGA_API_URL`,

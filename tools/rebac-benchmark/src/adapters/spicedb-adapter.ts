@@ -23,7 +23,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import type { CanonicalCheckQuery, CanonicalSubject, CanonicalTuple, EngineAdapter } from '../types.js';
+import type {
+  CanonicalCheckQuery,
+  CanonicalSubject,
+  CanonicalTuple,
+  EngineAdapter,
+} from '../types.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const COMBINED_SCHEMA_PATH = path.resolve(moduleDir, '../../workloads/spicedb-combined.zed');
@@ -57,7 +62,11 @@ export class SpicedbAdapter implements EngineAdapter {
   // lazily, not at construction time), and `EngineAdapter.init` only
   // needs to return a `Promise<void>`, not actually await anything here.
   init(): Promise<void> {
-    this.client = v1.NewClient(this.presharedKey, this.endpoint, v1.ClientSecurity.INSECURE_LOCALHOST_ALLOWED);
+    this.client = v1.NewClient(
+      this.presharedKey,
+      this.endpoint,
+      v1.ClientSecurity.INSECURE_LOCALHOST_ALLOWED,
+    );
     return Promise.resolve();
   }
 

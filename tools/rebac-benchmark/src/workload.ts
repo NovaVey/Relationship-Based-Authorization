@@ -55,7 +55,12 @@ function tuple(
   subjectId: string,
   subjectRelation?: string,
 ): CanonicalTuple {
-  return { objectType, objectId, relation, subject: subject(subjectType, subjectId, subjectRelation) };
+  return {
+    objectType,
+    objectId,
+    relation,
+    subject: subject(subjectType, subjectId, subjectRelation),
+  };
 }
 
 /**
@@ -100,42 +105,82 @@ export function exampleGraphWorkload(): ExampleGraphWorkload {
 
   const checks: ExampleGraphWorkload['checks'] = [
     {
-      query: { subject: subject('user', 'dana'), permission: 'edit', objectType: 'document', objectId: 'eng_handbook' },
+      query: {
+        subject: subject('user', 'dana'),
+        permission: 'edit',
+        objectType: 'document',
+        objectId: 'eng_handbook',
+      },
       expected: true,
       note: 'dana -> eng_backend_interns#member -> eng_backend#member -> eng#member -> eng_docs#editor -> eng_handbook#edit (5 hops, two-level group nesting)',
     },
     {
-      query: { subject: subject('user', 'alice'), permission: 'edit', objectType: 'document', objectId: 'eng_handbook' },
+      query: {
+        subject: subject('user', 'alice'),
+        permission: 'edit',
+        objectType: 'document',
+        objectId: 'eng_handbook',
+      },
       expected: true,
       note: 'alice is a direct eng#member -> eng_docs#editor -> eng_handbook#edit (3 hops)',
     },
     {
-      query: { subject: subject('user', 'mallory'), permission: 'view', objectType: 'org', objectId: 'acme' },
+      query: {
+        subject: subject('user', 'mallory'),
+        permission: 'view',
+        objectType: 'org',
+        objectId: 'acme',
+      },
       expected: false,
       note: 'org.view = member - banned; mallory is a member but also banned (exclusion)',
     },
     {
-      query: { subject: subject('user', 'carol'), permission: 'sensitive_review', objectType: 'folder', objectId: 'finance_docs' },
+      query: {
+        subject: subject('user', 'carol'),
+        permission: 'sensitive_review',
+        objectType: 'folder',
+        objectId: 'finance_docs',
+      },
       expected: true,
       note: 'sensitive_review = (viewer|edit) & sensitive_reviewer; carol has both (intersection, positive case)',
     },
     {
-      query: { subject: subject('user', 'erin'), permission: 'sensitive_review', objectType: 'folder', objectId: 'finance_docs' },
+      query: {
+        subject: subject('user', 'erin'),
+        permission: 'sensitive_review',
+        objectType: 'folder',
+        objectId: 'finance_docs',
+      },
       expected: false,
       note: 'erin has viewer via group:finance but not sensitive_reviewer (intersection, negative case)',
     },
     {
-      query: { subject: subject('user', 'bob'), permission: 'view', objectType: 'document', objectId: 'roadmap' },
+      query: {
+        subject: subject('user', 'bob'),
+        permission: 'view',
+        objectType: 'document',
+        objectId: 'roadmap',
+      },
       expected: true,
       note: 'document:roadmap has no parent folder — direct viewer grant only, depth 0',
     },
     {
-      query: { subject: subject('user', 'dana'), permission: 'edit', objectType: 'document', objectId: 'eng_backend_runbook' },
+      query: {
+        subject: subject('user', 'dana'),
+        permission: 'edit',
+        objectType: 'document',
+        objectId: 'eng_backend_runbook',
+      },
       expected: true,
       note: 'compounds 2 group-nesting hops with 2 folder-inheritance hops (eng_backend_docs has no direct grants of its own)',
     },
     {
-      query: { subject: subject('user', 'mallory'), permission: 'edit', objectType: 'document', objectId: 'eng_handbook' },
+      query: {
+        subject: subject('user', 'mallory'),
+        permission: 'edit',
+        objectType: 'document',
+        objectId: 'eng_handbook',
+      },
       expected: false,
       note: 'negative control on the union side: mallory has no path into group:eng at all',
     },
@@ -210,7 +255,15 @@ export function depthChainWorkload(
       const subjectUser = `bench_subject_${runId}`;
       const tuples: CanonicalTuple[] = [];
       for (let i = 1; i <= depth; i++) {
-        tuples.push(tuple('bench_node', `node_${runId}_${i}`, 'parent', 'bench_node', `node_${runId}_${i - 1}`));
+        tuples.push(
+          tuple(
+            'bench_node',
+            `node_${runId}_${i}`,
+            'parent',
+            'bench_node',
+            `node_${runId}_${i - 1}`,
+          ),
+        );
       }
       tuples.push(tuple('bench_node', `node_${runId}_0`, 'viewer', 'user', subjectUser));
       cases.push({

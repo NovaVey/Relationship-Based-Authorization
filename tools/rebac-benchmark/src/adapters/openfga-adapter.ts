@@ -23,7 +23,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import type { CanonicalCheckQuery, CanonicalSubject, CanonicalTuple, EngineAdapter } from '../types.js';
+import type {
+  CanonicalCheckQuery,
+  CanonicalSubject,
+  CanonicalTuple,
+  EngineAdapter,
+} from '../types.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const COMBINED_MODEL_PATH = path.resolve(moduleDir, '../../workloads/openfga-combined.fga');
@@ -68,7 +73,15 @@ export class OpenfgaAdapter implements EngineAdapter {
 
   async writeTuple(t: CanonicalTuple): Promise<void> {
     await this.client.write(
-      { writes: [{ user: subjectRef(t.subject), relation: t.relation, object: `${t.objectType}:${t.objectId}` }] },
+      {
+        writes: [
+          {
+            user: subjectRef(t.subject),
+            relation: t.relation,
+            object: `${t.objectType}:${t.objectId}`,
+          },
+        ],
+      },
       { authorizationModelId: this.authorizationModelId },
     );
   }
@@ -76,7 +89,11 @@ export class OpenfgaAdapter implements EngineAdapter {
   async check(q: CanonicalCheckQuery): Promise<{ allowed: boolean; latencyMs: number }> {
     const start = performance.now();
     const res = await this.client.check(
-      { user: subjectRef(q.subject), relation: q.permission, object: `${q.objectType}:${q.objectId}` },
+      {
+        user: subjectRef(q.subject),
+        relation: q.permission,
+        object: `${q.objectType}:${q.objectId}`,
+      },
       { authorizationModelId: this.authorizationModelId },
     );
     const latencyMs = performance.now() - start;
