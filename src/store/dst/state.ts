@@ -58,6 +58,57 @@ export interface NamespaceConfigRow {
   commitSeq: number;
 }
 
+/**
+ * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The model" section — one
+ * row per `(object, relation, subject)` the Leopard index's offline rebuild
+ * (`rebuildRelationMembershipIndex`, `src/store/relation-index.ts`)
+ * publishes. **Deliberately reuses `tupleDeleteHandler`'s own unconditional
+ * array-splice-at-commit shape, not `namespace_configs`'s own
+ * generation-list-by-`commitSeq` shape** — the proposal's own doc comment
+ * discloses, at length, why a generation-list model would be *wrong* here:
+ * real Postgres's `TRUNCATE` swaps the underlying relfilenode rather than
+ * participating in ordinary per-row MVCC visibility the way `DELETE`/an
+ * `UPDATE`-versioned row does, so an older `REPEATABLE READ` snapshot whose
+ * own read happens to run *after* a later rebuild's `TRUNCATE` already
+ * committed must see the table as **empty**, never the prior generation —
+ * exactly backwards from what a "pick the highest generation `commitSeq <=
+ * visibleAsOf`" read would produce. Plain array + `isVisible`/`commitSeq`
+ * gives this behavior for free: the `TRUNCATE`'s own `bufferOp`
+ * unconditionally clears whatever the array currently holds (see
+ * `shapes.ts`'s own truncate handler), so a reader anchored before a later
+ * `TRUNCATE`'s commit finds the array already emptied by the time its own
+ * statement runs, with nothing generation-aware needed to produce that.
+ */
+export interface RelationMembershipIndexRow {
+  objectNs: string;
+  objectId: string;
+  relation: string;
+  subjectNs: string;
+  subjectId: string;
+  viaPath: string[];
+  minExpiresAt: Date | null;
+  commitSeq: number;
+}
+
+/**
+ * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The model" section —
+ * `relation_membership_index_state.watermark_token`, by contrast, genuinely
+ * *is* a versioned-row question: an ordinary `UPDATE ... WHERE id = 1`
+ * against a real single row, where ordinary Postgres MVCC *does* preserve an
+ * older row version for an older snapshot — the identical
+ * `NamespaceConfigRow`/`latestNamespaceConfigHandler` "pick the highest
+ * version tagged by `commitSeq` within my visibility ceiling" pattern is the
+ * *correct* reuse here, not a mistake to correct the way the row-table shape
+ * above is. `rebuild_started_at`/`rebuild_finished_at`/`row_count` are
+ * deliberately not modeled at all — see this proposal's own disclosure:
+ * "never a soundness concern — no check ever reads this column; only
+ * `watermark_token`... gates any ALLOW."
+ */
+export interface RelationMembershipIndexStateVersion {
+  watermarkToken: number;
+  commitSeq: number;
+}
+
 export interface FakeStoreState {
   relationTuples: RelationTupleRow[];
   writeLog: WriteLogRow[];
@@ -97,6 +148,18 @@ export interface FakeStoreState {
    * established for concurrency, applied here to time instead.
    */
   now: Date;
+  /**
+   * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The model" section —
+   * see `RelationMembershipIndexRow`'s own doc comment above for why this is
+   * a plain array, unconditionally spliced by the rebuild's own `TRUNCATE`
+   * handler, never a generation list.
+   */
+  relationMembershipIndex: RelationMembershipIndexRow[];
+  /**
+   * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The model" section —
+   * see `RelationMembershipIndexStateVersion`'s own doc comment above.
+   */
+  relationMembershipIndexStateVersions: RelationMembershipIndexStateVersion[];
 }
 
 export function createFakeStoreState(): FakeStoreState {
@@ -109,6 +172,8 @@ export function createFakeStoreState(): FakeStoreState {
     nextCommitSeq: 1,
     locks: createLocksState(),
     now: new Date(0),
+    relationMembershipIndex: [],
+    relationMembershipIndexStateVersions: [],
   };
 }
 

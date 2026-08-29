@@ -58,7 +58,11 @@
  */
 import type { NamespaceConfig } from '../../schema/dsl/types.js';
 import type { TupleKey } from '../tuples.js';
-import type { FakeStoreState, RelationTupleRow } from './state.js';
+import type {
+  FakeStoreState,
+  RelationTupleRow,
+  RelationMembershipIndexStateVersion,
+} from './state.js';
 import { fetchReachableFrontierVia } from './frontier.js';
 
 export interface FakeQueryResult<Row = Record<string, unknown>> {
@@ -486,6 +490,364 @@ const fetchTuplesOnFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf
 };
 
 // ---------------------------------------------------------------------------
+// relation-index.ts's own SQL surface — `docs/DST-LEOPARD-EVOLUTION-
+// PROPOSAL.md`'s own "New shape handlers" section. `rebuildRelationMembership
+// Index` always runs on its own dedicated connection, opened with the second,
+// *writable* `REPEATABLE READ` `BEGIN` text (`connection.ts`'s own
+// `snapshotReadOnly: false` mode) — every read below still honors
+// `visibleAsOf`/`isVisible` exactly like every other D2 snapshot-aware
+// handler, since that anchoring discipline was never specific to
+// read-only-ness in the first place (`connection.ts`'s own top-of-file doc
+// comment). `lookupRelationMembershipIndex`'s own two reads, by contrast,
+// always run on `productionCheck`'s existing `REPEATABLE READ READ ONLY`
+// client, so `visibleAsOf` is a real number for every genuine call to those
+// two — never `undefined` in practice, but each still honors `isVisible`'s
+// own "no boundary" fallback for the identical reason resolver.ts's own
+// three handlers already do.
+// ---------------------------------------------------------------------------
+
+/** `ns:id#relation` — the identical `via_path`/`FrontierRow.path` string encoding `frontier.ts`'s own (private) `identityKey` already builds; duplicated here as its own tiny, single-purpose helper rather than exporting that one, matching this project's own established "a plain-data shape/format shared across a module boundary that isn't itself resolver-isolation-sensitive is fine to independently redeclare" precedent (`docs/DECISIONS.md` D-022) — this is a one-line string format, not traversal or rewrite-evaluation logic, so nothing about the reference/production resolver isolation rule is implicated by having two copies of it. */
+function membershipIdentityKey(ns: string, id: string, relation: string): string {
+  return `${ns}:${id}#${relation}`;
+}
+
+/**
+ * Parses one `path` element (`ns:id#relation`) back into its parts —
+ * unambiguous for the identical reason `resolver.ts`'s own private
+ * `parseFrontierKeyString` already documents: every namespace/id/relation is
+ * restricted to `[a-z][a-z0-9_]*` (`IDENTIFIER_PATTERN`), which never
+ * contains `:` or `#`. A separate, independent copy for the identical
+ * "duplication over a backwards/risky import" reasoning as
+ * `membershipIdentityKey` above — this file has no dependency on
+ * `resolver.ts` at all, and creating one purely to reuse a four-line parser
+ * would be exactly the kind of undisclosed coupling `relation-index.ts`'s own
+ * top-of-file doc comment already refuses for the identical reason
+ * (`store/` must never depend on `resolve/`).
+ */
+function parseMembershipIdentityKey(raw: string): { ns: string; id: string; relation: string } {
+  const hashIndex = raw.indexOf('#');
+  const colonIndex = raw.indexOf(':');
+  if (hashIndex < 0 || colonIndex < 0 || colonIndex >= hashIndex) {
+    throw new Error(`DST fake store: malformed frontier identity key ${JSON.stringify(raw)}`);
+  }
+  return {
+    ns: raw.slice(0, colonIndex),
+    id: raw.slice(colonIndex + 1, hashIndex),
+    relation: raw.slice(hashIndex + 1),
+  };
+}
+
+/** Postgres's own `least(...)` semantics: ignores `NULL` operands, returns `NULL` only when every operand is `NULL` — mirrors the real rebuild SQL's own `least(m.min_expires_at, rt.expires_at)` threading exactly (`relation-index.ts`'s own doc comment, step 3). */
+function leastIgnoringNull(a: Date | null, b: Date | null): Date | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a.getTime() <= b.getTime() ? a : b;
+}
+
+/**
+ * The running minimum `expires_at` across every USERSET edge on `path`
+ * (root through the second-to-last node) — the in-memory equivalent of the
+ * real recursive CTE's own `least(m.min_expires_at, rt.expires_at)`
+ * threaded through `membership`'s own recursion (`relation-index.ts`'s doc
+ * comment, step 3). `fetchReachableFrontierVia`'s own `DstFrontierRow` never
+ * carries this value itself (it only tracks `path`, sufficient for its own
+ * proven reachability-equivalence contract, D-100) — this walks `path` back
+ * against `state.relationTuples` to recover each edge's own tuple and read
+ * its `expiresAt`, honoring the identical `visibleAsOf`/`now` this whole
+ * transaction is already anchored to.
+ */
+function pathMinExpiresAt(
+  state: FakeStoreState,
+  path: readonly string[],
+  visibleAsOf: number | undefined,
+  now: Date,
+): Date | null {
+  let min: Date | null = null;
+  for (let i = 0; i + 1 < path.length; i += 1) {
+    const object = parseMembershipIdentityKey(path[i] as string);
+    const subject = parseMembershipIdentityKey(path[i + 1] as string);
+    const edge = state.relationTuples.find(
+      (t) =>
+        t.objectNs === object.ns &&
+        t.objectId === object.id &&
+        t.relation === object.relation &&
+        t.subjectNs === subject.ns &&
+        t.subjectId === subject.id &&
+        t.subjectRelation === subject.relation &&
+        isVisible(t.commitSeq, visibleAsOf) &&
+        isTupleLive(t.expiresAt, now),
+    );
+    if (edge) min = leastIgnoringNull(min, edge.expiresAt);
+  }
+  return min;
+}
+
+/**
+ * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "Reusing
+ * `fetchReachableFrontierVia`, not reimplementing traversal a second time" —
+ * see that section's own full reasoning for why this calls the already
+ * D-100-proven traversal once per distinct root rather than a from-scratch
+ * second closure algorithm. **No depth ceiling, deliberately** — matching
+ * the real rebuild's own documented choice (`relation-index.ts`, step 3:
+ * "Phase A is ALLOW-only, so an under-populated root from any cause,
+ * including a depth cap, can only produce a safe `{hit:false}` miss
+ * downstream, never a false hit"). `Number.MAX_SAFE_INTEGER` is a bound in
+ * name only — `fetchReachableFrontierVia`'s own real, per-row cycle guard
+ * (property 3, that file's own doc comment) is what actually terminates this
+ * on a cyclic tuple graph, for the identical reason every real resolver's
+ * cycle detection is the actual termination mechanism and a depth ceiling is
+ * only ever a second, independent backstop (never the other way around).
+ */
+const REBUILD_NO_DEPTH_CEILING = Number.MAX_SAFE_INTEGER;
+
+interface RebuildCandidateRow {
+  objectNs: string;
+  objectId: string;
+  relation: string;
+  subjectNs: string;
+  subjectId: string;
+  viaPath: string[];
+  minExpiresAt: Date | null;
+}
+
+/**
+ * The batched `WITH RECURSIVE roots(...) ... INSERT INTO
+ * relation_membership_index SELECT DISTINCT ON (...) ...`'s own in-memory
+ * equivalent — see this file's own section doc comment and the design
+ * proposal's "Reusing `fetchReachableFrontierVia`" section for the full
+ * argument. Per real root (every distinct `(object_ns, object_id, relation)`
+ * among currently-visible `relation_tuples`, matching the real `roots` CTE's
+ * own `select distinct object_ns, object_id, relation from relation_tuples`
+ * with no expiry filter on the roots themselves — expiry only ever gates
+ * edges/terminal grants, never which objects count as roots at all):
+ * `fetchReachableFrontierVia`'s own BFS output, scanned in its own
+ * (shortest-path-first) `allRows` order, produces one `(root, subject)`
+ * candidate per real plain tuple (`subjectRelation === null`) found at any
+ * reached node — the terminal grant `relation-index.ts`'s own `candidate_rows`
+ * CTE joins in. "Shortest wins" for a converging-paths collision falls out
+ * for free from scanning in that same shortest-first order and keeping only
+ * the first candidate recorded per subject, per root — the identical
+ * argument the design proposal's own text makes for why no separate
+ * tie-break logic is needed here.
+ */
+function computeRebuildCandidates(
+  state: FakeStoreState,
+  visibleAsOf: number | undefined,
+  now: Date,
+): RebuildCandidateRow[] {
+  const roots = new Map<string, { ns: string; id: string; relation: string }>();
+  for (const row of state.relationTuples) {
+    if (!isVisible(row.commitSeq, visibleAsOf)) continue;
+    const key = membershipIdentityKey(row.objectNs, row.objectId, row.relation);
+    if (!roots.has(key)) {
+      roots.set(key, { ns: row.objectNs, id: row.objectId, relation: row.relation });
+    }
+  }
+
+  const results: RebuildCandidateRow[] = [];
+  for (const root of roots.values()) {
+    const frontierRows = fetchReachableFrontierVia(
+      state,
+      root.ns,
+      root.id,
+      root.relation,
+      REBUILD_NO_DEPTH_CEILING,
+      visibleAsOf,
+      now,
+    );
+    // "Shortest wins": frontierRows is scanned in fetchReachableFrontierVia's
+    // own breadth-first allRows order, so the first candidate recorded per
+    // subject below is, by construction, the shortest real one — see this
+    // function's own doc comment.
+    const bestBySubject = new Map<string, RebuildCandidateRow>();
+    for (const frontierRow of frontierRows) {
+      const plainGrants = state.relationTuples.filter(
+        (t) =>
+          t.objectNs === frontierRow.ns &&
+          t.objectId === frontierRow.id &&
+          t.relation === frontierRow.relation &&
+          t.subjectRelation === null &&
+          isVisible(t.commitSeq, visibleAsOf) &&
+          isTupleLive(t.expiresAt, now),
+      );
+      for (const grant of plainGrants) {
+        const subjectKey = `${grant.subjectNs}:${grant.subjectId}`;
+        if (bestBySubject.has(subjectKey)) continue; // shortest already recorded
+        const pathMin = pathMinExpiresAt(state, frontierRow.path, visibleAsOf, now);
+        bestBySubject.set(subjectKey, {
+          objectNs: root.ns,
+          objectId: root.id,
+          relation: root.relation,
+          subjectNs: grant.subjectNs,
+          subjectId: grant.subjectId,
+          viaPath: frontierRow.path,
+          minExpiresAt: leastIgnoringNull(pathMin, grant.expiresAt),
+        });
+      }
+    }
+    results.push(...bestBySubject.values());
+  }
+  return results;
+}
+
+/**
+ * `REBUILD_WATERMARK_QUERY_TEXT` (`relation-index.ts`) — a deliberate small
+ * duplication of `maxTokenHandler`'s own logic, never a reuse of it: the
+ * literal text and result shape both genuinely differ (`{watermark: string}`
+ * defaulting to `'0'` via `coalesce`, vs. `{max_token: string | null}`),
+ * matching `relation-index.ts`'s own doc comment disclosing this exact
+ * duplication as deliberate (never an import of `resolver.ts`'s private
+ * `ANCHOR_QUERY_TEXT`).
+ */
+const rebuildWatermarkHandler: ShapeHandler = ({ state, visibleAsOf }) => {
+  const visible = state.writeLog.filter((row) => isVisible(row.commitSeq, visibleAsOf));
+  const max = visible.reduce((m, row) => Math.max(m, Number(row.token)), 0);
+  return { rows: [{ watermark: String(max) }], rowCount: 1 };
+};
+
+/** `truncate relation_membership_index` — the unconditional-splice `bufferOp`, exactly `tupleDeleteHandler`'s own established pattern applied to the whole table at once rather than one matching row — see `RelationMembershipIndexRow`'s own doc comment (`state.ts`) for why this exact "unconditionally gone for everyone" behavior is what makes this table's own visibility model correct for `TRUNCATE` specifically. */
+const truncateRelationMembershipIndexHandler: ShapeHandler = ({ bufferOp }) => {
+  bufferOp((s) => {
+    s.relationMembershipIndex = [];
+  });
+  return { rows: [], rowCount: 0 };
+};
+
+/**
+ * The batched `WITH RECURSIVE roots(...) ... INSERT INTO
+ * relation_membership_index ...` — computed synchronously at statement time
+ * (the same "read now, defer only the write" convention every other
+ * read-driven write handler in this file already follows, e.g.
+ * `tupleInsertHandler`'s own identity allocation), then buffered so the
+ * actual rows only land in `state.relationMembershipIndex` atomically at this
+ * transaction's own `COMMIT`, tagged with that commit's `commitSeq` — see
+ * `computeRebuildCandidates`'s own doc comment for the traversal itself.
+ */
+const rebuildRelationMembershipIndexInsertHandler: ShapeHandler = ({
+  state,
+  bufferOp,
+  visibleAsOf,
+  now,
+}) => {
+  const candidates = computeRebuildCandidates(state, visibleAsOf, now);
+  bufferOp((s, commitSeq) => {
+    for (const c of candidates) {
+      s.relationMembershipIndex.push({
+        objectNs: c.objectNs,
+        objectId: c.objectId,
+        relation: c.relation,
+        subjectNs: c.subjectNs,
+        subjectId: c.subjectId,
+        viaPath: c.viaPath,
+        minExpiresAt: c.minExpiresAt,
+        commitSeq,
+      });
+    }
+  });
+  return { rows: [], rowCount: candidates.length };
+};
+
+/**
+ * `update relation_membership_index_state set rebuild_started_at =
+ * clock_timestamp() where id = 1` — deliberately inert: `rebuild_started_at`
+ * is one of the three columns `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own
+ * "The model" section discloses as deliberately not modeled ("never a
+ * soundness concern... DST's whole purpose is proving soundness properties
+ * under adversarial scheduling, not operational-metadata fidelity"). Still a
+ * required registry entry — `shapes.ts`'s "throw loudly on anything
+ * unrecognized" discipline means an unregistered statement is a hard
+ * failure, not a silent skip — but this handler does nothing beyond
+ * returning a plausible `rowCount`.
+ */
+const rebuildStartedAtNoOpHandler: ShapeHandler = () => ({ rows: [], rowCount: 1 });
+
+/**
+ * `update relation_membership_index_state set watermark_token = $1,
+ * rebuild_finished_at = clock_timestamp(), row_count = $2 where id = 1` —
+ * `rebuild_finished_at`/`row_count` discarded (see this file's own doc
+ * comment above on deliberately-unmodeled columns); `watermark_token` is the
+ * one column every soundness-relevant read (`relationMembershipIndexWatermark
+ * ReadHandler`, below) actually gates on, so it's the only one buffered, as a
+ * new `RelationMembershipIndexStateVersion` tagged with this transaction's
+ * own eventual `commitSeq` — the identical "append a new version, never
+ * mutate one in place" shape `namespaceConfigInsertHandler`'s own
+ * `NamespaceConfigRow` already establishes for the identical
+ * "an older `REPEATABLE READ` snapshot must keep seeing the old version"
+ * reason (`RelationMembershipIndexStateVersion`'s own doc comment, `state.ts`).
+ */
+const rebuildWatermarkUpdateHandler: ShapeHandler = ({ params, bufferOp }) => {
+  const [watermarkTokenParam] = params as [number, number];
+  const watermarkToken = Number(watermarkTokenParam);
+  bufferOp((s, commitSeq) => {
+    s.relationMembershipIndexStateVersions.push({ watermarkToken, commitSeq });
+  });
+  return { rows: [], rowCount: 1 };
+};
+
+/**
+ * `lookupRelationMembershipIndex`'s own first `select watermark_token from
+ * relation_membership_index_state where id = 1` — Candidate C's own
+ * watermark-floor gate. Picks the highest `RelationMembershipIndexStateVersion`
+ * with `commitSeq <= visibleAsOf`, defaulting to watermark `0` when none
+ * exists yet (an index that has never been rebuilt) — the identical
+ * "highest version within my own visibility ceiling" rule
+ * `latestNamespaceConfigHandler` already established for `namespace_configs`,
+ * reused here because `RelationMembershipIndexStateVersion` deliberately
+ * reuses that exact same versioned-row model (see its own doc comment,
+ * `state.ts`).
+ */
+const relationMembershipIndexWatermarkReadHandler: ShapeHandler = ({ state, visibleAsOf }) => {
+  const visible = state.relationMembershipIndexStateVersions.filter((v) =>
+    isVisible(v.commitSeq, visibleAsOf),
+  );
+  const top = visible.reduce<RelationMembershipIndexStateVersion | undefined>(
+    (best, v) => (best === undefined || v.commitSeq > best.commitSeq ? v : best),
+    undefined,
+  );
+  const watermarkToken = top?.watermarkToken ?? 0;
+  return { rows: [{ watermark_token: String(watermarkToken) }], rowCount: 1 };
+};
+
+/**
+ * `lookupRelationMembershipIndex`'s own second `select via_path,
+ * min_expires_at from relation_membership_index where ...` — filtered by
+ * `isVisible` (the identical `commitSeq`/`visibleAsOf` discipline every
+ * other snapshot-aware read handler in this file already uses) **and**
+ * `isTupleLive(minExpiresAt, now)` in the same query, mirroring the real
+ * SQL's own single-query `(min_expires_at is null or min_expires_at >
+ * now())` predicate exactly (Candidate G) — reusing the exact existing
+ * `isTupleLive` helper `listTupleSubjectsHandler`/`fetchTuplesOnFrontierHandler`
+ * already use for the identical liveness predicate, never a second
+ * implementation of that comparison.
+ */
+const relationMembershipIndexRowReadHandler: ShapeHandler = ({
+  state,
+  params,
+  visibleAsOf,
+  now,
+}) => {
+  const [objectNs, objectId, relation, subjectNs, subjectId] = params as [
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
+  const row = state.relationMembershipIndex.find(
+    (r) =>
+      r.objectNs === objectNs &&
+      r.objectId === objectId &&
+      r.relation === relation &&
+      r.subjectNs === subjectNs &&
+      r.subjectId === subjectId &&
+      isVisible(r.commitSeq, visibleAsOf) &&
+      isTupleLive(r.minExpiresAt, now),
+  );
+  if (!row) return { rows: [], rowCount: 0 };
+  return { rows: [{ via_path: row.viaPath, min_expires_at: row.minExpiresAt }], rowCount: 1 };
+};
+
+// ---------------------------------------------------------------------------
 // The registry itself.
 // ---------------------------------------------------------------------------
 
@@ -614,6 +976,91 @@ const SHAPES = new Map<string, ShapeHandler>([
        on rt.object_ns = frontier.ns and rt.object_id = frontier.id and rt.relation = frontier.relation
      where rt.expires_at is null or rt.expires_at > now()`),
     fetchTuplesOnFrontierHandler,
+  ],
+  [
+    // relation-index.ts's own REBUILD_WATERMARK_QUERY_TEXT — must match that
+    // constant exactly (a deliberate small duplication of maxTokenHandler's
+    // own query, not a reuse of it — see rebuildWatermarkHandler's own doc
+    // comment).
+    normalizeSql('select coalesce(max(token), 0) as watermark from write_log'),
+    rebuildWatermarkHandler,
+  ],
+  [normalizeSql('truncate relation_membership_index'), truncateRelationMembershipIndexHandler],
+  [
+    // relation-index.ts's own batched WITH RECURSIVE ... INSERT INTO
+    // relation_membership_index ... — must match that literal exactly.
+    normalizeSql(`with recursive roots(root_ns, root_id, root_relation) as (
+         select distinct object_ns, object_id, relation from relation_tuples
+       ),
+       membership(root_ns, root_id, root_relation, ns, id, relation, depth, path, min_expires_at) as (
+         select
+           r.root_ns, r.root_id, r.root_relation,
+           r.root_ns, r.root_id, r.root_relation,
+           0 as depth,
+           array[r.root_ns || ':' || r.root_id || '#' || r.root_relation] as path,
+           null::timestamptz as min_expires_at
+         from roots r
+         union all
+         select distinct on (m.root_ns, m.root_id, m.root_relation, rt.subject_ns, rt.subject_id, rt.subject_relation)
+           m.root_ns, m.root_id, m.root_relation,
+           rt.subject_ns, rt.subject_id, rt.subject_relation,
+           m.depth + 1,
+           m.path || (rt.subject_ns || ':' || rt.subject_id || '#' || rt.subject_relation),
+           least(m.min_expires_at, rt.expires_at)
+         from relation_tuples rt
+         join membership m
+           on rt.object_ns = m.ns and rt.object_id = m.id and rt.relation = m.relation
+         where rt.subject_relation is not null
+           and (rt.expires_at is null or rt.expires_at > now())
+           and not (
+             (rt.subject_ns || ':' || rt.subject_id || '#' || rt.subject_relation) = any (m.path)
+           )
+       ),
+       candidate_rows as (
+         select
+           m.root_ns, m.root_id, m.root_relation,
+           rt.subject_ns, rt.subject_id,
+           m.path as via_path,
+           least(m.min_expires_at, rt.expires_at) as min_expires_at
+         from membership m
+         join relation_tuples rt
+           on rt.object_ns = m.ns and rt.object_id = m.id and rt.relation = m.relation
+         where rt.subject_relation is null
+           and (rt.expires_at is null or rt.expires_at > now())
+       )
+       insert into relation_membership_index (object_ns, object_id, relation, subject_ns, subject_id, via_path, min_expires_at)
+       select distinct on (root_ns, root_id, root_relation, subject_ns, subject_id)
+         root_ns, root_id, root_relation, subject_ns, subject_id, via_path, min_expires_at
+       from candidate_rows
+       order by root_ns, root_id, root_relation, subject_ns, subject_id, array_length(via_path, 1) asc`),
+    rebuildRelationMembershipIndexInsertHandler,
+  ],
+  [
+    normalizeSql(
+      'update relation_membership_index_state set rebuild_started_at = clock_timestamp() where id = 1',
+    ),
+    rebuildStartedAtNoOpHandler,
+  ],
+  [
+    // relation-index.ts's own final watermark-publish UPDATE — must match
+    // that literal exactly.
+    normalizeSql(`update relation_membership_index_state
+       set watermark_token = $1, rebuild_finished_at = clock_timestamp(), row_count = $2
+       where id = 1`),
+    rebuildWatermarkUpdateHandler,
+  ],
+  [
+    normalizeSql(`select watermark_token from relation_membership_index_state where id = 1`),
+    relationMembershipIndexWatermarkReadHandler,
+  ],
+  [
+    // lookupRelationMembershipIndex's own second select — must match that
+    // literal exactly.
+    normalizeSql(`select via_path, min_expires_at from relation_membership_index
+      where object_ns = $1 and object_id = $2 and relation = $3
+        and subject_ns = $4 and subject_id = $5
+        and (min_expires_at is null or min_expires_at > now())`),
+    relationMembershipIndexRowReadHandler,
   ],
 ]);
 

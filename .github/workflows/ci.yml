@@ -26,6 +26,23 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
+
+      # tools/rebac-benchmark/ is a separate npm package (its own
+      # package.json/package-lock.json, with dependencies — e.g.
+      # @authzed/authzed-node, @openfga/sdk — that aren't in this root
+      # package.json at all), so the root `npm ci` above never installs
+      # it. Its own eslint.config.mjs deliberately spreads this repo's
+      # root config so the directory gets identical typed-lint rules (see
+      # that file's own comment) via a `projectService` pointed at its own
+      # tsconfig.json — but that needs this directory's own node_modules
+      # present so the SDK types actually resolve. Without it, typed
+      # ESLint sees every SDK member as an unresolved type and cascades
+      # into dozens of `no-unsafe-*` errors (confirmed live: removing this
+      # directory's own node_modules and re-running `eslint .` reproduces
+      # exactly the 86 errors this step exists to prevent).
+      - run: npm ci
+        working-directory: tools/rebac-benchmark
+
       - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck

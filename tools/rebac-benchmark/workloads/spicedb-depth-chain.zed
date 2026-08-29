@@ -1,0 +1,30 @@
+// NOTE: the running harness actually loads spicedb-combined.zed (this
+// file's content plus spicedb-example.zed's, as one schema write — see
+// that file's own doc comment for why). This file stays as the
+// standalone, readable reference translation of just the depth-chain
+// type.
+//
+// The depth-scaling check-latency workload's SpiceDB schema — see
+// openfga-depth-chain.fga's own doc comment for what this measures and
+// why it is a separate, minimal schema rather than an extension of
+// spicedb-example.zed.
+//
+// A plain tuple-to-userset chain (`parent: bench_node`), matching
+// openfga-depth-chain.fga's own shape exactly — SpiceDB has no
+// restriction against a userset-typed tupleset relation the way OpenFGA
+// does (a `relation parent: bench_node | bench_node#member` schema also
+// compiles and behaves identically here), but this harness uses the
+// identical plain-pointer shape across all three engines' depth-chain
+// schemas deliberately, so a latency difference in the results can never
+// be blamed on "these two engines walked a structurally different
+// rewrite rule than the third."
+
+definition user {}
+
+definition bench_node {
+	relation viewer: user
+	relation parent: bench_node
+
+	// bench_node.view = viewer | parent->view (this repo's DSL spelling)
+	permission view = viewer + parent->view
+}

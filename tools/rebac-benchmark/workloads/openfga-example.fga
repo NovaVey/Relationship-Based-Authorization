@@ -1,0 +1,67 @@
+# NOTE: the running harness actually loads openfga-combined.fga (this
+# file's content plus openfga-depth-chain.fga's, as one model version —
+# see that file's own doc comment for why). This file stays as the
+# standalone, readable reference translation of just the demo graph.
+#
+# OpenFGA translation of ../../../schema/example.authz (this repo's own
+# demo schema — org/group/folder/document, seeded by
+# scripts/seed-example.ts). Written by hand against the OpenFGA v1.1 DSL
+# (https://openfga.dev/docs/configuration-language), not generated, and
+# checked in as the authorization-model source the benchmark harness
+# uploads verbatim via POST /stores/{id}/authorization-models.
+#
+# Every rewrite-rule kind in the original schema has a direct, exact
+# OpenFGA equivalent — this schema is not a simplification:
+#   union            -> `or`                              (every permission)
+#   exclusion         -> `but not`                          (org.view)
+#   intersection      -> `and`                              (folder.sensitive_review)
+#   tuple-to-userset  -> `<perm> from <relation>`           (folder/document parent->edit, parent->view)
+#   nested groups     -> `[user, group#member]` as a relation's own type restriction,
+#                        exactly like the original DSL's `user | group#member`
+#
+# The one syntactic difference worth naming: this DSL's `parent->edit`
+# (object-then-relation, an infix arrow) becomes OpenFGA's `edit from
+# parent` (relation-then-tupleset, prose order) — same tuple-to-userset
+# operation, opposite reading order. See tools/rebac-benchmark/README.md's
+# "Schema translation notes" for the rest of the mapping table and every
+# case checked and found to have no gap.
+model
+  schema 1.1
+
+type user
+
+type group
+  relations
+    define member: [user, group#member]
+
+type org
+  relations
+    define member: [user, group#member]
+    define banned: [user]
+    # org.view = member - banned in the original DSL.
+    define view: member but not banned
+
+type folder
+  relations
+    define parent: [folder]
+    define owner: [user]
+    define editor: [user, group#member]
+    define viewer: [user, group#member]
+    define sensitive_reviewer: [user, group#member]
+    # folder.edit = editor | owner | parent->edit
+    define edit: editor or owner or edit from parent
+    # folder.view = viewer | edit | parent->view
+    define view: viewer or edit or view from parent
+    # folder.sensitive_review = (viewer | edit) & sensitive_reviewer
+    define sensitive_review: (viewer or edit) and sensitive_reviewer
+
+type document
+  relations
+    define parent: [folder]
+    define owner: [user]
+    define editor: [user, group#member]
+    define viewer: [user, group#member]
+    # document.edit = editor | owner | parent->edit
+    define edit: editor or owner or edit from parent
+    # document.view = viewer | edit | parent->view
+    define view: viewer or edit or view from parent

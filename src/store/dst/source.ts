@@ -58,6 +58,20 @@ export interface FakeConnectionSource extends ConnectionSource {
    */
   armNextConnectionPause(afterStatements: number): { resume: () => void; fired: Promise<void> };
   /**
+   * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The genuinely new fault
+   * class," test-only: arms a one-shot poison for the *next* connection
+   * opened via `.connect()` — after `afterStatements` successful `.query()`
+   * calls on that one connection, its `(afterStatements + 1)`th call throws
+   * an injected error AND poisons the connection (every later statement
+   * fails with `current transaction is aborted...` until a `ROLLBACK` or a
+   * `ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP`) — see `connection.ts`'s own
+   * top-of-file doc comment and `FakeConnectionOptions.poisonAfterStatements`
+   * for the full fault-class writeup. Mirrors `armNextConnectionCrash`'s
+   * exact one-shot-arming shape precisely: cleared the moment that one
+   * `.connect()` call happens, does not arm every future connection.
+   */
+  armNextConnectionPoison(afterStatements: number): void;
+  /**
    * D-144 (expiring tuples), test-only: sets the fake store's own
    * controllable "current time" (`FakeStoreState.now`) — the ONLY clock
    * every expiry filter (`shapes.ts`, `frontier.ts`) ever consults. Takes
@@ -84,6 +98,7 @@ interface ArmedPause {
 class FakeConnectionSourceImpl implements FakeConnectionSource {
   private readonly autocommitConnection: FakeConnectionImpl;
   private armedCrash: number | undefined;
+  private armedPoison: number | undefined;
   private armedPause: ArmedPause | undefined;
   // Every FakeConnectionImpl needs its own stable identity for D1's lock
   // engine (`locks.ts`, `connection.ts`) — "release everything connection N
@@ -110,6 +125,10 @@ class FakeConnectionSourceImpl implements FakeConnectionSource {
       options.crashAfterStatements = this.armedCrash;
     }
     this.armedCrash = undefined;
+    if (this.armedPoison !== undefined) {
+      options.poisonAfterStatements = this.armedPoison;
+    }
+    this.armedPoison = undefined;
     if (this.armedPause !== undefined) {
       options.pauseAfterStatements = this.armedPause.afterStatements;
       options.pauseGate = this.armedPause.gate;
@@ -121,6 +140,10 @@ class FakeConnectionSourceImpl implements FakeConnectionSource {
 
   armNextConnectionCrash(afterStatements: number): void {
     this.armedCrash = afterStatements;
+  }
+
+  armNextConnectionPoison(afterStatements: number): void {
+    this.armedPoison = afterStatements;
   }
 
   armNextConnectionPause(afterStatements: number): { resume: () => void; fired: Promise<void> } {

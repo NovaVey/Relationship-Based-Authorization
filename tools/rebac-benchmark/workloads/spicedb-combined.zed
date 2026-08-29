@@ -1,0 +1,67 @@
+// The literal union of spicedb-example.zed and spicedb-depth-chain.zed,
+// written once. SpiceDB (unlike this repo's own per-namespace, additive
+// `namespace_configs`, and unlike OpenFGA's independently-addressable
+// authorization-model *versions*) has exactly ONE live schema for the
+// whole instance at a time, and a `WriteSchema` call that dropped a
+// `definition` still referenced by an existing relationship is REJECTED
+// outright — confirmed live against this harness's own SpiceDB instance
+// (`cannot delete object definition ..., as at least one relationship
+// exists under it`), not assumed from the docs. Loading the example graph
+// and the depth-chain schema as two separate `WriteSchema` calls (the way
+// the authz and OpenFGA adapters each load two independent
+// schemas/models) would make the SECOND call fail the moment the FIRST
+// call's tuples exist — so this one file is the one adapter-shape
+// difference SpiceDB's own schema model actually forces, not a
+// convenience.
+//
+// See spicedb-example.zed and spicedb-depth-chain.zed for this content's
+// own line-by-line provenance and comments — kept there too rather than
+// only here, since those two files are also each independently checked
+// against the OpenFGA translation for the "Schema translation notes"
+// mapping table in tools/rebac-benchmark/README.md.
+
+definition user {}
+
+definition group {
+	relation member: user | group#member
+}
+
+definition org {
+	relation member: user | group#member
+	relation banned: user
+
+	permission view = member - banned
+}
+
+definition folder {
+	relation parent: folder
+	relation owner: user
+	relation editor: user | group#member
+	relation viewer: user | group#member
+	relation sensitive_reviewer: user | group#member
+
+	permission edit = editor + owner + parent->edit
+	permission view = viewer + edit + parent->view
+	permission sensitive_review = (viewer + edit) & sensitive_reviewer
+}
+
+definition document {
+	relation parent: folder
+	relation owner: user
+	relation editor: user | group#member
+	relation viewer: user | group#member
+
+	permission edit = editor + owner + parent->edit
+	permission view = viewer + edit + parent->view
+}
+
+definition bench_node {
+	relation viewer: user
+	relation parent: bench_node
+
+	// A plain tuple-to-userset chain, matching openfga-*.fga's own shape
+	// exactly (forced there by a real OpenFGA validation rule — see
+	// spicedb-depth-chain.zed's own doc comment) rather than the
+	// nested-group-membership shape used elsewhere in this file.
+	permission view = viewer + parent->view
+}

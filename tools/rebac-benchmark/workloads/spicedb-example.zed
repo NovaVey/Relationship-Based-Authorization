@@ -1,0 +1,76 @@
+// NOTE: the running harness actually loads spicedb-combined.zed (this
+// file's content plus spicedb-depth-chain.zed's, as one schema write —
+// see that file's own doc comment for the real, confirmed reason SpiceDB
+// specifically cannot split this the way authz/OpenFGA's adapters do).
+// This file stays as the standalone, readable reference translation of
+// just the demo graph.
+//
+// SpiceDB translation of ../../../schema/example.authz (this repo's own
+// demo schema — org/group/folder/document, seeded by
+// scripts/seed-example.ts). Written by hand against SpiceDB's schema
+// language (https://authzed.com/docs/spicedb/concepts/schema), not
+// generated, and checked in as the schema text the benchmark harness
+// writes verbatim via the SchemaService.WriteSchema RPC.
+//
+// This is the closest of the three translations to the original source —
+// SpiceDB's schema language and this repo's own DSL are both direct
+// descendants of the same Zanzibar paper and share infix set-operator
+// syntax and the same `->` tuple-to-userset arrow, in the same left-to-
+// right reading order:
+//   union            -> `+`   (this repo's DSL: `|`)
+//   exclusion        -> `-`   (identical operator, identical meaning)
+//   intersection     -> `&`   (identical operator, identical meaning)
+//   tuple-to-userset -> `->`  (identical operator, identical reading order:
+//                              `parent->edit` is spelled exactly the same
+//                              in both languages)
+//   nested groups    -> `user | group#member` on a relation's type union,
+//                       same syntax as the original DSL verbatim
+//
+// See tools/rebac-benchmark/README.md's "Schema translation notes" for
+// the full mapping table, including the one real semantic gap this
+// translation does NOT paper over (SpiceDB permissions cannot be the
+// direct target of a `-`/exclusion the way this repo's DSL allows a
+// permission on the left of `-` in principle — not exercised by this demo
+// schema, so it doesn't affect the workload below, but it is a real,
+// disclosed difference, not an oversight).
+
+definition user {}
+
+definition group {
+	relation member: user | group#member
+}
+
+definition org {
+	relation member: user | group#member
+	relation banned: user
+
+	// org.view = member - banned in the original DSL.
+	permission view = member - banned
+}
+
+definition folder {
+	relation parent: folder
+	relation owner: user
+	relation editor: user | group#member
+	relation viewer: user | group#member
+	relation sensitive_reviewer: user | group#member
+
+	// folder.edit = editor | owner | parent->edit
+	permission edit = editor + owner + parent->edit
+	// folder.view = viewer | edit | parent->view
+	permission view = viewer + edit + parent->view
+	// folder.sensitive_review = (viewer | edit) & sensitive_reviewer
+	permission sensitive_review = (viewer + edit) & sensitive_reviewer
+}
+
+definition document {
+	relation parent: folder
+	relation owner: user
+	relation editor: user | group#member
+	relation viewer: user | group#member
+
+	// document.edit = editor | owner | parent->edit
+	permission edit = editor + owner + parent->edit
+	// document.view = viewer | edit | parent->view
+	permission view = viewer + edit + parent->view
+}

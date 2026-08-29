@@ -37,6 +37,30 @@ refresh loop that was never wired up, and a described nightly-scale
 three-way differential test that was never written — are disclosed inline
 below, at the sections that described them, rather than only here.
 
+**Two things worth reading before the name below does its own work on
+you (raised directly by an external technical review, 2026-08-29, and
+surfaced here rather than left for a skimming reader to assume).** First:
+"the Leopard index" borrows Zanzibar's own name for the _role_ this
+structure plays (offline, watermarked, consulted as a fast path ahead of
+a live graph walk) — not its internal data structure. What actually
+shipped is a flat, denormalized closure table (one row per reachable
+leaf pair, full-rebuild-plus-watermark), explicitly named and rejected in
+favor of _not_ building in "How this design was chosen," architecture
+#3 below: "a hypothetical, fully Zanzibar-faithful compressed leaf index
+(dense integer subject IDs, roaring-bitmap or `int8[]`-with-GIN posting
+lists per root)... this is what a real Leopard index looks like at
+Google's own scale... never designed in detail, deliberately." Second:
+"periodic rebuild" today means exactly and only "whenever an operator
+runs `authz leopard refresh`, by hand or via external cron" — the
+optional in-process interval this document originally recommended
+(`LEOPARD_INDEX_REFRESH_INTERVAL_MS`) was never wired up (see "Refresh
+trigger — recommendation," below, for the correction). This degrades
+_safely_, by construction (a never-refreshed index just never engages,
+via the watermark gate — never serves stale data), but it does mean
+there is currently nothing in this system that notices or alarms on a
+forgotten refresh cadence; that is an operational gap, not a soundness
+one, and it is worth an operator's attention regardless.
+
 ## The problem this exists to name, not hide
 
 Google's own Zanzibar paper spends real design effort on exactly one

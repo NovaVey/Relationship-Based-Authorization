@@ -1,0 +1,55 @@
+# The literal union of openfga-example.fga and openfga-depth-chain.fga,
+# written as a single authorization-model version. OpenFGA does not
+# force this the way SpiceDB does (see workloads/spicedb-combined.zed's
+# own doc comment on the real, confirmed hazard that forces it there) —
+# an OpenFGA store can hold many independently-addressable model
+# versions, and checking against an older version by id remains valid
+# after a newer one is written. This harness combines them anyway, for
+# ONE reason: methodology symmetry. All three engines load exactly one
+# schema/model per run this way, so "engine X needed 1 preparation call
+# and engine Y needed 2" is never itself a variable the results have to
+# account for. See tools/rebac-benchmark/README.md's "Schema translation
+# notes."
+model
+  schema 1.1
+
+type user
+
+type group
+  relations
+    define member: [user, group#member]
+
+type org
+  relations
+    define member: [user, group#member]
+    define banned: [user]
+    define view: member but not banned
+
+type folder
+  relations
+    define parent: [folder]
+    define owner: [user]
+    define editor: [user, group#member]
+    define viewer: [user, group#member]
+    define sensitive_reviewer: [user, group#member]
+    define edit: editor or owner or edit from parent
+    define view: viewer or edit or view from parent
+    define sensitive_review: (viewer or edit) and sensitive_reviewer
+
+type document
+  relations
+    define parent: [folder]
+    define owner: [user]
+    define editor: [user, group#member]
+    define viewer: [user, group#member]
+    define edit: editor or owner or edit from parent
+    define view: viewer or edit or view from parent
+
+type bench_node
+  relations
+    define viewer: [user]
+    # A plain tuple-to-userset chain, not nested-group-membership — see
+    # workloads/openfga-depth-chain.fga's own doc comment for the real,
+    # confirmed OpenFGA validation rule that forces this shape.
+    define parent: [bench_node]
+    define view: viewer or view from parent

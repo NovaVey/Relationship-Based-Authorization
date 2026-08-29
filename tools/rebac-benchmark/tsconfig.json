@@ -1,0 +1,36 @@
+{
+  // Deliberately standalone, not `"extends": "../../tsconfig.json"` the
+  // way `tools/schema-verifier/tsconfig.json` does — that tool extends
+  // the root config because it imports the root project's own compiler
+  // (`src/schema/dsl/`) across the tool boundary. This tool never imports
+  // root `src/` code: every reference to this repo's own engine is a
+  // file path (`schema/example.authz`) read at runtime, or a real HTTP
+  // call against a separately-running `authz serve` process — never a
+  // TypeScript import — so there is no cross-boundary compile dependency
+  // to inherit the root `tsconfig.json` for. This directory also carries
+  // its OWN `node_modules` (`@openfga/sdk`, `@authzed/authzed-node`, …),
+  // which the root project's `tsconfig.json`/`skipLibCheck` setup has no
+  // reason to know about either way.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["dist", "node_modules"]
+}
