@@ -141,17 +141,25 @@
  *
  * Every field `insertCheckRow` writes into the row is covered *except*
  * `id` (a random `uuid`, pure row identity — tampering with it doesn't
- * change what decision was recorded) and `chain_seq` (pure walk-order
+ * change what decision was recorded), `chain_seq` (pure walk-order
  * bookkeeping — see the migration's own doc comment for why it exists and
- * why it can't itself anchor the chain). Covering every remaining column
- * means tampering with *any* of them — including quietly flipping
+ * why it can't itself anchor the chain), and — as of full-repo audit
+ * finding #6 — `certain` (migration `0009_checks_certain.sql`). `certain`
+ * is deliberately excluded for the same reason `id`/`chain_seq` already
+ * are, plus one specific to it: it did not exist when every row chained
+ * under migration `0006_checks_hash_chain.sql` already had its `row_hash`
+ * computed, so folding it into the canonical serialization now would make
+ * `authz audit verify` report every one of those pre-existing, genuinely
+ * untampered historical rows as broken the next time the chain is walked —
+ * a false "tampered" verdict, not a real one. Covering every remaining
+ * column means tampering with *any* of them — including quietly flipping
  * `allowed`, backdating `checked_at`, or swapping in a different
  * `resolution_path` — changes the canonical string and is therefore
  * detected.
  *
  * A plain string concatenation (not NUL-joined) would be ambiguous: without
  * a separator, `("ab", "c")` and `("a", "bc")` serialize identically.
- * NUL (` `) is used because it can never appear inside any of these
+ * NUL (`\0`) is used because it can never appear inside any of these
  * fields for a reason the DSL itself already enforces: `subject_ns`/
  * `subject_id`/`relation`/`object_ns`/`object_id` are always valid
  * identifiers (`IDENTIFIER_PATTERN`, `src/schema/dsl/types.ts` — letters,
@@ -162,7 +170,7 @@
  * either an identifier violating the DSL's own grammar or a
  * `ResolutionStep` object carrying a string value containing one, and
  * nothing in this codebase ever constructs one. Even if it somehow did,
- * `canonicalJson`'s `JSON.stringify` step would escape it as ` `
+ * `canonicalJson`'s `JSON.stringify` step would escape it as `\0`
  * inside the surrounding quotes, not emit a literal NUL byte — so the
  * separator's own uniqueness in the joined string is preserved either way.
  *
@@ -279,7 +287,7 @@ export type PerformCheckResult = ProductionCheckResult;
 // ---------------------------------------------------------------------------
 
 /** Separates every canonicalized field — see the top-of-file doc comment's "A plain string concatenation... would be ambiguous" note for why NUL specifically. */
-const FIELD_SEPARATOR = ' ';
+const FIELD_SEPARATOR = '\0';
 
 /**
  * The very first chained row's `prev_hash` — a fixed, documented sentinel,
@@ -457,6 +465,13 @@ async function insertCheckRow(
   // both the jsonb column and the hash (never two independently-derived
   // "what the path was" values that could theoretically disagree).
   const resolutionPath = result.allowed ? (result.path ?? null) : null;
+  // Mirror image of `resolutionPath` above — full-repo audit finding #6:
+  // `certain` is populated iff `allowed` is false (`ProductionCheckResult
+  // .certain`'s own doc comment, `resolver.ts`), never the other way
+  // around. Deliberately NOT threaded into `computeCheckRowHash` below —
+  // see this file's own top-of-file "Canonical serialization" section for
+  // why this column sits outside the hash chain's covered fields.
+  const certain = result.allowed ? null : (result.certain ?? null);
   // Captured once, before the locked section below, and used for both the
   // stored column and the hash — see this file's own top-of-file "Why
   // checked_at is passed explicitly" section.
@@ -495,8 +510,8 @@ async function insertCheckRow(
       `insert into checks
          (subject_ns, subject_id, relation, object_ns, object_id, allowed,
           consistency_token, resolution_path, depth, duration_ms, checked_at,
-          prev_hash, row_hash)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          prev_hash, row_hash, certain)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         subject.ns,
         subject.id,
@@ -511,6 +526,7 @@ async function insertCheckRow(
         checkedAt,
         prevHash,
         rowHash,
+        certain,
       ],
     );
     await client.query('COMMIT');
