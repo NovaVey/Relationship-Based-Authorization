@@ -119,7 +119,27 @@ describe('DST D0 — the storage seam is genuinely wireable: real writeTuple/del
 
     expect(deleted).toEqual({ ok: true, token: 2, deleted: true });
     expect(deletedAgain).toEqual({ ok: true, token: 3, deleted: false });
-    expect(state.relationTuples).toHaveLength(0);
+    // NOT `expect(state.relationTuples).toHaveLength(0)` — this test's own
+    // original assertion here directly encoded `tupleDeleteHandler`'s old
+    // (confirmed wrong) unconditional-splice behavior: "the row is gone" and
+    // "the array is shorter" used to be the same fact. They no longer are —
+    // `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "A related observation,
+    // found while reading" section named this exact gap (a REPEATABLE READ
+    // snapshot anchored before a later DELETE's commit must still see the
+    // row, which an unconditional splice can never represent), confirmed
+    // real and fixed: `tupleDeleteHandler` now STAMPS the matching row with
+    // this commit's own `commitSeq` (`RelationTupleRow.deletedAtCommitSeq`)
+    // instead of removing it, so the row is still physically present in
+    // `state.relationTuples` — see `tuple-delete-tombstone-visibility.dst.
+    // test.ts` for the dedicated regression test. The real, still-true
+    // contract this test is actually about is "a real read no longer sees
+    // it," asserted here the same way any real caller would observe it —
+    // through the real, unmodified `listTuplesByObject`/`listTuplesBySubject`
+    // read path, not by peeking at the fake's own internal array shape.
+    expect(await listTuplesByObject(source, { objectNs: 'document', objectId: 'readme' })).toEqual(
+      [],
+    );
+    expect(await listTuplesBySubject(source, 'user', 'alice')).toEqual([]);
   });
 
   /**

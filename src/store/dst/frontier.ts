@@ -157,6 +157,18 @@ export function fetchReachableFrontierVia(
           t.relation === row.relation &&
           t.subjectRelation !== null &&
           (visibleAsOf === undefined || t.commitSeq <= visibleAsOf) &&
+          // Delete-tombstone visibility — `RelationTupleRow.deletedAtCommitSeq`'s
+          // own doc comment (`state.ts`) has the full MVCC argument; the exact
+          // same rule `shapes.ts`'s own `isTupleVisible` states once and every
+          // handler there reuses, deliberately re-derived inline here instead
+          // of imported: this file already independently duplicates the
+          // `commitSeq`/`visibleAsOf` line directly above rather than
+          // importing `isVisible` from `shapes.ts` (and `shapes.ts` itself
+          // imports `fetchReachableFrontierVia` FROM this file, so importing
+          // back would be circular) — this is that same established
+          // precedent, extended to the tombstone dimension.
+          (t.deletedAtCommitSeq === undefined ||
+            (visibleAsOf !== undefined && visibleAsOf < t.deletedAtCommitSeq)) &&
           (t.expiresAt === null || t.expiresAt.getTime() > now.getTime()), // D-144
       );
       for (const edge of edges) {

@@ -39,6 +39,35 @@ export interface RelationTupleRow {
    * never the real wall clock — see that field's own doc comment for why.
    */
   expiresAt: Date | null;
+  /**
+   * Delete-tombstone visibility (`docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s
+   * own "A related observation, found while reading" section, confirmed a
+   * real gap and closed here). `undefined` means this row has never been
+   * deleted; a real `commitSeq` means the `DELETE` that removed it committed
+   * at that sequence number. **Deliberately the exact opposite of
+   * `RelationMembershipIndexRow`'s own "unconditionally spliced" model** —
+   * see that interface's own doc comment for why a whole-table `TRUNCATE`
+   * genuinely doesn't participate in per-row MVCC, while a plain per-row
+   * `DELETE` genuinely does: real Postgres's `REPEATABLE READ` gives an
+   * older snapshot's own already-anchored read a guarantee that it will
+   * never observe the effect of a transaction that committed after that
+   * snapshot's own anchor — including a later `DELETE` of a row the
+   * snapshot already considers live. `tupleInsertHandler` models this for
+   * inserts by tagging a new row with the inserting commit's own
+   * `commitSeq` and having every reader compare it against `visibleAsOf`;
+   * this field is the identical idea applied to the *other* end of a row's
+   * visible lifetime — its `xmax`, in real Postgres's own MVCC vocabulary,
+   * mirroring `commitSeq`'s own role as its `xmin`. A row is visible to a
+   * read carrying `visibleAsOf` iff it was inserted at-or-before that
+   * boundary **and** (it was never deleted, or the delete that removed it
+   * committed strictly *after* that boundary) — see `shapes.ts`'s own
+   * `isTupleVisible` for the one place this exact rule is stated in code.
+   * A tombstoned row is never physically spliced out of `relationTuples` —
+   * see `tupleDeleteHandler`'s own doc comment (`shapes.ts`) for why that is
+   * the deliberate, simplest-correct choice for this short-lived, in-memory,
+   * per-test-process harness, not an oversight.
+   */
+  deletedAtCommitSeq?: number;
 }
 
 export interface WriteLogRow {

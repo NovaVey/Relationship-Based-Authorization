@@ -88,6 +88,36 @@ function isVisible(commitSeq: number, visibleAsOf: number | undefined): boolean 
   return visibleAsOf === undefined || commitSeq <= visibleAsOf;
 }
 
+/**
+ * The full MVCC visibility rule for a `relation_tuples` row specifically —
+ * `isVisible` above plus `RelationTupleRow.deletedAtCommitSeq`'s own
+ * tombstone (that field's own doc comment, `state.ts`, has the full
+ * "why this exists" writeup). A row is visible to a read carrying
+ * `visibleAsOf` iff it was inserted at-or-before that boundary (`isVisible`
+ * on its own `commitSeq`, its "xmin") **and** it is either never deleted, or
+ * the `DELETE` that removed it committed strictly *after* that boundary
+ * (its "xmax"). `visibleAsOf === undefined` ("no boundary, see everything
+ * currently committed") always hides a tombstoned row outright — an
+ * ordinary un-pinned read must see the *current* state, which by
+ * definition already reflects every committed delete, exactly like a real
+ * bare `pool.query(...)` against Postgres would. Every read of
+ * `state.relationTuples` in this file (and `frontier.ts`'s own independent,
+ * deliberately-duplicated copy of this same rule — see that file's own
+ * doc comment for why it isn't imported from here) must go through this
+ * function, never `isVisible` directly — `isVisible` alone was exactly the
+ * gap that let an earlier-anchored snapshot lose visibility into a row a
+ * later, unrelated transaction deleted, which is what this function fixes.
+ */
+function isTupleVisible(
+  row: Pick<RelationTupleRow, 'commitSeq' | 'deletedAtCommitSeq'>,
+  visibleAsOf: number | undefined,
+): boolean {
+  if (!isVisible(row.commitSeq, visibleAsOf)) return false;
+  if (row.deletedAtCommitSeq === undefined) return true;
+  if (visibleAsOf === undefined) return false;
+  return visibleAsOf < row.deletedAtCommitSeq;
+}
+
 /** D-144 (expiring tuples) — a tuple with a `null` `expiresAt` never expires; one with a real `expiresAt` is live only up to (exclusive of) that instant, mirroring the real SQL predicate `expires_at is null or expires_at > now()` exactly. Shared by every expiry-aware read handler below, the same "state the rule once" discipline `isVisible` already established for commit-order visibility. */
 function isTupleLive(expiresAt: Date | null, now: Date): boolean {
   return expiresAt === null || expiresAt.getTime() > now.getTime();
@@ -171,7 +201,16 @@ const tupleInsertHandler: ShapeHandler = ({ state, params, bufferOp }) => {
   const id = state.nextRelationTupleId;
   state.nextRelationTupleId += 1;
 
-  const alreadyExists = state.relationTuples.some((row) => relationTupleKey(row) === key);
+  // Tombstone-aware, deliberately: a row this same key once occupied that
+  // was later deleted (`RelationTupleRow.deletedAtCommitSeq` set) must not
+  // block a fresh insert of the identical key — `isTupleVisible(row,
+  // undefined)` is "does a currently-live row with this key exist right
+  // now," matching real Postgres's own `ON CONFLICT` check against the
+  // table's *current* state, which by definition never conflicts with a
+  // row an earlier, already-committed `DELETE` removed.
+  const alreadyExists = state.relationTuples.some(
+    (row) => relationTupleKey(row) === key && isTupleVisible(row, undefined),
+  );
   if (alreadyExists) {
     return { rows: [], rowCount: 0 };
   }
@@ -180,7 +219,14 @@ const tupleInsertHandler: ShapeHandler = ({ state, params, bufferOp }) => {
     // Re-check at commit time, not just at statement time — a concurrent
     // transaction could commit the identical tuple in between (D1/D4's own
     // concern once real interleaving exists; harmless to guard here now).
-    if (s.relationTuples.some((row) => relationTupleKey(row) === key)) return;
+    // Tombstone-aware for the identical reason as the statement-time check
+    // above.
+    if (
+      s.relationTuples.some(
+        (row) => relationTupleKey(row) === key && isTupleVisible(row, undefined),
+      )
+    )
+      return;
     s.relationTuples.push({
       id: String(id),
       objectNs,
@@ -220,11 +266,41 @@ const tupleDeleteHandler: ShapeHandler = ({ state, params, bufferOp }) => {
   // matching a real Postgres DELETE's own rowCount, computed at statement
   // time against the then-current visible state, not deferred to commit.
   // deleteTuple's own `deleted: (rowCount ?? 0) > 0` depends on this being
-  // accurate, not a placeholder.
-  const matches = state.relationTuples.some((row) => relationTupleKey(row) === key);
+  // accurate, not a placeholder. Tombstone-aware (`isTupleVisible(row,
+  // undefined)`): an already-tombstoned row from an earlier delete must not
+  // count as a second match, matching real Postgres's own DELETE, which
+  // only ever matches a row that's actually still there.
+  const matches = state.relationTuples.some(
+    (row) => relationTupleKey(row) === key && isTupleVisible(row, undefined),
+  );
 
-  bufferOp((s) => {
-    s.relationTuples = s.relationTuples.filter((row) => relationTupleKey(row) !== key);
+  // Full-repo confirmed gap, `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own
+  // "A related observation, found while reading" section — this used to
+  // unconditionally splice the matching row out of `state.relationTuples`
+  // at commit, which cannot represent real Postgres's own REPEATABLE READ
+  // guarantee: an earlier-anchored snapshot must keep seeing a row a LATER-
+  // committing DELETE removes, since that snapshot never observes the
+  // effects of a transaction that committed after its own anchor. Fixed by
+  // STAMPING the currently-live matching row(s) with this commit's own
+  // `commitSeq` (its "xmax," `RelationTupleRow.deletedAtCommitSeq`'s own
+  // doc comment, `state.ts`) instead of removing them — the exact same
+  // "tag with this commit's own commitSeq, let every reader's own
+  // visibility check do the filtering" shape `tupleInsertHandler` already
+  // uses for the opposite end of a row's visible lifetime (its "xmin").
+  // Never physically splices a tombstoned row out of the array at all —
+  // see `RelationTupleRow.deletedAtCommitSeq`'s own doc comment for why
+  // that's the deliberate, simplest-correct choice for this short-lived,
+  // in-memory, per-test-process harness (no long-running process ever
+  // accumulates enough dead tombstones for this to matter, and a real
+  // garbage-collection scheme would need to track every currently-open
+  // snapshot's own anchor across every connection — real complexity this
+  // harness has no need to take on).
+  bufferOp((s, commitSeq) => {
+    for (const row of s.relationTuples) {
+      if (relationTupleKey(row) === key && isTupleVisible(row, undefined)) {
+        row.deletedAtCommitSeq = commitSeq;
+      }
+    }
   });
 
   return { rows: [], rowCount: matches ? 1 : 0 };
@@ -257,7 +333,15 @@ const existingExpiresAtHandler: ShapeHandler = ({ state, params }) => {
     subjectId,
     subjectRelation,
   });
-  const existing = state.relationTuples.find((row) => relationTupleKey(row) === key);
+  // Tombstone-aware — a real Postgres SELECT against a physically-deleted
+  // row finds nothing, so a tombstoned row here must not either (this
+  // handler only ever runs on the `created: false` conflict path, which
+  // can now only fire against a currently-live row in the first place,
+  // but this guard is stated directly rather than left as an implication
+  // of that).
+  const existing = state.relationTuples.find(
+    (row) => relationTupleKey(row) === key && isTupleVisible(row, undefined),
+  );
   if (!existing) return { rows: [], rowCount: 0 };
   return { rows: [{ expires_at: existing.expiresAt }], rowCount: 1 };
 };
@@ -292,7 +376,7 @@ const listByObjectHandler = (withRelationFilter: boolean): ShapeHandler => {
           row.objectNs === objectNs &&
           row.objectId === objectId &&
           (!withRelationFilter || row.relation === relation) &&
-          isVisible(row.commitSeq, visibleAsOf),
+          isTupleVisible(row, visibleAsOf),
       )
       .sort((a, b) => Number(a.id) - Number(b.id))
       .map(tupleRowToApiShape);
@@ -307,7 +391,7 @@ const listBySubjectHandler: ShapeHandler = ({ state, params, visibleAsOf }) => {
       (row) =>
         row.subjectNs === subjectNs &&
         row.subjectId === subjectId &&
-        isVisible(row.commitSeq, visibleAsOf),
+        isTupleVisible(row, visibleAsOf),
     )
     .sort((a, b) => Number(a.id) - Number(b.id))
     .map(tupleRowToApiShape);
@@ -417,7 +501,7 @@ const listTupleSubjectsHandler: ShapeHandler = ({ state, params, visibleAsOf, no
         row.objectNs === objectNs &&
         row.objectId === objectId &&
         row.relation === relation &&
-        isVisible(row.commitSeq, visibleAsOf) &&
+        isTupleVisible(row, visibleAsOf) &&
         isTupleLive(row.expiresAt, now), // D-144
     )
     .sort((a, b) => Number(a.id) - Number(b.id))
@@ -474,7 +558,7 @@ const fetchTuplesOnFrontierHandler: ShapeHandler = ({ state, params, visibleAsOf
     .filter(
       (row) =>
         frontierKeys.has(`${row.objectNs}:${row.objectId}#${row.relation}`) &&
-        isVisible(row.commitSeq, visibleAsOf) &&
+        isTupleVisible(row, visibleAsOf) &&
         isTupleLive(row.expiresAt, now), // D-144
     )
     .map((row) => ({
@@ -574,7 +658,7 @@ function pathMinExpiresAt(
         t.subjectNs === subject.ns &&
         t.subjectId === subject.id &&
         t.subjectRelation === subject.relation &&
-        isVisible(t.commitSeq, visibleAsOf) &&
+        isTupleVisible(t, visibleAsOf) &&
         isTupleLive(t.expiresAt, now),
     );
     if (edge) min = leastIgnoringNull(min, edge.expiresAt);
@@ -637,7 +721,7 @@ function computeRebuildCandidates(
 ): RebuildCandidateRow[] {
   const roots = new Map<string, { ns: string; id: string; relation: string }>();
   for (const row of state.relationTuples) {
-    if (!isVisible(row.commitSeq, visibleAsOf)) continue;
+    if (!isTupleVisible(row, visibleAsOf)) continue;
     const key = membershipIdentityKey(row.objectNs, row.objectId, row.relation);
     if (!roots.has(key)) {
       roots.set(key, { ns: row.objectNs, id: row.objectId, relation: row.relation });
@@ -667,7 +751,7 @@ function computeRebuildCandidates(
           t.objectId === frontierRow.id &&
           t.relation === frontierRow.relation &&
           t.subjectRelation === null &&
-          isVisible(t.commitSeq, visibleAsOf) &&
+          isTupleVisible(t, visibleAsOf) &&
           isTupleLive(t.expiresAt, now),
       );
       for (const grant of plainGrants) {

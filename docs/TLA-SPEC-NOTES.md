@@ -108,7 +108,102 @@ real design, and are split into two separate actions
 named, separate `NextWeakened`/`SpecWeakened` variant that exists
 specifically to be wrong.
 
-## Environment constraint — disclosed plainly, not worked around
+## Update, 2026-08-29 — the real TLC run now exists
+
+Everything below this point, up through "What remains genuinely open," is
+the **original, unedited account** from when this spec was first written:
+GitHub Releases were confirmed blocked, and every result was from
+`tla-checker`, labeled throughout as an unofficial substitute. That
+disclosure is left intact as the historical record — it was true when
+written, and rewriting it after the fact would erase a real, honestly-made
+constraint.
+
+On a later date (2026-08-29, same day as the DST-evolution/benchmark-harness
+work in `docs/DECISIONS.md` D-165/D-166), a routine re-check of
+`https://github.com/tlaplus/tlaplus/releases/latest/download/tla2tools.jar`
+succeeded (`HTTP 200`, a real 2.27MB jar) — this sandbox's network policy
+evidently no longer blocks this specific GitHub Releases asset (or never
+did, and the earlier block was scoped elsewhere; this was not investigated
+further, since the outcome that matters — a genuine `tla2tools.jar` now
+runs here — was confirmed directly rather than theorized about). The real,
+official TLC (version "2.19 of 08 August 2024") was run against the exact,
+unmodified `docs/leopard-index.tla`/`docs/leopard-index.cfg` shipped in this
+repo — no changes to either file were needed beyond a local filename
+rename (`leopard-index.tla` → `leopard_index.tla`, TLC requires the file
+name to match the module name `leopard_index`; the shipped file name is
+unaffected, this is purely a local invocation detail, not a spec change).
+
+```
+$ java -cp tla2tools.jar tlc2.TLC -config leopard_index.cfg leopard_index.tla
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 125 ... 1 worker on 4 cores
+Finished computing initial states: 1 distinct state generated
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 9.8E-9
+  based on the actual fingerprints:  val = 1.2E-9
+1863365 states generated, 103052 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 13.
+Finished in 06s
+```
+
+**103,052 distinct states — an exact match** to the number `tla-checker`
+reported below, on the real, official model checker, with `0 states left on
+queue` (i.e. genuinely exhaustive, not a cap-hit). This is the strongest
+form of confirmation available: two independent implementations (one
+official and mature, one unofficial and ~1-month-old) enumerating the
+identical state count for the identical spec.
+
+The weakened variant (`SpecWeakened`, same repo files, `SPECIFICATION` line
+changed in a local copy of the `.cfg` exactly per the reproduction steps
+below) was then run the same way:
+
+```
+$ java -cp tla2tools.jar tlc2.TLC -config leopard_index_weakened.cfg leopard_index.tla
+...
+Error: Invariant IndexHitImpliesLiveTruth is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate> ...
+...
+State 10: <RebuildPublishWatermarkEarly ...>
+/\ currentToken = 2
+/\ truthAt = (0 :> {} @@ 1 :> {<<"eng", "alice">>} @@ 2 :> {} @@ 3 :> {})
+/\ pendingRows = {}
+/\ indexRows = {<<"eng", "alice">>}
+/\ indexWatermark = 2
+/\ rebuildPhase = "WatermarkPublishedRowsPending"
+/\ pendingWatermark = 2
+
+750690 states generated, 58158 distinct states found, 17239 states left on queue.
+The depth of the complete state graph search is 10.
+Finished in 02s
+```
+
+A real, confirmed violation: at state 10, `indexWatermark = 2` and
+`indexRows = {(eng,alice)}`, but `truthAt[2] = {}` — the exact same bug
+shape `tla-checker` found (ending in `rebuildPhase =
+"WatermarkPublishedRowsPending"`, the split-publish phase that cannot exist
+under the real, atomic `Spec`), at a slightly different but comparably-sized
+state count (58,158 vs. `tla-checker`'s 57,120 — expected, since real TLC's
+search order and `tla-checker`'s differ, so they need not explore states in
+the same sequence before hitting the first violation; both fully confirm
+the same qualitative counterexample). Re-running the real design's own
+`Spec` again immediately afterward (same command as the clean run above)
+reproduced the identical clean 103,052-state result — the atomic design was
+not affected by having just run the weakened one.
+
+**This closes the one gap explicitly named in "What remains genuinely open"
+below as unresolved**: a real TLC run of this exact spec now exists, run by
+this session, with transcripts reproduced above in full. Every other
+disclosed limitation in this document (the recursive CTE / `DISTINCT ON`
+collision resolution / `SAVEPOINT` fix are out of this spec's scope;
+`MaxToken = 4` was not explored under this run either, since the point was
+confirming the existing bound's result on the real tool, not extending it —
+raising the bound remains open exactly as described below) stands
+unchanged.
+
+## Environment constraint — disclosed plainly, not worked around (original, historical account)
 
 **The real TLC model checker (`tla2tools.jar`) could not be obtained or run
 in this sandbox.** What was actually tried, in order, before concluding
@@ -311,16 +406,12 @@ java -cp tla2tools.jar tlc2.TLC -config docs/leopard-index.cfg docs/leopard-inde
 
 ## What remains genuinely open
 
-- **No real TLC run of this spec exists anywhere.** Everything reported
-  above is from `tla-checker`, a third-party, unofficial, ~1-month-old,
-  single-maintainer reimplementation, explicitly disclosed as such at every
-  mention. The exhaustive "no violation" result for `Spec`, and the
-  counterexample for `SpecWeakened`, should both be treated as strong,
-  genuine, reproducible evidence — not as an authoritative substitute for
-  a real TLC run. Someone with GitHub access should run the exact
-  invocation above and would be expected, on the reasoning in this spec, to
-  get the same qualitative results; that expectation is not itself a
-  verification.
+- ~~No real TLC run of this spec exists anywhere.~~ **Resolved, 2026-08-29
+  — see the "Update" section near the top of this file.** A real, official
+  TLC run now exists for both `Spec` (clean, 103,052 states, exact match to
+  `tla-checker`) and `SpecWeakened` (violated, 58,158 states, identical
+  counterexample shape). This bullet is struck through rather than deleted
+  so the original disclosure's own history stays visible.
 - **This spec proves the protocol _design_ is not unsound at the
   abstraction level it operates at — it does not prove the real Postgres
   code is correct.** The recursive CTE, the `DISTINCT ON` collision
