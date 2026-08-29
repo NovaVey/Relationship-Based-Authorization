@@ -277,19 +277,28 @@ and throw if the snapshot-anchoring query isn't first. Without this, DST
 only ever exercises the side that was already safe.
 
 **As actually built: this graft was applied to the fake, not to the real
-pg-backed side.** `src/store/dst/connection.ts`'s in-memory implementation
-does enforce a form of this strictly (`bufferOp` throws if a write is ever
-attempted while in `Snapshot` mode — a related but distinct property: no
-writes during a snapshot, not "the snapshot-anchoring query must be
-first"). `src/resolve/production/resolver.ts`'s real
-`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` still relies entirely on
-code structure — it is issued as the literal first statement after
+pg-backed side — and that gap has since closed.** `src/store/dst/connection.ts`'s
+in-memory implementation does enforce a form of this strictly (`bufferOp`
+throws if a write is ever attempted while in `Snapshot` mode — a related
+but distinct property: no writes during a snapshot, not "the
+snapshot-anchoring query must be first"). `src/resolve/production/resolver.ts`'s
+real `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` used to rely
+entirely on code structure — issued as the literal first statement after
 `pool.connect()`, by inspection, with no runtime assertion anywhere in the
-file guarding that a future edit can't silently reorder it. This is a
+file guarding that a future edit couldn't silently reorder it. This was a
 real, disclosed, still-open gap on the production side, found by this
 project's own live-verification doc audit (2026-08-25) — not fixed as part
-of that audit, since it's a production-code change outside a documentation
-pass's scope, but recorded here rather than left to look closed.
+of that audit, since it was a production-code change outside a
+documentation pass's scope, but recorded here rather than left to look
+closed.
+
+**Update (2026-08-27, D-157):** closed. `resolver.ts` now calls
+`guardPinnedClientForSnapshotAnchor(client)`, which throws if any query
+other than the anchor query runs first on a pinned connection — exactly
+the runtime assertion this section said didn't exist. Live-fail-checked
+before shipping. The gap this section disclosed no longer exists; kept
+here, corrected rather than deleted, as the historical record of when it
+did.
 
 **From the SQL-pattern-matching design: a required, always-on recognizer-
 coverage gate.** This design's own sharpest self-disclosed risk is that

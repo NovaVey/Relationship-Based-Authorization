@@ -52,22 +52,20 @@
  *     sharing "the identical theoretical flip risk" but NOT fixed by that
  *     entry ("`RelationDisproof` carries no 'was the ceiling actually still
  *     binding' signal today... tracked as separate, not-yet-built
- *     follow-up work, not assumed closed by this fix"). A SIBLING
- *     investigation (documented in this repo's own worktree history)
- *     independently confirmed this residual is real and live-reproducible,
- *     and implemented a fix — but that fix lives in a DIFFERENT,
- *     not-yet-merged worktree than this one; `src/resolve/production
- *     /resolver.ts` in THIS worktree still unconditionally reports
- *     `certain: true` on mechanism 2's own `false` outcome (confirmed by
- *     reading that file directly — see its own `resolve()`'s relation
- *     branch, "Mechanism 2 always reports `certain: true`..."). PROPERTY B
- *     is therefore EXPECTED TO FAIL in this worktree today, for the exact
- *     bug this project's own review discipline requires reporting plainly
- *     rather than softening or working around: see PROPERTY B's own describe
- *     block for the precise, honest accounting, and this file's own
- *     consumer (the agent invocation that built this file) for the full
- *     writeup. **This assertion is written the way it should be, not
- *     weakened to force a local pass — do not "fix" this by loosening it.**
+ *     follow-up work, not assumed closed by this fix"). This property was
+ *     first written in a worktree that did not yet have that fix, and its
+ *     own local run correctly, honestly FAILED on the core cutoff check —
+ *     exactly the residual D-158 disclosed (`docs/DECISIONS.md` D-160). A
+ *     SIBLING investigation independently confirmed the residual was real
+ *     and live-reproducible and fixed it (`docs/DECISIONS.md` D-159):
+ *     `resolve()`'s relation branch now propagates `sqlOutcome.certain`
+ *     (via the new `depthCeilingGenuinelyBinding` helper) instead of
+ *     hardcoding `certain: true`. Once that fix merged into this worktree,
+ *     PROPERTY B was re-run live and now passes with no changes to this
+ *     file at all (D-160's own "Update") — a second, independent
+ *     confirmation of D-159's own live reproduction. Expected GREEN here
+ *     too. See PROPERTY B's own describe block for the current, accurate
+ *     accounting.
  *
  * **Convention** — identical to `monotonicity.integration.test.ts`'s own
  * established `PostgreSqlContainer` precedent (see that file's own top doc
@@ -267,25 +265,28 @@ describe('Property A — an exclusion subtract branch that hits a TS-level cycle
 // PROPERTY B — mechanism 2 (`sqlRelationMembershipWithWitness`)
 // ---------------------------------------------------------------------------
 
-describe("Property B — an exclusion subtract branch that hits the SQL relation-membership depth ceiling must never grant (mechanism 2, general sweep) — EXPECTED TO FAIL IN THIS WORKTREE, see this describe block's own doc comment", () => {
+describe('Property B — an exclusion subtract branch that hits the SQL relation-membership depth ceiling must never grant (mechanism 2, general sweep)', () => {
   /**
-   * **Read this before treating a failure here as a bug in this test.**
-   * `src/resolve/production/resolver.ts`'s `resolve()` (relation branch)
-   * unconditionally does `{ allowed: false, certain: true, disproof:
-   * sqlOutcome.disproof }` on mechanism 2's own `false` outcome, in THIS
-   * worktree, confirmed by reading that file directly before writing this
-   * property. A sibling investigation (this repo's own worktree history)
-   * confirmed this is a real, live-reproducible `false_grant` and
-   * implemented a fix (`certain: sqlOutcome.certain`, backed by a new
-   * `depthCeilingGenuinelyBinding` helper) — but that fix lives in a
-   * DIFFERENT, not-yet-merged worktree. Per this task's own explicit
-   * instruction: this property's own assertion is written the way it
-   * SHOULD be (an unprovable mechanism-2 cut must deny, exactly like
-   * Property A's mechanism-1 case), it is NOT weakened to force a local
-   * pass here, and `resolver.ts` is NOT touched by this file or its author
-   * — fixing mechanism 2 is that sibling work's own exclusive scope. Once
-   * this worktree is merged with that fix, this property is expected to
-   * turn green with no changes to this file at all.
+   * **History, kept for the record — this property now genuinely passes.**
+   * When this file was first written, `src/resolve/production/resolver.ts`'s
+   * `resolve()` (relation branch) unconditionally did `{ allowed: false,
+   * certain: true, disproof: sqlOutcome.disproof }` on mechanism 2's own
+   * `false` outcome — confirmed by reading that file directly before writing
+   * this property — and this describe block's core cutoff check correctly,
+   * honestly FAILED against it (`docs/DECISIONS.md` D-160). This property's
+   * own assertion was written the way it SHOULD be from the start (an
+   * unprovable mechanism-2 cut must deny, exactly like Property A's
+   * mechanism-1 case), never weakened to force a local pass, and
+   * `resolver.ts` was left untouched by this file or its author — fixing
+   * mechanism 2 was a sibling investigation's own exclusive scope
+   * (`docs/DECISIONS.md` D-159): `resolve()`'s relation branch now
+   * propagates `sqlOutcome.certain` (via the new
+   * `depthCeilingGenuinelyBinding` helper) instead of hardcoding `certain:
+   * true`. Once that fix merged into this worktree, this property was
+   * re-run live and now passes with no changes to this file at all — a
+   * second, independent confirmation of D-159's own live reproduction. If
+   * this ever fails again, that fix has regressed — treat it as a real
+   * finding, not an expected result.
    */
   const SEED_COUNT = 10;
 
@@ -338,8 +339,8 @@ describe("Property B — an exclusion subtract branch that hits the SQL relation
         `${fixture.description}\nat the natural boundary maxDepth=${fixture.naturalBoundaryMaxDepth} (exactly enough budget to reach the real terminal membership), expected '${fixture.permissionName}' DENIED via a genuine, certain proof of 'blocked' — this should hold regardless of the disclosed mechanism-2 gap`,
       ).toBe(false);
 
-      // *** The property's own core assertion — EXPECTED TO FAIL in this
-      // worktree today; see this describe block's own top doc comment. ***
+      // *** The property's own core assertion — see this describe block's
+      // own top doc comment for why this now genuinely passes. ***
       totalCutoffChecks += 1;
       const cutoffResult = await productionCheck(
         pool,
@@ -350,15 +351,15 @@ describe("Property B — an exclusion subtract branch that hits the SQL relation
       );
       expect(
         cutoffResult.allowed,
-        `${fixture.description}\nat maxDepth=${fixture.cutoffMaxDepth} (one hop short of the real terminal membership), '${fixture.permissionName}' resolved ALLOWED — a false_grant via mechanism 2's own disclosed, not-yet-merged-in-this-worktree depth-ceiling gap (sqlRelationMembershipWithWitness reports certain:true unconditionally on its own 'false'). This is the exact, expected failure this describe block's own doc comment names — do not weaken this assertion to force a local pass; the fix belongs to a different, sibling worktree.`,
+        `${fixture.description}\nat maxDepth=${fixture.cutoffMaxDepth} (one hop short of the real terminal membership), '${fixture.permissionName}' resolved ALLOWED — a false_grant via mechanism 2's own depth-ceiling gap (sqlRelationMembershipWithWitness reporting certain:true unconditionally on its own 'false'). This gap was fixed in docs/DECISIONS.md D-159 (resolve()'s relation branch now propagates sqlOutcome.certain via depthCeilingGenuinelyBinding); if this ever fails again, that fix has regressed — treat it as a real finding, not an expected result.`,
       ).toBe(false);
     }
 
     console.log(
       `[Property B] ${SEED_COUNT} seeds; ${totalSanityChecks} sanity checks, ` +
         `${totalNaturalBoundaryChecks} natural-boundary checks, ${totalCutoffChecks} cutoff checks ` +
-        `(the cutoff checks are the ones expected to fail until mechanism 2's own fix — a different, ` +
-        `not-yet-merged worktree's own exclusive scope — lands in this one)`,
+        `(every cutoff check correctly asserted DENIED — mechanism 2's own depth-ceiling gap, ` +
+        `docs/DECISIONS.md D-159, is fixed and merged in this worktree)`,
     );
 
     expect(totalCutoffChecks).toBe(SEED_COUNT);
