@@ -2724,3 +2724,11 @@ Accelerates `sqlRelationMembershipWithWitness`'s nested-group-membership walk (m
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .` all clean. Fast suite: 73 files, 1119 tests (up from 72/1107). Every real-Postgres test for this feature re-run individually against a live Postgres 16 instance and confirmed passing.
 
 Full account: `docs/DECISIONS.md` D-163.
+
+## Post-Leopard-index cleanup — a stale comment, and a false claim of having already fixed it
+
+**Owner:** main agent.
+
+`exclusion-subtract-unprovable-cut.integration.test.ts`'s Property B still read "EXPECTED TO FAIL IN THIS WORKTREE" from before D-159 merged. D-163's own entry claimed this had already been found and corrected — it hadn't; `git log` shows the file wasn't touched by that PR. Corrected the actual comments (five spots: top-of-file doc comment, describe title, describe doc comment, inline assertion comment, assertion message, summary log) to state Property B now passes, citing D-159/D-160. Live-verified via LOCALVERIFY against a local Postgres 16 (all 3 tests pass, Property B 10/10), restored to committed form, confirmed byte-identical via `diff`.
+
+Full account, including the correction to D-163's own false claim: `docs/DECISIONS.md` D-164.
