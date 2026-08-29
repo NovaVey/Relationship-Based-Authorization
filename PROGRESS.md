@@ -2746,3 +2746,11 @@ An external review asked the four questions that actually distinguish a Leopard 
 **Benchmark harness** (`docs/BENCHMARK-PROPOSAL.md`, `tools/rebac-benchmark/`): Docker unreachable, but `go install` pulled real OpenFGA and SpiceDB native binaries through the Go module proxy — all three engines ran as live local processes, not a design-only exercise. Real schema translations, 8/8 cross-validation checks, a real depth-latency benchmark, and a real consistency probe that found SpiceDB's default mode shows real staleness up to ~5s while OpenFGA and this project's own engine resolve on the first poll. Every real limitation (small sample size, floating engine versions, shared-sandbox noise, no independent schema review) named plainly in its own "What would make this citable" table.
 
 Full account, every independent re-verification, and the one real defect this verification pass itself found and fixed (the benchmark harness had never been run through root `prettier`): `docs/DECISIONS.md` D-165.
+
+## PR #115 drive-to-green — CI's own lint gap on `tools/rebac-benchmark/`, plus a reviewed CodeQL finding
+
+**Owner:** main agent.
+
+PR #115's `lint-and-typecheck` job failed with 86 ESLint errors against `@authzed/authzed-node` members — never reproduced locally, since `tools/rebac-benchmark/`'s own `node_modules` was already present here. Root-caused by reproducing CI's exact condition (removing that directory's `node_modules`, re-running `eslint .`): CI's root `npm ci` never installs this genuinely separate npm package's own dependencies, so typed-lint can't resolve the SDK types and cascades into `no-unsafe-*` errors. Fixed with one added `npm ci` step scoped to `tools/rebac-benchmark/` in `ci.yml`'s `lint-and-typecheck` job. Also reviewed a CodeQL `js/file-access-to-http` (CWE-200) finding on `authz-adapter.ts`'s schema-publish call — a real flow (local schema file → `fetch`) but a false positive in this context (a public, checked-in fixture published to this same harness's own localhost server, not attacker-influenced), suppressed with an in-code `// codeql[...]` comment carrying the reasoning rather than dismissed silently.
+
+Full account: `docs/DECISIONS.md` D-166.

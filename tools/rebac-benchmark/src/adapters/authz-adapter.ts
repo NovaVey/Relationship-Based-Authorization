@@ -73,6 +73,21 @@ export class AuthzAdapter implements EngineAdapter {
         'content-type': 'application/json',
         authorization: `Bearer ${this.adminApiKey}`,
       },
+      // CodeQL (js/file-access-to-http, CWE-200) flags this as "file data
+      // in an outbound network request" because loadSchema() below calls
+      // this method with a `body.source` read via readFileSync. Reviewed
+      // and not an exfiltration risk: the file is
+      // `schema/example.authz`, a public fixture checked into this very
+      // repo (not a secret, not user-supplied), and the destination
+      // (`this.baseUrl`) is the `authz serve` instance this benchmark
+      // harness itself started (see runner.ts) — never
+      // attacker-influenced. Publishing a local schema file to the
+      // server under test is this adapter's entire job, identical in
+      // effect to the OpenFGA/SpiceDB adapters' own readFileSync ->
+      // writeSchema/writeAuthorizationModel calls (untouched by this
+      // particular query because they go through a typed gRPC client,
+      // not a raw `fetch`). See docs/DECISIONS.md D-166.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => undefined);
