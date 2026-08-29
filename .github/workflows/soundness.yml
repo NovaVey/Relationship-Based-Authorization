@@ -95,7 +95,20 @@ jobs:
           cat soundness-report.md
           exit 0
 
+      # Full-repo audit finding (2026-08-29, MEDIUM, "fork PRs get a red
+      # soundness job on a clean pass"): this workflow triggers on plain
+      # `pull_request`, and GitHub Actions forces GITHUB_TOKEN to
+      # read-only for fork-originated `pull_request` events regardless of
+      # the `permissions:` block above. Without this guard, a fork PR's
+      # inevitable 403 from scripts/post-soundness-comment.mjs's
+      # checkedFetch crashes this step outright, which by default skips
+      # the exit-code check below and marks the whole job red — even on a
+      # clean, verdict-0 sound run. Skipping the comment post on a fork PR
+      # still lets the real fuzz run and the exit-code step below decide
+      # pass/fail correctly; only the comment itself is unavailable, since
+      # no token this workflow can obtain is ever authorized to post it.
       - name: Post or update the soundness PR comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/post-soundness-comment.mjs
