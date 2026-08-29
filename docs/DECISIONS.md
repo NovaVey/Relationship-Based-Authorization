@@ -1869,6 +1869,8 @@ One entry (`openfga-github`, carried from before this segment) still has a genui
 
 **Revisit if:** this invariant language later grows a negative-constraint primitive — the recurring finding above would need re-running against every `VIOLATED` entry here, since several would likely resolve to a genuine, non-trivial `HOLDS` or `VIOLATED` instead of the trivial escape.
 
+**Update (2026-08-24, D-131):** this entry's own "Revisit if" fired — a `notRelationEquals` negative-constraint primitive shipped, closing 2 of the 9 disclosed trivial-escape entries; see D-131.
+
 ## D-125 — §11 closed: the dedicated documentation sweep D-121 left open — small-model property, SMT sketch, backward-vs-forward, and why the verifier imports the parser, cross-referenced in one place
 
 **Date:** 2026-08-23 · **Phase:** schema verifier, §11 · **Status:** settled
@@ -2293,6 +2295,8 @@ Verified two ways: (1) a DB-free counterpart, `test/unit/store/dst/tuple-store.d
 
 **Revisit if:** Property 5's scope-narrowing (single hand-verified instance, not a general sweep) becomes worth lifting — needs `classifyMonotone` extended to also walk `CompiledRelation.subjectTypes`, not just `RewriteRule` trees, plus its own independent adversarial re-verification before trusting the wider claim. The disclosed `MAX_CONCURRENCY`/pool-`max` deadlock hazard above is real, standalone follow-up work — either document the implicit `MAX_CONCURRENCY < pool.max` invariant explicitly, enforce it at startup, or make `getConfig` share its check's own pinned connection to remove the second-connection dependency entirely.
 
+**Update (2026-08-25, D-143):** this entry's own "Revisit if" — the disclosed connection-exhaustion deadlock — is closed. See D-143.
+
 ## D-141 — Mutation testing of the core engine: hand-curated, live-executed mutations (this project's own D-119 precedent, not a framework), third of four requested audits — 5 real, confirmed coverage gaps found and closed
 
 **Date:** 2026-08-25 · **Phase:** post-audit improvement (third of four audits requested after D-139) · **Status:** settled
@@ -2344,6 +2348,8 @@ Verified two ways: (1) a DB-free counterpart, `test/unit/store/dst/tuple-store.d
 This closes the fourth and final of the four audits requested after D-139 (live-verification doc audit → D-139; metamorphic/invariant testing → D-140; mutation testing → D-141; real concurrent load test → this entry).
 
 **Revisit if:** the disclosed `MAX_CONCURRENCY`/pool-`max` connection-exhaustion deadlock (D-140's own "Revisit if," now independently reproduced live a second time by this entry) is ever fixed — at that point, revisit whether the epoch-fence test here can be strengthened (e.g. a larger, more contended racing burst) without the same deadlock risk, to see whether it can independently reproduce the specific unsafe ordering DST already proves closed, rather than only providing the complementary "nothing crashes or is observably wrong at rest" evidence it provides today.
+
+**Update (2026-08-25, D-143):** this entry's own "Revisit if" — the disclosed connection-exhaustion deadlock — is closed, and D-143 tried and failed to strengthen the epoch-fence test even with the now-safe smaller pool; see D-143.
 
 ## D-143 — Connection-exhaustion deadlock (D-140/D-142) fixed: `getConfig` shares its check's own pinned connection instead of needing a second one
 

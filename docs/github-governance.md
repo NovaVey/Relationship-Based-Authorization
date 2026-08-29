@@ -140,11 +140,12 @@ governance tier:
   status checks. **Not done** — `npm audit` can fail on a transitive
   dev-only advisory with no available fix, which would block every merge
   until upstream ships one; `test-integration` runs a real, non-`.todo()`
-  suite today (18 files as of the 2026-08-25 live-verification doc audit,
-  up from 13 when first counted; zero remaining `.todo()`s as of full-repo
-  audit finding #18, MEDIUM, 2026-08-16 — this bullet previously, incorrectly,
-  gave "a still-`.todo()` integration suite has nothing to fail on yet" as
-  its own reason, which had been stale since roughly Phase 2), but
+  suite today (29 files as of the 2026-08-29 full-repo audit — finding #15 —
+  up from 18 at the 2026-08-25 live-verification doc audit and 13 when
+  first counted; zero remaining `.todo()`s as of full-repo audit finding
+  #18, MEDIUM, 2026-08-16 — this bullet previously, incorrectly, gave "a
+  still-`.todo()` integration suite has nothing to fail on yet" as its own
+  reason, which had been stale since roughly Phase 2), but
   container-based tests carry more infra-flakiness risk than the pure unit
   suite (`.github/workflows/ci.yml`'s own `test-integration` job comment
   makes the identical point) — a flaky Postgres testcontainer spin-up
