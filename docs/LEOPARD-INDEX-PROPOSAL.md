@@ -1,30 +1,31 @@
 # The Leopard index — scope and design
 
-**Status: proposed, not built.** Nothing in this document has been
-implemented. This is the output of a synthesis step over four independent
-design explorations (storage/schema, resolver integration, soundness-proof
-extension, operational surface), reconciled into one coherent proposal by
-a fifth pass whose job was explicitly reconciliation, not verification —
-and that reconciled draft has since been through **one round** of the
-"design → adversarial review → correct" discipline this project already
-holds itself to (`docs/DECISIONS.md` D-140): a four-lens adversarial
-review (soundness, fidelity to the real code, gaps in stated scope,
-test-plan sufficiency) found real, independently-cross-validated defects
-in the draft's own code samples and test plan — not style nits — and
-every confirmed finding has been corrected in place, disclosed inline at
-the point of correction rather than silently smoothed over (search this
-file for "Corrected here" and "adversarial review" to find each one).
-**What this round does not yet cover: implementation.** Nothing below has
-been run against real Postgres. The next step this project's own
-discipline calls for is unchanged — implement, adversarially review
-_that_ implementation, fail-check it live, then ship — the same sequence
-`docs/DST-PROPOSAL.md` went through before it became real, shipped code.
-Where a claim below is stated with confidence (a schema shape, a
-fail-check, a correctness argument), that confidence describes how
-carefully the claim was _reasoned through_ and, where noted, adversarially
-probed on paper — not that it has been executed. No `docs/DECISIONS.md`
-entry number is claimed here; one gets assigned only if and when this is
-actually built.
+**Status: built and shipped — `docs/DECISIONS.md` D-163.** This document
+records the design as it was proposed, synthesized, and adversarially
+reviewed on paper — the output of four independent design explorations
+(storage/schema, resolver integration, soundness-proof extension,
+operational surface), reconciled into one coherent proposal, then put
+through this project's own "design → adversarial review → correct"
+discipline (`docs/DECISIONS.md` D-140): a four-lens adversarial review
+(soundness, fidelity to the real code, gaps in stated scope, test-plan
+sufficiency) found real, independently-cross-validated defects in the
+draft's own code samples and test plan — not style nits — and every
+confirmed finding was corrected in place, disclosed inline at the point of
+correction rather than silently smoothed over (search this file for
+"Corrected here" and "adversarial review" to find each one). The code
+below is left exactly as it was reasoned through on paper — it is a
+faithful record of the design, not a mirror of the final shipped
+implementation, which diverges in a small number of places disclosed in
+D-163 itself (three further gaps found live during implementation: a
+`now()`-vs-`clock_timestamp()` bug in the rebuild's own operational
+metadata, a missing `lockAcquired` signal, and — the most consequential —
+a real transaction-poisoning gap in the "falls through unconditionally"
+exception boundary, closed with a `SAVEPOINT`, none of them changing this
+document's own schema or candidate-property reasoning). Implementation,
+its own adversarial review, and live fail-checking against real Postgres
+are complete — see D-163 for the full account, every disclosed correction,
+and the exact verification record, the same sequence `docs/DST-PROPOSAL.md`
+went through before it became real, shipped code.
 
 ## The problem this exists to name, not hide
 

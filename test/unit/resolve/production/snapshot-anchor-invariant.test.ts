@@ -21,8 +21,15 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { guardPinnedClientForSnapshotAnchor } from '../../../../src/resolve/production/resolver.js';
-import type { QueryExecutor, QueryResultLike } from '../../../../src/store/query-executor.js';
+import {
+  guardPinnedClientForSnapshotAnchor,
+  productionCheck,
+} from '../../../../src/resolve/production/resolver.js';
+import type {
+  ConnectionSource,
+  QueryExecutor,
+  QueryResultLike,
+} from '../../../../src/store/query-executor.js';
 
 const ANCHOR_QUERY_TEXT = 'select max(token) as max_token from write_log';
 
@@ -109,5 +116,149 @@ describe('guardPinnedClientForSnapshotAnchor — the anchor-ordering invariant',
     const guarded = guardPinnedClientForSnapshotAnchor(client);
 
     await expect(guarded.query('select 1')).rejects.toThrow(/internal invariant violation/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `docs/LEOPARD-INDEX-PROPOSAL.md`, "Test plan — the third comparison arm,"
+// its own table row for this exact file: "Confirms only that
+// `lookupRelationMembershipIndex`'s own call signature takes `ctx.client`,
+// never a second pool connection — a static, argument-shape check, not a
+// runtime proof that no second connection is ever opened under real
+// concurrent load. That stronger, load-bearing proof is the new
+// real-Postgres concurrency test [`relation-index-concurrent-rebuild
+// .integration.test.ts`]; this row is its fast, DB-free companion, not a
+// substitute for it." A light, additive extension — the existing describe
+// block above is untouched.
+//
+// A hand-written fake `ConnectionSource`, in the same spirit as this file's
+// own `createRecordingClient` above but one level up (a pool that can also
+// `.connect()`, since `productionCheck` itself — not just the guard — is
+// what's under test here): every `.connect()` call is counted, and every
+// query issued on the one connection it hands back is recorded into a
+// single shared array, so "the index lookup's own two queries ran on the
+// exact same client every other read in this check used" and "no second
+// connection was ever opened" are both directly observable, not inferred.
+// ---------------------------------------------------------------------------
+
+const NAMESPACE_CONFIG_QUERY_PREFIX = 'select config from namespace_configs';
+const RELATION_INDEX_STATE_QUERY_PREFIX =
+  'select watermark_token from relation_membership_index_state';
+const RELATION_INDEX_ROW_QUERY_PREFIX =
+  'select via_path, min_expires_at from relation_membership_index';
+
+/**
+ * A single-namespace, single-relation fixture (`document#viewer: user`) —
+ * a hand-built `NamespaceConfig`, not `compileSchema`'d, since this test
+ * only needs `resolve()` to find a truthy `config.relations.viewer` and
+ * never inspects `subjectTypes` itself.
+ */
+const DOCUMENT_NAMESPACE_CONFIG = {
+  namespace: 'document',
+  relations: {
+    viewer: { kind: 'relation' as const, name: 'viewer', subjectTypes: [{ namespace: 'user' }] },
+  },
+  permissions: {},
+};
+
+/**
+ * A fake `ConnectionSource` wired so a pinned, `useRelationIndex: true`
+ * `productionCheck` call for `document:doc1#viewer` genuinely reaches, and
+ * gets a genuine hit from, the Leopard-index short-circuit — never the
+ * `sqlRelationMembershipWithWitness` fallback — so this test observes the
+ * index lookup's own two queries for real, not merely a swallowed miss.
+ * `watermarkToken`/`atToken` are both fixed at `5`, matching (never
+ * exceeding) the floor `lookupRelationMembershipIndex` requires.
+ */
+function createFakeLeopardPool(): {
+  pool: ConnectionSource;
+  connectCallCount: () => number;
+  clientQueryTexts: () => string[];
+} {
+  let connectCalls = 0;
+  const clientQueryTexts: string[] = [];
+
+  function respond<Row>(text: string): QueryResultLike<Row> {
+    if (text === ANCHOR_QUERY_TEXT) {
+      // Serves both `assertTokenObserved`'s pool-level `currentToken` read
+      // (identical SQL text) and `assertTokenObservedOnSnapshot`'s own
+      // anchor read on the connected client.
+      return { rows: [{ max_token: '5' }], rowCount: 1 } as unknown as QueryResultLike<Row>;
+    }
+    if (text.startsWith(NAMESPACE_CONFIG_QUERY_PREFIX)) {
+      return {
+        rows: [{ config: DOCUMENT_NAMESPACE_CONFIG }],
+        rowCount: 1,
+      } as unknown as QueryResultLike<Row>;
+    }
+    if (text.startsWith(RELATION_INDEX_STATE_QUERY_PREFIX)) {
+      return { rows: [{ watermark_token: '5' }], rowCount: 1 } as unknown as QueryResultLike<Row>;
+    }
+    if (text.startsWith(RELATION_INDEX_ROW_QUERY_PREFIX)) {
+      return {
+        rows: [{ via_path: ['document:doc1#viewer'], min_expires_at: null }],
+        rowCount: 1,
+      } as unknown as QueryResultLike<Row>;
+    }
+    // BEGIN/COMMIT and anything else this fixture never needs.
+    return { rows: [], rowCount: 0 };
+  }
+
+  const pool: ConnectionSource = {
+    async query<Row = Record<string, unknown>>(text: string): Promise<QueryResultLike<Row>> {
+      return respond<Row>(text);
+    },
+    async connect() {
+      connectCalls += 1;
+      return {
+        async query<Row = Record<string, unknown>>(text: string): Promise<QueryResultLike<Row>> {
+          clientQueryTexts.push(text);
+          return respond<Row>(text);
+        },
+        release() {
+          // No real resource to release — this fake hands out a fresh
+          // in-memory object per `.connect()` call, never a pooled one.
+        },
+      };
+    },
+  };
+
+  return { pool, connectCallCount: () => connectCalls, clientQueryTexts: () => clientQueryTexts };
+}
+
+describe('productionCheck (Leopard index) — lookupRelationMembershipIndex always runs on ctx.clients own connection, never a second one', () => {
+  it('the-index-lookups-own-two-queries-run-on-the-exact-same-connected-client-every-other-read-in-this-check-uses-and-productionCheck-never-opens-a-second-connection', async () => {
+    const { pool, connectCallCount, clientQueryTexts } = createFakeLeopardPool();
+
+    const result = await productionCheck(
+      pool,
+      { ns: 'user', id: 'alice' },
+      { ns: 'document', id: 'doc1' },
+      'viewer',
+      { atToken: 5, useRelationIndex: true },
+    );
+
+    // The index genuinely hit (not a swallowed miss that fell through to
+    // the unchanged SQL path) — otherwise this test would prove nothing
+    // about the index lookup's own connection usage at all.
+    expect(result.allowed).toBe(true);
+    expect(result.indexHit).toBe(true);
+
+    // The one property this row of the test plan actually asks for:
+    // `productionCheck` — end to end, including the Leopard-index
+    // short-circuit inside `resolve()` — never calls `pool.connect()` more
+    // than once for this whole check.
+    expect(connectCallCount()).toBe(1);
+
+    // And the index's own two queries genuinely ran on THAT one connected
+    // client, back to back, alongside every other read this check made —
+    // never on some other, unaccounted-for `QueryExecutor`.
+    const calls = clientQueryTexts();
+    const stateIndex = calls.findIndex((text) =>
+      text.startsWith(RELATION_INDEX_STATE_QUERY_PREFIX),
+    );
+    const rowIndex = calls.findIndex((text) => text.startsWith(RELATION_INDEX_ROW_QUERY_PREFIX));
+    expect(stateIndex).toBeGreaterThanOrEqual(0);
+    expect(rowIndex).toBe(stateIndex + 1);
   });
 });

@@ -146,6 +146,10 @@ import { env } from '../../config/env.js';
 import type { NamespaceConfig, RewriteRule } from '../../schema/dsl/types.js';
 import { getLatestNamespaceConfig } from '../../schema/publish.js';
 import { assertTokenObserved } from '../../store/tokens.js';
+import {
+  lookupRelationMembershipIndex,
+  type RelationIndexLookup,
+} from '../../store/relation-index.js';
 
 /** An object or subject reference — `ns:id`, e.g. `document:readme`, `user:alice`. */
 export interface EntityRef {
@@ -187,6 +191,19 @@ export interface ProductionCheckOptions {
    * cyclic-case test.
    */
   maxDepth?: number;
+  /**
+   * Overrides `env.LEOPARD_INDEX_ENABLED === 'true'` for this call only —
+   * the exact same "tests use this to force a setting without a global env
+   * mutation" precedent `maxDepth` (above) already establishes on this same
+   * interface. `docs/LEOPARD-INDEX-PROPOSAL.md` ("The lookup, and the
+   * integration point in `resolve()`") — Phase A's index short-circuit
+   * (`WalkContext.relationIndexFloor`) is consulted only when this resolves
+   * `true` **and** this call is pinned (`atToken !== undefined`); either
+   * condition failing leaves `resolve()`'s relation branch byte-identical
+   * to today. See `productionCheck`'s own doc comment for exactly how this
+   * combines with `env.LEOPARD_INDEX_ENABLED`.
+   */
+  useRelationIndex?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +463,29 @@ export interface ProductionCheckResult {
    * comment for the full reasoning.
    */
   touchedExpiringTuple: boolean;
+  /**
+   * Observability-only addition for Phase 5's Leopard-index third
+   * comparison arm (`docs/LEOPARD-INDEX-PROPOSAL.md`, "Test plan — the
+   * third comparison arm"; `src/soundness/runner.ts`'s
+   * `SoundnessRunOptions.relationIndex`). `true` iff
+   * `lookupRelationMembershipIndex` (`src/store/relation-index.ts`) was
+   * actually consulted *and returned a hit* anywhere during this check's
+   * whole walk; absent (never `false`) otherwise — the same "present iff
+   * relevant" convention `path`/`certain` above already use. **Not** the
+   * design doc's own literal wording — that document specifies
+   * `indexQueriesHit` as a `SoundnessRunResult`-level counter but never
+   * states how the fuzz harness is meant to observe, per query, whether a
+   * given `productionCheck` call actually hit the index; this field is the
+   * minimal, additive mechanism that makes that observable. Never consulted
+   * by `resolve`/`evalRewrite` themselves, never changes `allowed`, and
+   * deliberately NOT the same thing as "the overall answer came from the
+   * index": a relation branch nested inside an exclusion's own `subtract`
+   * can hit the index and still leave the *overall* check `allowed: false`
+   * (the exclusion denies), so this is tracked independently of the
+   * top-level `allowed` value, mirroring `touchedExpiringTuple`'s own
+   * whole-walk, not just-the-winning-path, semantics.
+   */
+  indexHit?: boolean;
 }
 
 /**
@@ -549,6 +589,37 @@ interface WalkContext {
    * over-approximation is the safe direction.
    */
   touchedExpiringTuple: { value: boolean };
+  /**
+   * Observability-only mutable high-water-mark flag, mirroring
+   * `touchedExpiringTuple`'s own shape exactly: `true` the moment the
+   * Leopard-index short-circuit below (`ctx.relationIndexFloor !==
+   * undefined` branch) actually returns a hit anywhere in this check's
+   * whole walk, whether or not that hit ended up on the branch that decided
+   * the overall `allowed`/`denied` outcome. See `ProductionCheckResult
+   * .indexHit`'s own doc comment for why this is tracked independently of
+   * the top-level `allowed` value, and for why this field exists at all
+   * (Phase 5's Leopard-index third comparison arm needs a per-check way to
+   * observe whether the index was actually consulted-and-hit; nothing in
+   * `docs/LEOPARD-INDEX-PROPOSAL.md` itself specifies this mechanism).
+   */
+  indexHit: { value: boolean };
+  /**
+   * Phase A of `docs/LEOPARD-INDEX-PROPOSAL.md` — a straight passthrough of
+   * `productionCheck`'s own `atToken`, populated exactly once when
+   * constructing `ctx`, the same way `maxDepth` itself is already threaded
+   * onto this type. `undefined` whenever this specific check is unpinned
+   * (`atToken === undefined`) OR the feature is off (`useRelationIndex` /
+   * `env.LEOPARD_INDEX_ENABLED` resolves falsy) — in either case,
+   * `resolve()`'s relation branch never even attempts the index
+   * short-circuit, and behavior is byte-identical to before this field
+   * existed. When present, it is the floor
+   * `lookupRelationMembershipIndex` requires `relation_membership_index_
+   * state.watermark_token` to have reached before an index hit may ever be
+   * trusted for this check (Candidate C, `docs/LEOPARD-INDEX-PROPOSAL.md`).
+   * Never a new query, never a re-derived value — see `productionCheck`'s
+   * own doc comment for exactly how this is computed.
+   */
+  relationIndexFloor?: number;
 }
 
 async function getConfig(ctx: WalkContext, ns: string): Promise<NamespaceConfig | null> {
@@ -652,6 +723,78 @@ async function resolve(
     const relation = config.relations[name];
     if (relation) {
       const remainingDepth = Math.max(0, ctx.maxDepth - depth);
+
+      // Phase A Leopard-index short-circuit (`docs/LEOPARD-INDEX-
+      // PROPOSAL.md`, "The lookup, and the integration point in
+      // `resolve()`"). `ctx.relationIndexFloor` is `undefined` whenever this
+      // check is unpinned or the feature is off; in either case this whole
+      // block is skipped and behavior below is byte-identical to before
+      // this feature existed.
+      if (ctx.relationIndexFloor !== undefined) {
+        // A thrown exception here — a transient error scoped to the two new
+        // tables, lock contention with a concurrent `authz leopard
+        // refresh`'s own TRUNCATE, or a malformed row reaching
+        // `reconstructProof` — must never fail the whole check: a miss, for
+        // any reason at all, falls through unconditionally to the
+        // unmodified `sqlRelationMembershipWithWitness` call below. This
+        // `try`/`catch` is the disclosed fix for the proposal's own first
+        // draft, which had no such boundary (an uncaught throw here would
+        // propagate straight through `resolve()`/`evalRewrite()` and fail a
+        // check the live CTE alone would have answered correctly — strictly
+        // worse than the feature being off).
+        //
+        // **A second, more subtle gap in that same "falls through
+        // unconditionally" claim, found live and closed here — not merely
+        // catching the exception is not enough.** Postgres poisons an
+        // *entire* transaction the instant any statement inside it errors:
+        // every subsequent statement on this same connection fails with
+        // "current transaction is aborted, commands ignored until end of
+        // transaction block," until a `ROLLBACK` (whole transaction) or a
+        // `ROLLBACK TO SAVEPOINT` restores it. Confirmed live: a real
+        // `lock_timeout` racing a concurrent rebuild's own `TRUNCATE` (an
+        // ordinary hardening config, not an exotic one) makes
+        // `lookupRelationMembershipIndex`'s own SELECT fail — the `catch`
+        // below correctly swallows *that* error, but without the
+        // `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` pair here, the immediately
+        // following `sqlRelationMembershipWithWitness` call — on the same,
+        // now-poisoned connection — would itself throw a *second*, uncaught
+        // "transaction is aborted" error, propagating straight through and
+        // failing the whole check exactly as if this boundary didn't exist
+        // at all. A `SAVEPOINT` (Postgres's own standard mechanism for
+        // "try a statement, and if it errors, un-poison the transaction
+        // without a second connection") is genuinely new to this codebase —
+        // `grep -rn "SAVEPOINT" src/` returns nothing before this fix —
+        // disclosed the same way `pg_try_advisory_xact_lock`'s own novelty
+        // already is above.
+        let idx: RelationIndexLookup;
+        await ctx.client.query('SAVEPOINT leopard_lookup');
+        try {
+          idx = await lookupRelationMembershipIndex(
+            ctx.client,
+            object,
+            name,
+            subject,
+            remainingDepth,
+            ctx.relationIndexFloor,
+          );
+          await ctx.client.query('RELEASE SAVEPOINT leopard_lookup');
+        } catch {
+          // Restores this connection's transaction to the state it was in
+          // right before the lookup — the fallback call below now runs on
+          // a genuinely healthy connection, not a poisoned one.
+          await ctx.client.query('ROLLBACK TO SAVEPOINT leopard_lookup');
+          await ctx.client.query('RELEASE SAVEPOINT leopard_lookup');
+          idx = { hit: false }; // logged/counted elsewhere, never re-thrown
+        }
+        if (idx.hit) {
+          ctx.depthReached.value = Math.max(ctx.depthReached.value, idx.path.length - 1);
+          ctx.touchedExpiringTuple.value ||= idx.touchedExpiringTuple;
+          ctx.indexHit.value = true;
+          return { allowed: true, certain: true, proof: reconstructProof(idx.path, subject) };
+        }
+        // miss, for any reason at all — fall through, unconditionally.
+      }
+
       const sqlOutcome = await sqlRelationMembershipWithWitness(
         ctx.client,
         object,
@@ -1680,6 +1823,16 @@ export async function productionCheck(
   const maxDepth = options?.maxDepth ?? env.CHECK_MAX_DEPTH;
   const depthReached = { value: 0 };
   const touchedExpiringTuple = { value: false };
+  // Observability-only — see `WalkContext.indexHit`'s own doc comment.
+  const indexHit = { value: false };
+  // Phase A Leopard-index gate (`docs/LEOPARD-INDEX-PROPOSAL.md`, "One
+  // trivial addition to `WalkContext`..."): a straight passthrough of
+  // `atToken`, present on `ctx` only when this check is both pinned AND the
+  // feature is enabled (the per-call `useRelationIndex` override, falling
+  // back to `env.LEOPARD_INDEX_ENABLED` when omitted). Never a new query,
+  // never a re-derived value — `atToken` is already in hand above.
+  const relationIndexEnabled = options?.useRelationIndex ?? env.LEOPARD_INDEX_ENABLED === 'true';
+  const relationIndexFloor = relationIndexEnabled && atToken !== undefined ? atToken : undefined;
 
   const client = await pool.connect();
   // Wrapped at acquisition, before this connection's very first query, so
@@ -1699,6 +1852,13 @@ export async function productionCheck(
       schemaCache: new Map(),
       depthReached,
       touchedExpiringTuple,
+      indexHit,
+      // `exactOptionalPropertyTypes` — see `rowToTuple`'s (`src/store/
+      // tuples.ts`) identical "only spread it in when it has a real value"
+      // pattern: `relationIndexFloor` is `number | undefined`, but
+      // `WalkContext.relationIndexFloor` is `number`-or-absent, not
+      // `number | undefined` present.
+      ...(relationIndexFloor !== undefined ? { relationIndexFloor } : {}),
     };
     const outcome = await resolve(ctx, subject, object, relationOrPermission, new Set(), 0);
     await guardedClient.query('COMMIT');
@@ -1708,6 +1868,10 @@ export async function productionCheck(
           path: outcome.proof,
           depth: depthReached.value,
           touchedExpiringTuple: touchedExpiringTuple.value,
+          // `exactOptionalPropertyTypes` — present (`true`) only when the
+          // index was actually consulted-and-hit anywhere in this check;
+          // see `ProductionCheckResult.indexHit`'s own doc comment.
+          ...(indexHit.value ? { indexHit: true } : {}),
         }
       : {
           allowed: false,
@@ -1717,6 +1881,10 @@ export async function productionCheck(
           certain: outcome.certain,
           depth: depthReached.value,
           touchedExpiringTuple: touchedExpiringTuple.value,
+          // See the `allowed: true` branch above — a nested branch inside a
+          // negated position (an exclusion's own `subtract`) can hit the
+          // index while the overall check still resolves `allowed: false`.
+          ...(indexHit.value ? { indexHit: true } : {}),
         };
   } catch (err) {
     // The ROLLBACK call's own failure must never replace `err` — the exact

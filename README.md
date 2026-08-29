@@ -34,6 +34,7 @@ try the DSL compiler itself against your own source.
 - [Five bigger bets, built in parallel: scoped API keys, a batch endpoint, a privilege-escalation scanner, an SMT tier, and a machine-checked API spec](#five-bigger-bets-built-in-parallel-scoped-api-keys-a-batch-endpoint-a-privilege-escalation-scanner-an-smt-tier-and-a-machine-checked-api-spec)
 - [Three more from that same list: a Horn-clause tier for the schema verifier, expiring tuples wired into the fuzzer, and an out-of-band audit anchor](#three-more-from-that-same-list-a-horn-clause-tier-for-the-schema-verifier-expiring-tuples-wired-into-the-fuzzer-and-an-out-of-band-audit-anchor)
 - [A real soundness bug, found and fixed: `exclusion` meeting a data cycle could flip a fail-closed deny into an unsound grant](#a-real-soundness-bug-found-and-fixed-exclusion-meeting-a-data-cycle-could-flip-a-fail-closed-deny-into-an-unsound-grant)
+- [An offline acceleration index for nested groups, opt-in and provably inert until built](#an-offline-acceleration-index-for-nested-groups-opt-in-and-provably-inert-until-built)
 - [Try it yourself — under 10 minutes, from a clean clone](#try-it-yourself--under-10-minutes-from-a-clean-clone)
 - [How it works](#how-it-works)
 - [Latency](#latency)
@@ -530,6 +531,16 @@ Built alongside two smaller closes from the same review: a runtime assertion tha
 
 **One more gap closed: the main fuzzer itself couldn't catch its own bug class.** Both fixes above measured the same uncomfortable fact — the standard-configuration differential fuzz run (the one CI actually executes on every PR) never caught either bug, even with them reintroduced, because the random generator's existing guaranteed structures never happened to construct this exact shape. The dedicated metamorphic property closed that as a standing guard, but CI's own fuzz job still couldn't. Now it can: a new guaranteed structure (the same reliability class as the existing guaranteed cycle and deep chain) wires a real, boundary-calibrated relation-membership chain into every generated fixture. Measured, not assumed: 0 of 10 fresh seeds caught the bug at standard configuration before this change; 10 of 10 catch it now, every single one tracing to exactly this construct. Full account: [`docs/DECISIONS.md`](docs/DECISIONS.md) D-161.
 
+## An offline acceleration index for nested groups, opt-in and provably inert until built
+
+Zanzibar's own paper spends real design effort on one performance problem this project shares: a deeply or widely nested group graph pays the full cost of a live SQL walk on every single check, even though group membership changes far less often than it's read. Modeled on Zanzibar's own "Leopard index," `authz leopard refresh` offline-computes and materializes "every subject transitively reachable from this group" into two new tables, consulted as a fast path ahead of the existing recursive walk (`sqlRelationMembershipWithWitness`) — which itself isn't touched, not even by one line.
+
+**Deliberately scoped down from Zanzibar's own full design, and disclosed as such, not silently narrowed.** This is a "Phase A" cut: **pinned checks only**, **ALLOW-only acceleration**. An index miss, for any reason at all, falls through unmodified to the live resolver; the index never produces an authoritative DENY (that needs a "root completeness" tracking mechanism this phase deliberately doesn't build — see the design proposal's own "Revisit if"). The design itself went through this project's own "design → adversarial review → correct" discipline before a line of it shipped: [`docs/LEOPARD-INDEX-PROPOSAL.md`](docs/LEOPARD-INDEX-PROPOSAL.md) records four independently-explored architectures reconciled into one proposal, then a four-lens adversarial review that found and disclosed real defects in the proposal's own code samples — a hardcoded safety flag that would have reopened D-144's expiring-tuple gap, a test plan that would have silently exercised zero index code ever, a primary-key collision the rebuild had no answer for — every one corrected in the document itself before implementation began.
+
+**Implementation surfaced two more real, previously-undisclosed bugs, both found and fixed live before shipping, neither a soundness risk.** Postgres freezes `now()` to a transaction's own _start_ instant, confirmed directly via a `pg_sleep(2)` bracketed by two `now()` reads in one transaction (both identical to the microsecond) — so `rebuild_finished_at = now()` inside a multi-statement rebuild transaction would have recorded when the rebuild _began_, not when it actually finished; switched to `clock_timestamp()`. And a genuinely serious one: `resolve()`'s own exception boundary around the index lookup correctly swallows a real Postgres error (a lock timeout racing a concurrent `authz leopard refresh`'s own `TRUNCATE` — an ordinary hardening config, not an exotic one) but Postgres poisons the _whole_ transaction on any statement error, so the very next statement — the live-CTE fallback the boundary exists to protect — threw a second, uncaught error, exactly defeating the "a miss, for any reason, falls through unconditionally" guarantee. Reproduced live, 15/15 clean runs at the default `lock_timeout=0` and 15/15 real throws at `lock_timeout=50ms` — fixed with a `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` pair, Postgres's own standard mechanism for recovering a poisoned transaction without a second connection, itself a genuinely new pattern in this codebase, disclosed as such. Live-verified fixed: the same forced-contention scenario, zero throws afterward.
+
+**A new third comparison arm in the differential-fuzz harness, not just unit tests.** `SoundnessRunOptions.relationIndex: 'off' | 'cold' | 'warm'` compares the production engine against _itself_, index on versus off, at the identical pinned snapshot — `'cold'` proves a deployment that enables the flag but never rebuilds is provably inert (`indexQueriesHit === 0`, executed at the standard 5,000-query PR-speed budget, not just asserted in prose); `'warm'` proves every real index hit replays on the live CTE, with an `indexQueriesHit > 0` non-vacuity gate closing the exact "this whole mode silently tests nothing" trap an unpinned `atToken` would otherwise have created. Full account, every disclosed correction, and the complete fail-check record: [`docs/DECISIONS.md`](docs/DECISIONS.md) D-163.
+
 ## Try it yourself — under 10 minutes, from a clean clone
 
 ```bash
@@ -696,6 +707,8 @@ of this project has.
 | `authz apikey create --role <admin\|readonly> [--scope ns1,ns2] [--expires-at T] [--name L]` | Mint a real, DB-backed API key; prints the raw key exactly once (D-152)                                                                                                                                              |
 | `authz apikey revoke <id>`                                                                   | Revoke a DB-backed API key by id; rejected immediately on every future use (D-152)                                                                                                                                   |
 | `authz apikey list`                                                                          | List every DB-backed API key (id, name, role, scopes, timestamps) — never a hash or raw key (D-152)                                                                                                                  |
+| `authz leopard refresh [--dry-run]`                                                          | Rebuild the offline Leopard index (D-163) — an opt-in, pinned-checks-only acceleration for nested-group membership; a miss always falls through to the live resolver unmodified                                      |
+| `authz leopard status`                                                                       | Report whether the Leopard index is enabled, never built, or built (with watermark/staleness)                                                                                                                        |
 | `authz serve`                                                                                | Start the Fastify API server                                                                                                                                                                                         |
 
 `authz serve` exposes the same operations over HTTP, plus two bulk
@@ -740,7 +753,7 @@ same real example data.
 src/
   config/      validated environment loading
   schema/      the namespace DSL — publish.ts, diff.ts (schema-diff safety check, D-149), plus dsl/ (parser, compiler, types, errors)
-  store/       migrations/ (the real .sql files), the tuple store, consistency tokens
+  store/       migrations/ (the real .sql files), the tuple store, consistency tokens, relation-index.ts (the offline Leopard-index rebuild + lookup, D-163)
     dst/     deterministic simulation testing — the in-memory fake storage seam (docs/DST-PROPOSAL.md)
   resolve/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
@@ -750,7 +763,7 @@ src/
   audit/       expand(), listObjects()/listUsers(), privesc.ts (privilege-escalation scanner, D-152), the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148), and anchor.ts (the out-of-band, append-only tip anchor, D-155)
   report/      markdown/JSON soundness reporters, exit codes, PR-comment logic
   api/         the Fastify server, db-api-keys.ts (DB-backed API-key tier, D-152), openapi-document.ts (GET /openapi.json's own document, D-152), plus the opt-in Redis-backed rate-limit store (redis-store.ts)
-  cli/         the authz CLI — index.ts, plus commands/ (one file per command group, e.g. schema.ts backs compile/publish/diff/rollback)
+  cli/         the authz CLI — index.ts, plus commands/ (one file per command group, e.g. schema.ts backs compile/publish/diff/rollback; leopard.ts backs refresh/status, D-163)
 schema/example.authz        the real demo schema this README's own examples come from
 scripts/seed-example.ts     publishes it + the real demo tuple graph
 scripts/generate-openapi.ts writes docs/openapi.json (D-152)

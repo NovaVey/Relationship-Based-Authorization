@@ -107,3 +107,86 @@ describe('differential fuzzing — production check engine vs. the naive referen
     expect(result.verdict).toBe('sound');
   }, 600_000);
 });
+
+/**
+ * The Leopard-index Phase A "third comparison arm," `relationIndex: 'cold'`
+ * mode (`docs/LEOPARD-INDEX-PROPOSAL.md`, "Test plan — the third comparison
+ * arm") — the always-on, PR-speed companion to the standard 5,000-query run
+ * above, at the SAME query budget/seed-count scale (never the nightly
+ * "many-seeds" scale a separate, dedicated file owns).
+ *
+ * **What `'cold'` proves, and why it has to be run for real, not just
+ * reasoned about.** `'cold'` pins every `productionCheck` call this run
+ * makes to a real `atToken` and passes `useRelationIndex: true` — but
+ * `rebuildRelationMembershipIndex` is never called for this fixture, so
+ * `relation_membership_index_state.watermark_token` cannot possibly have
+ * reached this fixture's own post-write pin token (a freshly written
+ * fixture's own anchor is always strictly newer than whatever a `watermark_
+ * token` an unrelated, earlier rebuild — by this file or any other test
+ * sharing the same database — might have left behind; `runner.ts`'s own
+ * `SoundnessRunOptions.relationIndex` doc comment states this precisely:
+ * "genuinely below `pinToken`... genuinely reached on every single call and
+ * genuinely misses every single time"). This is the literal, executed proof
+ * of `docs/LEOPARD-INDEX-PROPOSAL.md`'s own "A deployment that never sets
+ * `LEOPARD_INDEX_ENABLED=true` is provably unaffected... intended to be
+ * executed as a real differential-fuzz comparison arm (`relationIndex:
+ * 'cold'`), not just asserted in prose" — restated for the adjacent,
+ * equally load-bearing case: a deployment that sets the flag on but has
+ * never yet run a rebuild.
+ *
+ * **`indexQueriesHit === 0` is the one real, falsifiable assertion here** —
+ * `runner.ts`'s own doc comment states the mirror-image reasoning bluntly:
+ * "a nonzero count [for `'cold'`] would mean this arm is, contrary to its
+ * whole premise, actually consulting real index state — a bug in this
+ * harness, not in the index." `indexFalseGrantCount === 0` is asserted too,
+ * exactly as this task's own instructions specify, even though it is
+ * necessarily `0` by construction whenever `indexQueriesHit` is (`'cold'`
+ * mode never populates `CheckedQuery.productionIndexAllowed` at all — see
+ * `checkAllQueries`'s own doc comment — so `classifyIndexDivergence` is
+ * never even invoked for a `'cold'` run) — asserted directly anyway, never
+ * silently relied upon as "obviously true," matching this project's own
+ * "assert the thing you actually need, even when it looks redundant"
+ * discipline elsewhere (`docs/DECISIONS.md` D-140's own non-vacuity
+ * counters).
+ */
+describe("Leopard index — the flag-on-but-never-rebuilt path is provably inert (relationIndex: 'cold', real Postgres, PR-speed budget)", () => {
+  it("across the SAME standard 5,000-query budget this file's own PR-speed run above uses, enabling useRelationIndex without ever calling rebuildRelationMembershipIndex never actually consults real index state (indexQueriesHit === 0) and never produces an index_false_grant (indexFalseGrantCount === 0) — a deployment that flips LEOPARD_INDEX_ENABLED on but has not yet run a rebuild is provably unaffected", async () => {
+    const STANDARD_FUZZ_QUERIES = 5000;
+
+    const start = performance.now();
+    const result = await runSoundnessFuzz(pool, {
+      seed: 'phase5-leopard-cold-standard-budget-real-postgres-run',
+      queryCount: STANDARD_FUZZ_QUERIES,
+      trigger: 'ci',
+      relationIndex: 'cold',
+    });
+    const elapsedMs = performance.now() - start;
+
+    console.log(
+      `[soundness fuzz, real Postgres, relationIndex=cold] seed=${result.graphSeed} ` +
+        `namespaces=${result.namespaceCount} tuples=${result.tupleCount} ` +
+        `queries=${result.queryCount} indexQueriesHit=${result.indexQueriesHit} ` +
+        `indexFalseGrantCount=${result.indexFalseGrantCount} elapsedMs=${elapsedMs.toFixed(0)}`,
+    );
+
+    expect(result.queryCount).toBe(STANDARD_FUZZ_QUERIES);
+
+    // *** The two assertions this describe block exists to make. ***
+    expect(result.indexQueriesHit).toBe(0);
+    expect(result.indexFalseGrantCount).toBe(0);
+
+    // `runner.ts`'s own `computeVerdict` extension forces `verdict` to
+    // `'unsound'` if `relationIndex === 'cold' && indexQueriesHit !== 0` —
+    // asserted here too, as the end-to-end confirmation that a hidden
+    // regression in that gate itself would still fail this test even if
+    // the two raw counters above were somehow read incorrectly.
+    expect(result.verdict).not.toBe('unsound');
+
+    // This run's own reference-vs-production comparison (`classify.ts`,
+    // untouched by `relationIndex`) must still hold too — `'cold'` changes
+    // nothing about the base engine's own byte-identical behavior.
+    expect(result.falseGrantCount).toBe(0);
+    expect(result.criticalNamespaceFalseGrants).toBe(0);
+    expect(result.verdict).toBe('sound');
+  }, 600_000);
+});
