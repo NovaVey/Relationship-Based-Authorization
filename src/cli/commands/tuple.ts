@@ -4,7 +4,14 @@
  * for a plain reference, `namespace:id#relation` for a tuple-to-userset
  * subject (`group:eng#member`).
  */
-import { writeTuple, deleteTuple, validateIdentifiers, type TupleKey } from '../../store/tuples.js';
+import {
+  writeTuple,
+  deleteTuple,
+  validateIdentifiers,
+  validateExpiresAt,
+  type TupleKey,
+  type WriteTupleResult,
+} from '../../store/tuples.js';
 import { encodeToken } from '../../store/tokens.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
@@ -68,6 +75,22 @@ export function buildTupleKey(
   };
 }
 
+/**
+ * Full-repo audit finding #11 (2026-08-29): `created: false` alone doesn't
+ * tell an operator whether the existing row is still active or its
+ * validity window has already closed — surface `existingExpiresAt`
+ * (`writeTuple`'s own new field) so re-granting access after an expiry
+ * doesn't read as "already active, nothing to do" when the resolver is
+ * still denying it.
+ */
+function describeWriteOutcome(result: Extract<WriteTupleResult, { ok: true }>): string {
+  if (result.created) return '';
+  if (result.existingExpiresAt != null && result.existingExpiresAt.getTime() <= Date.now()) {
+    return ` (already existed — no new row — but the existing row expired at ${result.existingExpiresAt.toISOString()} and is no longer granting access; delete it and write again to restore)`;
+  }
+  return ' (already existed — no new row)';
+}
+
 const REF_USAGE =
   "object must be 'namespace:id' (e.g. 'document:readme'); subject must be 'namespace:id' or 'namespace:id#relation' (e.g. 'user:alice' or 'group:eng#member')";
 
@@ -86,9 +109,9 @@ export async function tupleWrite(
   // Optional validity-window expiry (D-144). Parsed and range-checked here,
   // before the identifier/DATABASE_URL checks below, for the same reason
   // those run in this order: an immediately-decidable argument error (a
-  // malformed `--expires-at` string) must never be masked behind a later,
-  // unrelated infrastructure message just because no database happens to be
-  // configured.
+  // malformed or already-past `--expires-at` value) must never be masked
+  // behind a later, unrelated infrastructure message just because no
+  // database happens to be configured.
   if (options.expiresAt !== undefined) {
     const expiresAt = new Date(options.expiresAt);
     if (Number.isNaN(expiresAt.getTime())) {
@@ -99,6 +122,22 @@ export async function tupleWrite(
       return;
     }
     tuple.expiresAt = expiresAt;
+  }
+  // Full-repo audit finding (2026-08-29, MEDIUM, "tuple write --expires-at
+  // <past date> reports exit 3 instead of exit 2 when DATABASE_URL is
+  // unset"): `validateExpiresAt` is exactly as pure and DB-free as
+  // `validateIdentifiers` below (see its own doc comment in tuples.ts),
+  // but until this fix it only ever ran inside `writeTuple`, unreachable
+  // until after the DATABASE_URL gate below passed — so a past-dated
+  // `--expires-at` with no database configured surfaced as the infra
+  // message at exit 3, masking the real, immediately-decidable argument
+  // error. Hoisted here to match `validateIdentifiers`'s own precedent.
+  const expiresAtErrors = validateExpiresAt(tuple);
+  if (expiresAtErrors.length > 0) {
+    console.error(`tuple write rejected:`);
+    for (const error of expiresAtErrors) console.error(`  ${error.message}`);
+    process.exitCode = 2;
+    return;
   }
   // Pure, DB-free identifier-pattern check — run before the DATABASE_URL
   // check below so a malformed identifier (e.g. an id containing a space)
@@ -129,9 +168,7 @@ export async function tupleWrite(
       process.exitCode = 2;
       return;
     }
-    console.log(
-      `token ${encodeToken(result.token)}${result.created ? '' : ' (already existed — no new row)'}`,
-    );
+    console.log(`token ${encodeToken(result.token)}${describeWriteOutcome(result)}`);
   } catch (err) {
     console.error(`Postgres: ${(err as Error).message}`);
     process.exitCode = 3;

@@ -90,15 +90,17 @@ function compileNamespace(source: string, name: string) {
 
 describe('the SQL-shape registry — an exact-count tripwire (D5, D-102)', () => {
   it('registeredShapeCount-matches-exactly-what-this-files-own-manifest-below-expects', () => {
-    // 13 today: tuple insert/delete, the write-log insert, both
+    // 14 today: tuple insert/delete, the write-log insert, both
     // listTuplesByObject variants, listTuplesBySubject, the max-token
     // read, getLatestNamespaceConfig, publishOne's own next-version select
     // and insert, listTupleSubjects, fetchReachableFrontier,
-    // fetchTuplesOnFrontier. If this fails, either a shape was added
-    // without extending the manifest below, or one was removed without
-    // shrinking it — either way, fix the mismatch, don't just update this
-    // number.
-    expect(registeredShapeCount()).toBe(13);
+    // fetchTuplesOnFrontier, and (full-repo audit finding #11, 2026-08-29)
+    // writeTuple's own follow-up existing-expires-at select, run only on
+    // its created:false conflict path. If this fails, either a shape was
+    // added without extending the manifest below, or one was removed
+    // without shrinking it — either way, fix the mismatch, don't just
+    // update this number.
+    expect(registeredShapeCount()).toBe(14);
   });
 });
 
@@ -116,6 +118,30 @@ describe('the manifest — every real production call site this fake claims to m
       subjectId: 'alice',
     });
     expect(result.ok).toBe(true);
+  });
+
+  it('writeTuple — the existing-expires-at follow-up select, on the created:false conflict path (full-repo audit finding #11, 2026-08-29)', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(SCHEMA_SOURCE, 'document'));
+    const source = createFakeConnectionSource(state);
+    const tuple = {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    };
+    await writeTuple(source, tuple);
+
+    // The identical tuple again — `created: false`, exercising the new
+    // follow-up select this manifest entry exists to prove is wired up.
+    const result = await writeTuple(source, tuple);
+    expect(result).toEqual({
+      ok: true,
+      token: expect.any(Number),
+      created: false,
+      existingExpiresAt: null,
+    });
   });
 
   it('deleteTuple — the tuple delete shape', async () => {

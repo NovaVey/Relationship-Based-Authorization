@@ -407,8 +407,47 @@ describe('tupleWriteResponse — ok:true renders 200 with {token, created}, toke
     const result: WriteTupleResult = { ok: true, token: 42, created: false };
     expect(tupleWriteResponse(result)).toEqual({
       status: 200,
-      body: { token: encodeToken(42), created: false },
+      body: { token: encodeToken(42), created: false, existingExpiresAt: null },
     });
+  });
+
+  // Full-repo audit finding #11 (2026-08-29): created:false alone can't
+  // distinguish "already existed and still active" from "already existed
+  // but expired" — existingExpiresAt (ISO-8601, or null if it never
+  // expires) closes that gap.
+  it('tuplewriteresponse-ok-true-with-created-false-and-a-non-expiring-existing-row-renders-existingExpiresAt-null', () => {
+    const result: WriteTupleResult = {
+      ok: true,
+      token: 42,
+      created: false,
+      existingExpiresAt: null,
+    };
+    expect(tupleWriteResponse(result)).toEqual({
+      status: 200,
+      body: { token: encodeToken(42), created: false, existingExpiresAt: null },
+    });
+  });
+
+  it('tuplewriteresponse-ok-true-with-created-false-and-an-expired-existing-row-renders-existingExpiresAt-as-an-iso-8601-string', () => {
+    const result: WriteTupleResult = {
+      ok: true,
+      token: 42,
+      created: false,
+      existingExpiresAt: new Date('2020-01-01T00:00:00.000Z'),
+    };
+    expect(tupleWriteResponse(result)).toEqual({
+      status: 200,
+      body: {
+        token: encodeToken(42),
+        created: false,
+        existingExpiresAt: '2020-01-01T00:00:00.000Z',
+      },
+    });
+  });
+
+  it('tuplewriteresponse-ok-true-with-created-true-never-includes-an-existingExpiresAt-key-at-all', () => {
+    const result: WriteTupleResult = { ok: true, token: 42, created: true };
+    expect(tupleWriteResponse(result).body).not.toHaveProperty('existingExpiresAt');
   });
 
   it('tuplewriteresponse-token-decodes-back-to-the-real-integer-and-is-not-parseable-as-one-directly', () => {

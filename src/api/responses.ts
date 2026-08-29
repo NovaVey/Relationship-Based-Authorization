@@ -345,6 +345,16 @@ export interface TupleWriteResponseBody {
   token: string;
   /** `false` when the tuple already existed — still a successful write (see `src/store/tuples.ts`'s own idempotency doc comment), never an error. */
   created: boolean;
+  /**
+   * Full-repo audit finding #11 (2026-08-29): present (possibly `null`)
+   * only when `created` is `false` — the existing row's real `expires_at`,
+   * ISO-8601, so a caller can tell an already-existed-and-still-active
+   * grant from an already-existed-but-its-validity-window-already-closed
+   * one, instead of both surfacing identically as a bare `created: false`.
+   * `null` means the existing row never expires. Absent entirely when
+   * `created` is `true` — there is no existing row to report on.
+   */
+  existingExpiresAt?: string | null;
 }
 
 export type TupleWriteApiResponse =
@@ -369,7 +379,17 @@ export type TupleWriteApiResponse =
  */
 export function tupleWriteResponse(result: WriteTupleResult): TupleWriteApiResponse {
   if (!result.ok) return tupleValidationError('write', result.errors);
-  return { status: 200, body: { token: encodeToken(result.token), created: result.created } };
+  if (result.created) {
+    return { status: 200, body: { token: encodeToken(result.token), created: true } };
+  }
+  return {
+    status: 200,
+    body: {
+      token: encodeToken(result.token),
+      created: false,
+      existingExpiresAt: result.existingExpiresAt?.toISOString() ?? null,
+    },
+  };
 }
 
 export interface TupleDeleteResponseBody {
