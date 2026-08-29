@@ -96,7 +96,7 @@
  */
 import type { FakeStoreState } from './state.js';
 import { lookupShape, normalizeSql, type FakeQueryResult, type PendingOp } from './shapes.js';
-import { acquireLock, releaseLock, releaseLocksForConnection } from './locks.js';
+import { acquireLock, releaseLock, releaseLocksForConnection, tryAcquireLock } from './locks.js';
 
 export interface FakeConnection {
   query<Row = Record<string, unknown>>(
@@ -115,6 +115,22 @@ export interface FakeConnectionOptions {
   pauseGate?: Promise<void>;
   /** D4 (`docs/DECISIONS.md` D-101), test-only: called synchronously the instant this connection's own pause condition genuinely fires — before `pauseGate` is ever awaited. `src/store/dst/scheduler.ts`'s `raceUnderPause` awaits this instead of guessing "probably paused by now" from a microtask-count heuristic, which a full-repo adversarial review found was silently vacuous for `productionCheck`'s own real statement sequence (it settles in more microtask hops than the old heuristic's fixed budget drained). Only meaningful together with `pauseAfterStatements`. */
   notifyPauseFired?: () => void;
+  /**
+   * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The genuinely new fault
+   * class" — test-only: after this many successful `.query()` calls on this
+   * connection, the next statement throws an injected error AND poisons this
+   * connection — every later statement fails with `current transaction is
+   * aborted, commands ignored until end of transaction block` until a
+   * `ROLLBACK` (the whole transaction) or a `ROLLBACK TO SAVEPOINT LEOPARD_
+   * LOOKUP` restores it. Unlike `crashAfterStatements`, the connection itself
+   * survives — this models a real mid-transaction SQL error (a lock-wait
+   * timeout, a deadlock) rather than the connection dying outright. See this
+   * file's own top-of-file doc comment on the pause mechanism for the
+   * identical "the fake needs to construct this deterministically, real
+   * Postgres has no controllable equivalent" reasoning applied here to a
+   * different fault shape. `undefined` (the default) never poisons.
+   */
+  poisonAfterStatements?: number;
 }
 
 const enum TxState {
@@ -133,8 +149,40 @@ const XACT_TWOINT_LOCK = normalizeSql('select pg_advisory_xact_lock($1, $2)');
 const XACT_HASH_LOCK = normalizeSql('select pg_advisory_xact_lock(hashtext($1))');
 const SESSION_LOCK = normalizeSql('select pg_advisory_lock($1, $2)');
 const SESSION_UNLOCK = normalizeSql('select pg_advisory_unlock($1, $2)');
+/**
+ * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "New lock primitive" —
+ * `relation-index.ts`'s `rebuildRelationMembershipIndex`'s own advisory-lock
+ * text, the first non-blocking (`_try_`) form this codebase issues. Kept
+ * alongside the four blocking forms above for the identical reason: needs
+ * connection identity, resolved synchronously here rather than as an
+ * ordinary `ShapeHandler` (though unlike the blocking four, `tryAcquireLock`
+ * itself never returns a `Promise` at all — see `locks.ts`'s own doc
+ * comment).
+ */
+const TRY_ADVISORY_XACT_LOCK = normalizeSql('select pg_try_advisory_xact_lock($1, $2) as locked');
 /** The exact literal text `resolver.ts`'s `productionCheck` issues to open its snapshot transaction — see this file's own top-of-file doc comment on `TxState.Snapshot`. */
 const SNAPSHOT_BEGIN = 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY';
+/**
+ * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "New transaction mode" —
+ * the exact literal text `relation-index.ts`'s `rebuildRelationMembershipIndex`
+ * issues to open its own `REPEATABLE READ` transaction: identical anchoring
+ * behavior to `SNAPSHOT_BEGIN` above, but **writable** — see `snapshotReadOnly`
+ * below and `bufferOp`'s own updated guard.
+ */
+const REBUILD_BEGIN = 'BEGIN ISOLATION LEVEL REPEATABLE READ';
+/**
+ * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The genuinely new fault
+ * class" — the three exact literals `resolve()`'s relation branch
+ * (`src/resolve/production/resolver.ts`) issues around its Leopard-index
+ * lookup, matched case-insensitively (after `.toUpperCase()`) alongside
+ * `BEGIN`/`COMMIT`/`ROLLBACK` above, exactly as those already are — never a
+ * general savepoint-name-parsing engine (see the design proposal's own
+ * "Considered and deferred" for why: this codebase issues exactly one
+ * savepoint name today).
+ */
+const SAVEPOINT_LEOPARD_LOOKUP = 'SAVEPOINT LEOPARD_LOOKUP';
+const RELEASE_SAVEPOINT_LEOPARD_LOOKUP = 'RELEASE SAVEPOINT LEOPARD_LOOKUP';
+const ROLLBACK_TO_SAVEPOINT_LEOPARD_LOOKUP = 'ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP';
 
 /**
  * Builds this engine's own opaque lock key for the two-integer
@@ -173,10 +221,60 @@ export class FakeConnectionImpl implements FakeConnection {
   // one `visibleAsOf` commit-order boundary. `undefined` until anchored,
   // reset alongside `snapshotSeq` on COMMIT/ROLLBACK/a fresh SNAPSHOT_BEGIN.
   private snapshotNow: Date | undefined;
+  /**
+   * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "New transaction mode" —
+   * `true` for `SNAPSHOT_BEGIN` (`resolver.ts`'s `productionCheck`, read-only
+   * by construction), `false` for `REBUILD_BEGIN`
+   * (`rebuildRelationMembershipIndex`, which writes its own output). Only
+   * meaningful while `txState === TxState.Snapshot` — the anchoring behavior
+   * itself (freeze `visibleAsOf`/`now` at the first real query) is identical
+   * either way and was never specific to read-only-ness in the first place;
+   * this one boolean is the sole difference `bufferOp` below consults.
+   */
+  private snapshotReadOnly = true;
   // D2, test-only — see this file's own top-of-file doc comment on the
   // pause mechanism. One-shot: consumed the first time the threshold is
   // reached, never fires again on this same connection.
   private pauseConsumed = false;
+  /**
+   * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The genuinely new fault
+   * class" — `true` once `poisonAfterStatements` has fired on this
+   * connection, cleared only by a `ROLLBACK` (the whole transaction) or a
+   * `ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP` (back to the open savepoint) —
+   * see this file's own top-of-file doc comment and `query()`'s own poisoned
+   * check, immediately after the `dead` check.
+   */
+  private poisoned = false;
+  /**
+   * One-shot latch for `poisonAfterStatements`, deliberately separate from
+   * `poisoned` itself — see this class's own `poisoned` doc comment:
+   * `poisoned` is cleared by a `ROLLBACK`/`ROLLBACK TO SAVEPOINT LEOPARD_
+   * LOOKUP` (by design, so the connection can recover and keep being used),
+   * but `this.statementsExecuted` never goes back down, so a naive "arm
+   * fires once `statementsExecuted >= threshold` and `!poisoned`" check
+   * would silently re-fire on the very next statement after a successful
+   * recovery — poisoning `RELEASE SAVEPOINT LEOPARD_LOOKUP` itself right
+   * after `ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP` legitimately un-poisoned
+   * the connection. Found live while authoring D8's own test (a `RELEASE
+   * SAVEPOINT` inside `resolve()`'s own `catch` block failing with a SECOND
+   * poisoned-connection error, immediately after a successful recovery),
+   * fixed with this dedicated latch — the same one-shot pattern
+   * `pauseConsumed` above already establishes for the identical class of
+   * "must fire exactly once, ever, on this connection" requirement.
+   */
+  private poisonConsumed = false;
+  /**
+   * The length of `this.pending` at the moment `SAVEPOINT LEOPARD_LOOKUP`
+   * last ran on this connection, `undefined` when no savepoint is currently
+   * open — a single slot, not a stack, since this codebase never nests two
+   * savepoints (a second `SAVEPOINT LEOPARD_LOOKUP` while one is already
+   * open throws loudly below, the same "this needs redesign" signal an
+   * unexpected shape already gets elsewhere). `ROLLBACK TO SAVEPOINT
+   * LEOPARD_LOOKUP` truncates `this.pending` back to exactly this length,
+   * discarding only the ops buffered since the savepoint — matching real
+   * Postgres's own `ROLLBACK TO SAVEPOINT` semantics precisely.
+   */
+  private pendingLengthAtSavepoint: number | undefined;
 
   constructor(
     private readonly state: FakeStoreState,
@@ -195,6 +293,25 @@ export class FakeConnectionImpl implements FakeConnection {
           'including ROLLBACK',
       );
     }
+    // `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "The genuinely new
+    // fault class" — a poisoned connection rejects everything except a
+    // whole-transaction ROLLBACK or a ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP,
+    // matching real Postgres's own "current transaction is aborted" behavior
+    // exactly, including that RELEASE SAVEPOINT LEOPARD_LOOKUP itself fails
+    // the same way (real Postgres does not let you release a savepoint out
+    // from under a poisoned transaction, only roll back to one) — see this
+    // file's own top-of-file doc comment.
+    if (this.poisoned) {
+      const poisonedCheckText = sql.trim().toUpperCase();
+      if (
+        poisonedCheckText !== 'ROLLBACK' &&
+        poisonedCheckText !== ROLLBACK_TO_SAVEPOINT_LEOPARD_LOOKUP
+      ) {
+        throw new Error(
+          'current transaction is aborted, commands ignored until end of transaction block',
+        );
+      }
+    }
     if (
       this.options.crashAfterStatements !== undefined &&
       this.statementsExecuted >= this.options.crashAfterStatements
@@ -211,6 +328,28 @@ export class FakeConnectionImpl implements FakeConnection {
       throw new Error(
         'DST fake connection: simulated crash — connection terminated mid-statement, ' +
           "this transaction's own uncommitted buffer was discarded",
+      );
+    }
+    if (
+      !this.poisonConsumed &&
+      this.options.poisonAfterStatements !== undefined &&
+      this.statementsExecuted >= this.options.poisonAfterStatements
+    ) {
+      // Unlike the crash branch above, the connection survives and
+      // `this.pending` is left completely untouched — a real poisoned
+      // transaction's own earlier, successfully-buffered writes are still
+      // there, waiting for either a ROLLBACK (discarding all of it) or a
+      // ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP (discarding only what was
+      // buffered since the savepoint) — see this file's own top-of-file doc
+      // comment and `pendingLengthAtSavepoint`'s own doc comment.
+      this.poisonConsumed = true;
+      this.poisoned = true;
+      throw new Error(
+        'DST fake connection: simulated statement failure — this connection is now poisoned ' +
+          '(current transaction is aborted, commands ignored until end of transaction block), ' +
+          'matching a real mid-transaction SQL error (a lock-wait timeout, a deadlock) that ' +
+          'leaves the connection alive but the transaction unusable until ROLLBACK or ROLLBACK ' +
+          'TO SAVEPOINT LEOPARD_LOOKUP',
       );
     }
     if (
@@ -232,6 +371,18 @@ export class FakeConnectionImpl implements FakeConnection {
     }
     if (normalized === SNAPSHOT_BEGIN) {
       this.txState = TxState.Snapshot;
+      this.snapshotReadOnly = true;
+      this.snapshotAnchored = false;
+      this.snapshotSeq = undefined;
+      this.snapshotNow = undefined;
+      return { rows: [], rowCount: 0 };
+    }
+    if (normalized === REBUILD_BEGIN) {
+      // Identical anchoring behavior to SNAPSHOT_BEGIN above — the only
+      // difference is `snapshotReadOnly`, which `bufferOp` below consults;
+      // see this file's own top-of-file doc comment on `snapshotReadOnly`.
+      this.txState = TxState.Snapshot;
+      this.snapshotReadOnly = false;
       this.snapshotAnchored = false;
       this.snapshotSeq = undefined;
       this.snapshotNow = undefined;
@@ -246,6 +397,8 @@ export class FakeConnectionImpl implements FakeConnection {
       this.snapshotAnchored = false;
       this.snapshotSeq = undefined;
       this.snapshotNow = undefined;
+      this.poisoned = false;
+      this.pendingLengthAtSavepoint = undefined;
       // Postgres releases every transaction-scoped advisory lock this
       // session holds at COMMIT, unconditionally — not just ones acquired
       // in exactly this statement sequence. Session-scoped locks (the
@@ -260,9 +413,58 @@ export class FakeConnectionImpl implements FakeConnection {
       this.snapshotAnchored = false;
       this.snapshotSeq = undefined;
       this.snapshotNow = undefined;
+      // A whole-transaction ROLLBACK restores a poisoned connection too —
+      // see this file's own top-of-file doc comment on the poisoning fault
+      // class.
+      this.poisoned = false;
+      this.pendingLengthAtSavepoint = undefined;
       // Postgres releases xact-scoped advisory locks on ROLLBACK exactly
       // as it does on COMMIT — see the COMMIT branch's own comment above.
       releaseLocksForConnection(this.state.locks, this.connectionId, 'xact');
+      return { rows: [], rowCount: 0 };
+    }
+    if (normalized === SAVEPOINT_LEOPARD_LOOKUP) {
+      if (this.pendingLengthAtSavepoint !== undefined) {
+        // This codebase issues exactly one savepoint name today — a second,
+        // nested SAVEPOINT LEOPARD_LOOKUP on the same connection before the
+        // first is released/rolled back is the same "this needs redesign"
+        // signal an unrecognized shape already gets elsewhere, not a
+        // silently-supported stack — see `pendingLengthAtSavepoint`'s own
+        // doc comment.
+        throw new Error(
+          'DST fake connection: SAVEPOINT LEOPARD_LOOKUP issued while a savepoint is already ' +
+            'open on this connection — this codebase never nests two savepoints',
+        );
+      }
+      this.pendingLengthAtSavepoint = this.pending.length;
+      return { rows: [], rowCount: 0 };
+    }
+    if (normalized === RELEASE_SAVEPOINT_LEOPARD_LOOKUP) {
+      if (this.pendingLengthAtSavepoint === undefined) {
+        throw new Error(
+          'DST fake connection: RELEASE SAVEPOINT LEOPARD_LOOKUP issued with no open ' +
+            'SAVEPOINT LEOPARD_LOOKUP on this connection',
+        );
+      }
+      this.pendingLengthAtSavepoint = undefined;
+      return { rows: [], rowCount: 0 };
+    }
+    if (normalized === ROLLBACK_TO_SAVEPOINT_LEOPARD_LOOKUP) {
+      if (this.pendingLengthAtSavepoint === undefined) {
+        throw new Error(
+          'DST fake connection: ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP issued with no open ' +
+            'SAVEPOINT LEOPARD_LOOKUP on this connection',
+        );
+      }
+      // Discards exactly the ops buffered since the savepoint, restoring
+      // everything before it — matching real Postgres's own ROLLBACK TO
+      // SAVEPOINT semantics precisely (see this file's own top-of-file doc
+      // comment). The savepoint itself remains open afterward, exactly like
+      // real Postgres (a subsequent RELEASE SAVEPOINT LEOPARD_LOOKUP is
+      // still valid, and is exactly what `resolve()`'s own catch block does
+      // immediately after this).
+      this.pending.length = this.pendingLengthAtSavepoint;
+      this.poisoned = false;
       return { rows: [], rowCount: 0 };
     }
 
@@ -322,13 +524,28 @@ export class FakeConnectionImpl implements FakeConnection {
       return { rows: [{ pg_advisory_unlock: released }], rowCount: 1 } as FakeQueryResult<Row>;
     }
 
+    if (key === TRY_ADVISORY_XACT_LOCK) {
+      // No queueing, no `await` — the entire point of the `_try_` form is
+      // that it never waits (see `locks.ts`'s own `tryAcquireLock` doc
+      // comment and this file's own top-of-file doc comment on the new lock
+      // primitive). Released the same way every other xact-scoped lock is:
+      // `connection.ts`'s own COMMIT/ROLLBACK handling above.
+      const lockKey = twoIntLockKey(params);
+      const locked = tryAcquireLock(this.state.locks, lockKey, this.connectionId, 'xact');
+      return { rows: [{ locked }], rowCount: 1 } as FakeQueryResult<Row>;
+    }
+
     const handler = lookupShape(sql);
     const bufferOp = (op: PendingOp): void => {
-      if (this.txState === TxState.Snapshot) {
+      if (this.txState === TxState.Snapshot && this.snapshotReadOnly) {
         // Read-only, enforced by construction, not just left as an
         // unstated assumption — see this file's own top-of-file doc
         // comment. Nothing in productionCheck's real call surface ever
         // reaches here; this exists to fail loudly if that ever changes.
+        // A REBUILD_BEGIN-opened Snapshot transaction (`snapshotReadOnly ===
+        // false`) never reaches this branch at all — see
+        // `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "New transaction
+        // mode" and this class's own `snapshotReadOnly` doc comment.
         throw new Error(
           'DST fake connection: a write was attempted inside a REPEATABLE READ READ ONLY ' +
             'snapshot transaction — real Postgres would reject this too',

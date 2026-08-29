@@ -6,7 +6,14 @@
  * optionally arm a one-shot crash on the next connection it opens.
  */
 export { createFakeStoreState, seedNamespaceConfig } from './state.js';
-export type { FakeStoreState, RelationTupleRow, WriteLogRow, NamespaceConfigRow } from './state.js';
+export type {
+  FakeStoreState,
+  RelationTupleRow,
+  WriteLogRow,
+  NamespaceConfigRow,
+  RelationMembershipIndexRow,
+  RelationMembershipIndexStateVersion,
+} from './state.js';
 export { createFakeConnectionSource } from './source.js';
 export type { FakeConnectionSource } from './source.js';
 export {

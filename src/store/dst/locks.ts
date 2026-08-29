@@ -123,6 +123,30 @@ function grantNext(locks: LocksState, key: string): void {
 }
 
 /**
+ * `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "New lock primitive" —
+ * `relation-index.ts`'s `pg_try_advisory_xact_lock`, the first non-blocking
+ * advisory-lock form this codebase issues. No queueing, no `Promise` — the
+ * entire point of the `_try_` form is that it never waits: resolves the
+ * outcome immediately and synchronously, unlike `acquireLock` above, whose
+ * whole design centers on genuinely blocking a waiter until granted. Shares
+ * the identical `held` map (and therefore the identical keyspace) as
+ * `acquireLock`/`releaseLock` above — real Postgres's advisory locks are one
+ * shared namespace regardless of which of the four/five functions a caller
+ * happens to use to acquire or release a given key. Additive only: every one
+ * of the existing blocking forms keeps its own `acquireLock` path, untouched.
+ */
+export function tryAcquireLock(
+  locks: LocksState,
+  key: string,
+  connectionId: number,
+  scope: LockScope,
+): boolean {
+  if (locks.held.has(key)) return false;
+  locks.held.set(key, { connectionId, scope });
+  return true;
+}
+
+/**
  * Releases every lock `connectionId` currently holds matching `scope`
  * (`'all'` releases both scopes at once) — `connection.ts`'s
  * `COMMIT`/`ROLLBACK` handling calls this with `'xact'`; its crash path

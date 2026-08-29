@@ -27,6 +27,10 @@ import {
 import { currentToken } from '../../../../src/store/tokens.js';
 import { MIGRATIONS_LOCK_CLASSID, MIGRATIONS_LOCK_OBJID } from '../../../../src/store/migrate.js';
 import {
+  RELATION_INDEX_REFRESH_LOCK_CLASSID,
+  RELATION_INDEX_REFRESH_LOCK_OBJID,
+} from '../../../../src/store/relation-index.js';
+import {
   createFakeStoreState,
   createFakeConnectionSource,
   seedNamespaceConfig,
@@ -365,5 +369,56 @@ describe("migrate.ts's session-scoped migrations lock — survives COMMIT, and a
     // the previously-blocked waiter is now granted.
     await waiterPromise;
     expect(waiterSettled).toBe(true);
+  });
+});
+
+/**
+ * D7 (`docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own continuation of this
+ * project's `D0`-`D5` DST numbering) — the non-blocking lock invariant: *of
+ * two connections concurrently calling `pg_try_advisory_xact_lock` on the
+ * identical `(classid, objid)`, exactly one acquires immediately and the
+ * other returns `false` immediately, never blocking.* A single hand-driven
+ * two-connection test, mirroring D1's own shape above — no scheduler seed
+ * sweep needed, per the design proposal's own reasoning: `tryAcquireLock`
+ * (`locks.ts`) is a stateless boolean check with no seed-dependent behavior
+ * to sweep over. This reproduces a property already proven, deterministically,
+ * against real Postgres (`docs/DECISIONS.md` D-163: `lockAcquired: false`
+ * via a held advisory lock on a separate connection) — its value here is
+ * fast-suite regression coverage of the fake's own new lock primitive, not
+ * new soundness evidence.
+ */
+describe("relation-index.ts's own pg_try_advisory_xact_lock — of two concurrent attempts, exactly one acquires and the other reports false immediately, never blocking (D7)", () => {
+  it('a-second-connections-try-lock-attempt-on-the-identical-key-returns-false-immediately-rather-than-blocking-and-the-key-frees-up-once-the-first-releases-it', async () => {
+    const { source } = freshSource();
+    const holderConn = await source.connect();
+    const contenderConn = await source.connect();
+
+    await holderConn.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    const holderResult = await holderConn.query<{ locked: boolean }>(
+      'select pg_try_advisory_xact_lock($1, $2) as locked',
+      [RELATION_INDEX_REFRESH_LOCK_CLASSID, RELATION_INDEX_REFRESH_LOCK_OBJID],
+    );
+    expect(holderResult.rows[0]?.locked).toBe(true);
+
+    // The second connection's own attempt must resolve immediately — never
+    // suspend the way a blocking pg_advisory_xact_lock would — and report
+    // `false`, not throw and not silently succeed.
+    await contenderConn.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    const contenderResult = await contenderConn.query<{ locked: boolean }>(
+      'select pg_try_advisory_xact_lock($1, $2) as locked',
+      [RELATION_INDEX_REFRESH_LOCK_CLASSID, RELATION_INDEX_REFRESH_LOCK_OBJID],
+    );
+    expect(contenderResult.rows[0]?.locked).toBe(false);
+
+    // Releasing the holder's own xact-scoped lock (via COMMIT, the identical
+    // xact-scoped-lock-release path every other pg_advisory_xact_lock form
+    // already uses) frees the key for a subsequent try to succeed.
+    await holderConn.query('COMMIT');
+    const retryResult = await contenderConn.query<{ locked: boolean }>(
+      'select pg_try_advisory_xact_lock($1, $2) as locked',
+      [RELATION_INDEX_REFRESH_LOCK_CLASSID, RELATION_INDEX_REFRESH_LOCK_OBJID],
+    );
+    expect(retryResult.rows[0]?.locked).toBe(true);
+    await contenderConn.query('COMMIT');
   });
 });

@@ -50,6 +50,12 @@ import { productionCheck } from '../../../../src/resolve/production/resolver.js'
 import { publishSchema, getLatestNamespaceConfig } from '../../../../src/schema/publish.js';
 import { MIGRATIONS_LOCK_CLASSID, MIGRATIONS_LOCK_OBJID } from '../../../../src/store/migrate.js';
 import {
+  rebuildRelationMembershipIndex,
+  lookupRelationMembershipIndex,
+  RELATION_INDEX_REFRESH_LOCK_CLASSID,
+  RELATION_INDEX_REFRESH_LOCK_OBJID,
+} from '../../../../src/store/relation-index.js';
+import {
   createFakeStoreState,
   createFakeConnectionSource,
   seedNamespaceConfig,
@@ -64,6 +70,15 @@ const USERSET_SCHEMA_SOURCE = [
   '}',
   'namespace group {',
   '  relation member: user',
+  '}',
+].join('\n');
+/** Genuinely nested (`group#member` accepted as its own member's subject type) — needed for a converging-paths (PK-collision) fixture the flat `USERSET_SCHEMA_SOURCE` above cannot express. */
+const NESTED_GROUP_SCHEMA_SOURCE = [
+  'namespace document {',
+  '  relation viewer: user | group#member',
+  '}',
+  'namespace group {',
+  '  relation member: user | group#member',
   '}',
 ].join('\n');
 const TUPLE_TO_USERSET_SCHEMA_SOURCE = [
@@ -90,17 +105,30 @@ function compileNamespace(source: string, name: string) {
 
 describe('the SQL-shape registry — an exact-count tripwire (D5, D-102)', () => {
   it('registeredShapeCount-matches-exactly-what-this-files-own-manifest-below-expects', () => {
-    // 14 today: tuple insert/delete, the write-log insert, both
-    // listTuplesByObject variants, listTuplesBySubject, the max-token
+    // 21 today: the original 14 (tuple insert/delete, the write-log insert,
+    // both listTuplesByObject variants, listTuplesBySubject, the max-token
     // read, getLatestNamespaceConfig, publishOne's own next-version select
     // and insert, listTupleSubjects, fetchReachableFrontier,
     // fetchTuplesOnFrontier, and (full-repo audit finding #11, 2026-08-29)
     // writeTuple's own follow-up existing-expires-at select, run only on
-    // its created:false conflict path. If this fails, either a shape was
-    // added without extending the manifest below, or one was removed
-    // without shrinking it — either way, fix the mismatch, don't just
-    // update this number.
-    expect(registeredShapeCount()).toBe(14);
+    // its created:false conflict path) plus 7 new ones from
+    // `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "New shape handlers"
+    // section: `rebuildRelationMembershipIndex`'s own watermark read, its
+    // `truncate`, its batched `WITH RECURSIVE ... INSERT`, its inert
+    // `rebuild_started_at` no-op update, its real `watermark_token` publish
+    // update, and `lookupRelationMembershipIndex`'s own two selects (the
+    // state read, the row read) — **7, not the proposal's own stated "six":
+    // its "New shape handlers" section literally enumerates 6 numbered
+    // items, but item 6 ("lookupRelationMembershipIndex's own two SELECTs")
+    // bundles two textually-distinct queries under one bullet, so the real
+    // count of new `SHAPES` map entries (one per distinct literal SQL text,
+    // which is what `registeredShapeCount()` actually measures) is 7. This
+    // was a genuine off-by-one in the design document's own count, found
+    // while implementing it and disclosed here rather than silently
+    // adjusted.** If this fails, either a shape was added without extending
+    // the manifest below, or one was removed without shrinking it — either
+    // way, fix the mismatch, don't just update this number.
+    expect(registeredShapeCount()).toBe(21);
   });
 });
 
@@ -353,5 +381,254 @@ describe('the manifest — every real production call site this fake claims to m
       'viewer',
     );
     expect(result.allowed).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // `docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md`'s own "New shape handlers" — the
+  // 7 new registry entries (see this file's own count-tripwire comment above
+  // for why 7, not the proposal's own stated "six"), each exercised through
+  // its real production caller (`rebuildRelationMembershipIndex`/
+  // `lookupRelationMembershipIndex`), never a synthetic query, per the
+  // design's own explicit instruction.
+  // ---------------------------------------------------------------------------
+
+  it('rebuildRelationMembershipIndex — the watermark read, the inert rebuild_started_at update, truncate, the batched WITH RECURSIVE INSERT, and the real watermark_token publish update (5 of the 7 new shapes)', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
+    const source = createFakeConnectionSource(state);
+    await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+    const flip = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'eng',
+      relation: 'member',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(flip.ok).toBe(true);
+    if (!flip.ok) return;
+
+    const result = await rebuildRelationMembershipIndex(source);
+    // 2, not 1 — `group:eng#member` is itself a distinct root too (the
+    // "roots" CTE is `select distinct object_ns, object_id, relation from
+    // relation_tuples`, and `group:eng#member` is the *object* half of the
+    // second tuple written above), producing its own trivial, hop-0 index
+    // row (`group:eng#member -> user:alice`, via_path length 1) in addition
+    // to the transitive one reached from `document:readme#viewer` (via_path
+    // length 2) — real Postgres's own batched INSERT produces the identical
+    // two rows for the identical reason.
+    expect(result).toEqual({
+      watermarkToken: flip.token,
+      rowCount: 2,
+      published: true,
+      lockAcquired: true,
+    });
+  });
+
+  it('lookupRelationMembershipIndex — both new selects, the state read and the row read (the remaining 2 of the 7 new shapes)', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
+    const source = createFakeConnectionSource(state);
+    await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+    const flip = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'eng',
+      relation: 'member',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(flip.ok).toBe(true);
+    if (!flip.ok) return;
+    const rebuild = await rebuildRelationMembershipIndex(source);
+    expect(rebuild.published).toBe(true);
+
+    // A plain connection, exactly like `lookupRelationMembershipIndex`'s own
+    // real contract ("takes `client`... never a second pool connection") —
+    // no transaction wrapper is needed for this direct-call manifest entry.
+    const conn = await source.connect();
+    const result = await lookupRelationMembershipIndex(
+      conn,
+      { ns: 'document', id: 'readme' },
+      'viewer',
+      { ns: 'user', id: 'alice' },
+      5,
+      flip.token,
+    );
+    expect(result).toEqual({
+      hit: true,
+      allowed: true,
+      certain: true,
+      path: ['document:readme#viewer', 'group:eng#member'],
+      touchedExpiringTuple: false,
+    });
+  });
+
+  it('rebuildRelationMembershipIndex — the batched INSERTs own dedup tie-break keeps the SHORTEST converging path, not merely a path (a PK-collision, two independent routes to the identical subject)', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(NESTED_GROUP_SCHEMA_SOURCE, 'document'));
+    seedNamespaceConfig(state, compileNamespace(NESTED_GROUP_SCHEMA_SOURCE, 'group'));
+    const source = createFakeConnectionSource(state);
+
+    // Route 1 (short, 1 hop): document:doc1#viewer -> group:short#member -> user:alice.
+    await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'doc1',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'short',
+      subjectRelation: 'member',
+    });
+    await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'short',
+      relation: 'member',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    // Route 2 (long, 2 hops): document:doc1#viewer -> group:long#member ->
+    // group:mid#member -> user:alice — the SAME final (object, subject) pair
+    // as route 1, reached via a strictly longer, independent path.
+    await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'doc1',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'long',
+      subjectRelation: 'member',
+    });
+    await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'long',
+      relation: 'member',
+      subjectNs: 'group',
+      subjectId: 'mid',
+      subjectRelation: 'member',
+    });
+    const flip = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'mid',
+      relation: 'member',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(flip.ok).toBe(true);
+    if (!flip.ok) return;
+
+    const rebuild = await rebuildRelationMembershipIndex(source);
+    expect(rebuild.published).toBe(true);
+
+    const conn = await source.connect();
+    const result = await lookupRelationMembershipIndex(
+      conn,
+      { ns: 'document', id: 'doc1' },
+      'viewer',
+      { ns: 'user', id: 'alice' },
+      10,
+      flip.token,
+    );
+    // The SHORT route (2 nodes, 1 hop) must win — never the long one (3
+    // nodes, 2 hops), even though both are real, independently-discovered
+    // routes to the identical (object, subject) pair.
+    expect(result).toMatchObject({
+      hit: true,
+      path: ['document:doc1#viewer', 'group:short#member'],
+    });
+  });
+
+  it("the pg_try_advisory_xact_lock text — relation-index.ts's own non-blocking advisory lock, matched directly in connection.ts (D7)", async () => {
+    // Also implicitly exercised by rebuildRelationMembershipIndex itself
+    // (its own very first statement after BEGIN) — named here explicitly
+    // too, showing both outcomes directly, matching this file's own
+    // established precedent for "the four real advisory-lock statement
+    // texts" above. The full non-blocking-lock property (of two concurrent
+    // attempts, exactly one acquires and the other reports false
+    // immediately, never blocking) is D7's own dedicated coverage —
+    // `advisory-lock.dst.test.ts`.
+    const state = createFakeStoreState();
+    const source = createFakeConnectionSource(state);
+
+    const holder = await source.connect();
+    await holder.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    const first = await holder.query<{ locked: boolean }>(
+      'select pg_try_advisory_xact_lock($1, $2) as locked',
+      [RELATION_INDEX_REFRESH_LOCK_CLASSID, RELATION_INDEX_REFRESH_LOCK_OBJID],
+    );
+    expect(first.rows[0]?.locked).toBe(true);
+
+    const contender = await source.connect();
+    await contender.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    const second = await contender.query<{ locked: boolean }>(
+      'select pg_try_advisory_xact_lock($1, $2) as locked',
+      [RELATION_INDEX_REFRESH_LOCK_CLASSID, RELATION_INDEX_REFRESH_LOCK_OBJID],
+    );
+    expect(second.rows[0]?.locked).toBe(false);
+
+    await holder.query('ROLLBACK');
+    await contender.query('ROLLBACK');
+  });
+
+  it("the writable REPEATABLE READ BEGIN text — rebuildRelationMembershipIndex's own transaction mode, matched directly in connection.ts", async () => {
+    // Exercised implicitly by every rebuildRelationMembershipIndex call
+    // above (it always opens exactly this transaction, never the read-only
+    // SNAPSHOT_BEGIN form productionCheck uses) — named here explicitly too,
+    // matching this file's own established "the snapshot-transaction BEGIN"
+    // precedent immediately above.
+    const state = createFakeStoreState();
+    const source = createFakeConnectionSource(state);
+    const result = await rebuildRelationMembershipIndex(source);
+    expect(result).toEqual({ watermarkToken: 0, rowCount: 0, published: true, lockAcquired: true });
+  });
+
+  it("the SAVEPOINT LEOPARD_LOOKUP / RELEASE SAVEPOINT LEOPARD_LOOKUP pair — resolver.ts's own index short-circuit success path, matched directly in connection.ts", async () => {
+    // The failure path (ROLLBACK TO SAVEPOINT LEOPARD_LOOKUP + RELEASE
+    // SAVEPOINT LEOPARD_LOOKUP) is D8's own dedicated coverage —
+    // relation-index-savepoint-recovery.dst.test.ts — deliberately not
+    // duplicated here.
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
+    const source = createFakeConnectionSource(state);
+    await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+    const flip = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'eng',
+      relation: 'member',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(flip.ok).toBe(true);
+    if (!flip.ok) return;
+    await rebuildRelationMembershipIndex(source);
+
+    const result = await productionCheck(
+      source,
+      { ns: 'user', id: 'alice' },
+      { ns: 'document', id: 'readme' },
+      'viewer',
+      { atToken: flip.token, useRelationIndex: true },
+    );
+    expect(result).toMatchObject({ allowed: true, indexHit: true });
   });
 });
