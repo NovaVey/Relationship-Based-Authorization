@@ -6,6 +6,9 @@
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
 import { buildServer } from '../../api/server.js';
+import { rebuildRelationMembershipIndex } from '../../store/relation-index.js';
+import type { Pool } from 'pg';
+import type { FastifyInstance } from 'fastify';
 
 /**
  * Binds `0.0.0.0`, not the Fastify default `127.0.0.1` — this command
@@ -14,6 +17,44 @@ import { buildServer } from '../../api/server.js';
  * bind would make the server unreachable from anywhere but itself.
  */
 const BIND_HOST = '0.0.0.0';
+
+/**
+ * The Leopard index's own "optional in-process interval" trigger
+ * (`docs/LEOPARD-INDEX-PROPOSAL.md`'s "Refresh trigger" section,
+ * `env.ts`'s own `LEOPARD_INDEX_REFRESH_INTERVAL_MS` comment): `> 0` makes
+ * `authz serve` run this rebuild on a timer, in addition to (never instead
+ * of) any external scheduler an operator also has running `authz leopard
+ * refresh` — both funnel through the same
+ * `pg_try_advisory_xact_lock`-guarded `rebuildRelationMembershipIndex`, so
+ * layering both is safe, only possibly redundant; a still-running previous
+ * call (from this timer or an external cron) simply loses the try-lock and
+ * returns `lockAcquired: false`, not an error. `0` (the parsed default)
+ * disables this — `authz serve` never triggers a rebuild on its own,
+ * matching the pre-existing behavior this fixes the gap in.
+ *
+ * Deliberately NOT gated on `LEOPARD_INDEX_ENABLED`, matching `authz
+ * leopard refresh`'s own CLI doc comment ("runnable regardless of
+ * `LEOPARD_INDEX_ENABLED`... what makes 'pre-warm before enabling'
+ * possible") — an operator who sets a nonzero interval before flipping the
+ * enabled flag gets a warm index the moment they do, rather than the first
+ * `maxDepth`-pinned check after enabling paying a cold-rebuild's own
+ * latency inline.
+ *
+ * A rejected rebuild is logged and swallowed, never allowed to become an
+ * unhandled rejection or to crash the server process — a background
+ * maintenance job's own failure must never take down request serving,
+ * the same posture `serve()`'s own `buildServer`/`app.listen` catches
+ * already establish for startup-time failures.
+ */
+function startLeopardRefreshLoop(pool: Pool, log: FastifyInstance['log']): NodeJS.Timeout | null {
+  const intervalMs = env.LEOPARD_INDEX_REFRESH_INTERVAL_MS ?? 0;
+  if (intervalMs <= 0) return null;
+  return setInterval(() => {
+    rebuildRelationMembershipIndex(pool, { dryRun: false }).catch((err: unknown) => {
+      log.error({ err }, `leopard index background refresh failed: ${(err as Error).message}`);
+    });
+  }, intervalMs);
+}
 
 export async function serve(): Promise<void> {
   if (!env.DATABASE_URL) {
@@ -46,10 +87,13 @@ export async function serve(): Promise<void> {
     return;
   }
 
+  const refreshTimer = startLeopardRefreshLoop(pool, app.log);
+
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (refreshTimer) clearInterval(refreshTimer);
     app.log.info(`${signal} received, shutting down`);
     await app.close();
     await closePool();

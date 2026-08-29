@@ -30,6 +30,15 @@
  * 4. SIGINT triggers the graceful-shutdown path: `app.close()` then
  *    `closePool()` then `process.exit(0)`, and the `shuttingDown` guard
  *    makes a second signal a no-op.
+ * 5. The Leopard index's own background refresh interval
+ *    (`LEOPARD_INDEX_REFRESH_INTERVAL_MS`) — new behavior fixing the gap
+ *    disclosed in `docs/LEOPARD-INDEX-PROPOSAL.md`'s "Refresh trigger"
+ *    section ("`authz serve` never starts a background timer regardless of
+ *    its value"): `0`/unset never calls `rebuildRelationMembershipIndex`;
+ *    a nonzero value calls it on each tick with `{dryRun: false}`; a
+ *    rejected call is logged via `app.log.error`, never an unhandled
+ *    rejection; and SIGINT clears the timer, so no call fires after
+ *    shutdown even if time keeps advancing.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Pool } from 'pg';
@@ -39,8 +48,10 @@ import { env } from '../../../src/config/env.js';
 import { serve } from '../../../src/cli/commands/serve.js';
 import * as clientModule from '../../../src/store/client.js';
 import * as serverModule from '../../../src/api/server.js';
+import * as relationIndexModule from '../../../src/store/relation-index.js';
 
 const ORIGINAL_DATABASE_URL = env.DATABASE_URL;
+const ORIGINAL_REFRESH_INTERVAL_MS = env.LEOPARD_INDEX_REFRESH_INTERVAL_MS;
 
 function fakeFastifyInstance(overrides: Partial<FastifyInstance> = {}): FastifyInstance {
   return {
@@ -53,7 +64,9 @@ function fakeFastifyInstance(overrides: Partial<FastifyInstance> = {}): FastifyI
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   env.DATABASE_URL = ORIGINAL_DATABASE_URL;
+  env.LEOPARD_INDEX_REFRESH_INTERVAL_MS = ORIGINAL_REFRESH_INTERVAL_MS;
   process.exitCode = undefined;
 });
 
@@ -160,5 +173,92 @@ describe('authz serve — SIGINT/SIGTERM trigger a graceful shutdown exactly onc
     expect(fakeApp.close).toHaveBeenCalledTimes(1);
     expect(closePoolSpy).toHaveBeenCalledTimes(1);
     expect(exitSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('authz serve — Leopard index background refresh interval (new: closes the disclosed "never wired up" gap)', () => {
+  /** Common setup shared by every case below: a real Fastify-shaped fake with mockable `log.error`, real signal-handler capture (never attached to the actual process), and fake timers so `setInterval` ticks are deterministic. */
+  function setUp(): {
+    fakeApp: FastifyInstance;
+    handlers: Map<string | symbol, () => void>;
+  } {
+    env.DATABASE_URL = 'postgres://placeholder/db';
+    vi.spyOn(clientModule, 'getPool').mockReturnValue({ query: vi.fn() } as unknown as Pool);
+    vi.spyOn(clientModule, 'closePool').mockResolvedValue(undefined);
+    const fakeApp = fakeFastifyInstance({ log: { info: vi.fn(), error: vi.fn() } as never });
+    vi.spyOn(serverModule, 'buildServer').mockResolvedValue(fakeApp);
+    const handlers = new Map<string | symbol, () => void>();
+    vi.spyOn(process, 'on').mockImplementation((signal: string | symbol, handler: () => void) => {
+      handlers.set(signal, handler);
+      return process;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    vi.useFakeTimers();
+    return { fakeApp, handlers };
+  }
+
+  it('interval-unset-or-zero-never-calls-rebuild-even-after-a-long-time-advance', async () => {
+    env.LEOPARD_INDEX_REFRESH_INTERVAL_MS = 0;
+    const rebuildSpy = vi
+      .spyOn(relationIndexModule, 'rebuildRelationMembershipIndex')
+      .mockResolvedValue({} as never);
+    setUp();
+
+    await serve();
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // 10 minutes — no interval was ever armed
+
+    expect(rebuildSpy).not.toHaveBeenCalled();
+  });
+
+  it('a-nonzero-interval-calls-rebuild-dry-run-false-on-each-tick', async () => {
+    env.LEOPARD_INDEX_REFRESH_INTERVAL_MS = 5000;
+    const rebuildSpy = vi
+      .spyOn(relationIndexModule, 'rebuildRelationMembershipIndex')
+      .mockResolvedValue({} as never);
+    setUp();
+
+    await serve();
+    expect(rebuildSpy).not.toHaveBeenCalled(); // never fires immediately on startup — only after the first tick
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(rebuildSpy).toHaveBeenCalledTimes(1);
+    expect(rebuildSpy).toHaveBeenCalledWith(expect.anything(), { dryRun: false });
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(rebuildSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('a-rejected-rebuild-is-logged-via-app-log-error-and-never-becomes-an-unhandled-rejection', async () => {
+    env.LEOPARD_INDEX_REFRESH_INTERVAL_MS = 1000;
+    vi.spyOn(relationIndexModule, 'rebuildRelationMembershipIndex').mockRejectedValue(
+      new Error('simulated: advisory lock table unreachable'),
+    );
+    const { fakeApp } = setUp();
+
+    await serve();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(fakeApp.log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) as unknown }),
+      expect.stringContaining('simulated: advisory lock table unreachable'),
+    );
+  });
+
+  it('sigint-clears-the-timer-so-no-further-rebuild-fires-after-shutdown', async () => {
+    env.LEOPARD_INDEX_REFRESH_INTERVAL_MS = 1000;
+    const rebuildSpy = vi
+      .spyOn(relationIndexModule, 'rebuildRelationMembershipIndex')
+      .mockResolvedValue({} as never);
+    const { handlers } = setUp();
+
+    await serve();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(rebuildSpy).toHaveBeenCalledTimes(1);
+
+    handlers.get('SIGINT')?.();
+    await vi.advanceTimersByTimeAsync(0); // let the async shutdown handler's synchronous clearInterval run
+
+    await vi.advanceTimersByTimeAsync(5000); // well past several more would-be ticks
+    expect(rebuildSpy).toHaveBeenCalledTimes(1); // unchanged — the timer was cleared, not just ignored
   });
 });

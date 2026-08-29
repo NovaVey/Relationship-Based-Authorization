@@ -2754,3 +2754,19 @@ Full account, every independent re-verification, and the one real defect this ve
 PR #115's `lint-and-typecheck` job failed with 86 ESLint errors against `@authzed/authzed-node` members — never reproduced locally, since `tools/rebac-benchmark/`'s own `node_modules` was already present here. Root-caused by reproducing CI's exact condition (removing that directory's `node_modules`, re-running `eslint .`): CI's root `npm ci` never installs this genuinely separate npm package's own dependencies, so typed-lint can't resolve the SDK types and cascades into `no-unsafe-*` errors. Fixed with one added `npm ci` step scoped to `tools/rebac-benchmark/` in `ci.yml`'s `lint-and-typecheck` job. Also reviewed a CodeQL `js/file-access-to-http` (CWE-200) finding on `authz-adapter.ts`'s schema-publish call — a real flow (local schema file → `fetch`) but a false positive in this context (a public, checked-in fixture published to this same harness's own localhost server, not attacker-influenced), suppressed with an in-code `// codeql[...]` comment carrying the reasoning rather than dismissed silently.
 
 Full account: `docs/DECISIONS.md` D-166.
+
+## Closing D-165's own "Revisit if" list: five real gaps, five real closes
+
+**Owner:** main agent (items 1, 2, 4, 5, direct) + soundness-engineer (item 3, dispatched and independently re-verified).
+
+**1 — Leopard's own in-process refresh interval, wired up.** `LEOPARD_INDEX_REFRESH_INTERVAL_MS` was parsed but never consulted; `authz serve` now starts a background timer when it's nonzero, layered safely alongside any external cron, not gated on `LEOPARD_INDEX_ENABLED`. Fail-checked live (a temporarily-disabled version made 3/4 new tests fail as expected); a `git checkout --` mistake mid-fail-check briefly wiped the entire uncommitted fix, caught immediately and recovered by rewriting from the already-reviewed diff — disclosed in full, not hidden.
+
+**2 — the benchmark harness's own tests, now in CI.** A new `rebac-benchmark` job (its own `npm ci`/`typecheck`/`test`, confirmed to need no root install) closes the gap D-166 itself named.
+
+**3 — DST's own tombstone-visibility question, confirmed real and fixed.** `tupleDeleteHandler` used to splice a deleted row physically out of the shared array at commit — provably wrong against real Postgres `REPEATABLE READ` semantics (an earlier-anchored snapshot must still see a row a later transaction deletes). Confirmed live with a new dedicated test, fixed by mirroring the insert side's own `commitSeq`-tagging pattern (a `deletedAtCommitSeq` tombstone plus a shared `isTupleVisible` predicate across all 7 real call sites), independently re-verified and the fail-check personally reproduced a second time by the main agent via `git stash`/`git stash pop`.
+
+**4 — a real TLC run, not only the unofficial stand-in.** GitHub Releases turned out reachable this session; the real, official TLC (v2.19) confirmed the exact same numbers `tla-checker` had already reported (103,052 clean states; a genuine counterexample on the weakened variant), closing D-165's own "no real TLC run exists" gap outright.
+
+**5 — a larger, pinned-version benchmark rerun.** `openfga@v1.19.0`/`spicedb@v1.56.1` pinned explicitly; OpenFGA/SpiceDB bumped to `n=50` matching this repo's own precedent; authz deliberately stayed at `n=10` — a disclosed, measured consequence of its own real rate limit, not a shortcut. Same qualitative findings as the first run, now on more evidence.
+
+Full account, every independent re-verification, and the one real mistake made and disclosed along the way: `docs/DECISIONS.md` D-167.

@@ -601,6 +601,94 @@ cache), not with any staleness: every authz trial still resolved on its
 very first poll, the same "always current by construction" behavior
 OpenFGA showed.
 
+## Rerun, 2026-08-29: larger `n`, pinned exact versions
+
+A later session re-ran this harness, closing two of the gaps the table
+below itself named as open: `go install ...@latest`'s floating versions
+were pinned to the exact same versions the first run happened to resolve
+(`openfga@v1.19.0`, `spicedb@v1.56.1` — confirmed identical, not merely
+similar, via `go install`'s own `go: downloading github.com/openfga/openfga
+v1.19.0`-style resolution log), and `--runs-per-depth` was raised from 3 to
+**50** for OpenFGA and SpiceDB, matching `scripts/benchmark-check-depth.ts`'s
+own `n=50` precedent this document's own citability table names as the
+target.
+
+**authz's own `n` deliberately stayed at 10, not 50 — a disclosed
+asymmetry, not an oversight or a shortcut.** `POST /tuples`'s 20/minute
+rate limit (no override, see above) means the tuples a full 50-run sweep
+across depths 1/3/5/10 needs (≈1,150 individual writes) would cost the
+better part of an hour of real backoff sleep; the 10-run sweep run here
+already needed ~13 real minutes of rate-limited writing (confirmed live:
+11 separate `429 rate_limited` backoff waits before the write, timestamped
+in the harness's own console output). OpenFGA and SpiceDB have no
+equivalent limit, so their own reruns cost seconds, not minutes — this is
+a genuine, disclosed property of the system being measured, not a
+benchmark artifact to paper over.
+
+**Environment** — same sandbox, same day, only the versions below changed
+from the table above:
+
+|         |                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Go      | go1.26.7 linux/amd64 (auto-selected by `go install`'s own toolchain resolution for `openfga@v1.19.0`'s stated `go >= 1.25.7` requirement — the first run's go1.24.7 predates this and was never re-tested against it)                                                                                                                                                                             |
+| OpenFGA | v1.19.0, pinned explicitly (`go install .../openfga@v1.19.0`), `--datastore-engine memory` — its own `openfga version` reports `dev`/`unknown` regardless of the pinned tag (a known quirk of a plain `go install`, which carries no release-time `ldflags`-embedded version string); the pinned version is the one `go`'s own module resolution log actually fetched, not a self-reported string |
+| SpiceDB | v1.56.1, pinned explicitly (`go install .../spicedb@v1.56.1`), `--datastore-engine memory`, dispatch caches disabled — `spicedb version` correctly self-reports `v1.56.1`                                                                                                                                                                                                                         |
+
+**Cross-validation — unchanged, all three engines still agree on all 8
+canonical checks** against their own translated schema (authz, openfga,
+spicedb: 8/8 each) — the identical result as the first run, now at a
+larger `n`.
+
+**Depth-latency (`--depths 1,3,5,10 --seed 42`, `--runs-per-depth 50` for
+openfga/spicedb, `--runs-per-depth 10` for authz — see the asymmetry
+disclosed above):**
+
+| Engine  | Depth | n   | p50     | p95     | p99     | max     |
+| ------- | ----- | --- | ------- | ------- | ------- | ------- |
+| openfga | 1     | 50  | 1.70ms  | 2.46ms  | 2.96ms  | 2.96ms  |
+| openfga | 3     | 50  | 1.68ms  | 2.45ms  | 2.97ms  | 2.97ms  |
+| openfga | 5     | 50  | 1.91ms  | 2.58ms  | 4.21ms  | 4.21ms  |
+| openfga | 10    | 50  | 2.40ms  | 3.47ms  | 5.63ms  | 5.63ms  |
+| spicedb | 1     | 50  | 1.30ms  | 1.49ms  | 1.63ms  | 1.63ms  |
+| spicedb | 3     | 50  | 1.62ms  | 1.92ms  | 4.37ms  | 4.37ms  |
+| spicedb | 5     | 50  | 2.00ms  | 2.32ms  | 8.02ms  | 8.02ms  |
+| spicedb | 10    | 50  | 3.76ms  | 4.84ms  | 6.07ms  | 6.07ms  |
+| authz   | 1     | 10  | 7.77ms  | 9.30ms  | 9.30ms  | 9.30ms  |
+| authz   | 3     | 10  | 11.26ms | 14.49ms | 14.49ms | 14.49ms |
+| authz   | 5     | 10  | 15.26ms | 24.81ms | 24.81ms | 24.81ms |
+| authz   | 10    | 10  | 18.41ms | 33.03ms | 33.03ms | 33.03ms |
+
+Same qualitative shape as the first run: OpenFGA/SpiceDB check latency
+stays in the low single-digit milliseconds across depth (in-memory
+datastore, no separate storage round trip); authz's own HTTP-plus-Postgres
+round trip costs more, growing with depth exactly as README.md's own
+in-process `performCheck` numbers already predict — this is the identical,
+already-disclosed factor from the first run's own analysis (see above),
+not a new finding.
+
+**Consistency probe — the larger `n=10` trial count for OpenFGA/SpiceDB
+makes the same finding sharper, not different:**
+
+| Engine  | Trials (ms)                                                            |
+| ------- | ---------------------------------------------------------------------- |
+| openfga | 1.2, 1.1, 1.3, 1.2, 2.3, 1.5, 1.2, 1.3, 1.3, 1.2                       |
+| spicedb | 3168.5, 1.2, 4994.2, 1.2, 4995.1, 1.3, 4995.4, 1.0, 5001.7, 1.0        |
+| authz   | 4.8, 4.4, 4.7, 4.6, 4.1 (5 trials — see the asymmetry disclosed above) |
+
+SpiceDB's own alternating pattern — roughly every other trial landing at
+~5 seconds, the rest sub-2ms — is now visible across 10 trials instead of
+3, and matches its own documented revision-quantization window exactly:
+whether a given write happens to land just before or just after that
+window's own boundary determines which side of the ~5-second gap that
+trial falls on. OpenFGA stayed uniformly sub-3ms across all 10 trials;
+authz stayed uniformly sub-5ms across all 5, both consistent with
+"resolves on the first poll, every time" — the same real distinction the
+first run's smaller sample already found, now with more evidence behind
+it.
+
+Raw JSON for both reruns: `tools/rebac-benchmark/results/1788033420009-openfga_spicedb.json`,
+`tools/rebac-benchmark/results/1788034161801-authz.json`.
+
 ## What would make this citable outside this project
 
 Explicit, so a reader can see exactly what's done versus what's still a
@@ -612,8 +700,8 @@ rough draft:
 | Workload generation seeded/reproducible                | **Done** — `src/workload.ts`'s `depthChainWorkload(seed, depths, runsPerDepth)`; same seed always produces byte-identical tuples/checks                                                                                                                                                                                                                                           |
 | Hardware/environment disclosed                         | **Done** — see table above                                                                                                                                                                                                                                                                                                                                                        |
 | Raw data available, not just a summary                 | **Done** — `tools/rebac-benchmark/results/*.json`, one file per run, every individual latency sample                                                                                                                                                                                                                                                                              |
-| Exact engine versions pinned                           | **Not done** — `go install ...@latest` floats; a citable run should pin `@v1.19.0`/`@v1.56.1` explicitly (or whatever versions are current when it's rerun) and record them, not resolve them implicitly                                                                                                                                                                          |
-| Sample size large enough for stable percentiles        | **Not done** — `n=3`/depth here; this repo's own `scripts/benchmark-check-depth.ts` precedent uses `n=50`                                                                                                                                                                                                                                                                         |
+| Exact engine versions pinned                           | **Done, as of the 2026-08-29 rerun** — `go install .../openfga@v1.19.0`, `go install .../spicedb@v1.56.1`, explicit, not `@latest`; see "Rerun" above                                                                                                                                                                                                                             |
+| Sample size large enough for stable percentiles        | **Partially done, as of the 2026-08-29 rerun** — OpenFGA/SpiceDB now at `n=50`, matching `scripts/benchmark-check-depth.ts`'s own precedent exactly; authz stayed at `n=10` (up from 3, but not 50) because of its own real, disclosed rate-limit cost — see "Rerun" above for why that asymmetry is a finding, not a shortcut                                                    |
 | Dedicated, isolated hardware (no shared sandbox noise) | **Not done** — this ran on a shared 4-vCPU sandbox with all three engines and the harness itself contending for the same cores                                                                                                                                                                                                                                                    |
 | Concurrent/sustained-load behavior                     | **Not done** — sequential checks only; see "Revisit if"                                                                                                                                                                                                                                                                                                                           |
 | Independent review of the schema translations          | **Not done** — translated and cross-validated by the same effort that designed the benchmark; an independent reviewer re-deriving the same three schemas from the same source and confirming byte-for-byte (or behaviorally-equivalent) agreement would close this the way `docs/FINDINGS.md`'s own third-party survey was self-validated against the real engine, never asserted |

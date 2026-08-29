@@ -120,6 +120,43 @@ jobs:
       - run: npm ci
       - run: npm run test:integration
 
+  # tools/rebac-benchmark/'s own hygiene check — a genuinely separate npm
+  # package (see its own tsconfig.json's "Deliberately standalone" comment:
+  # no cross-boundary import of root src/, so this job needs neither the
+  # root `npm ci` nor to run inside the same job as the root lint/typecheck
+  # steps above, unlike that job's own `tools/rebac-benchmark` install step,
+  # which exists only so root-level `eslint .`'s nested-config discovery can
+  # resolve this directory's own SDK types). Its 11 unit tests
+  # (`prng.test.ts`/`workload.test.ts`) are pure logic — no network calls,
+  # no external servers, no Postgres — so running them on every PR costs
+  # nothing and closes a real, previously-disclosed gap
+  # (`docs/DECISIONS.md`): this suite existed and passed locally since this
+  # tool's first commit but was never wired into CI at all, unlike every
+  # other piece of shipped code in this repo. Not added to the required
+  # status checks list (`docs/github-governance.md` Step 2) — same
+  # deliberately-manual promotion posture every other advisory job here
+  # already documents; this is a new job, not a rename, so no branch-
+  # protection update is needed either way.
+  rebac-benchmark:
+    name: rebac-benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: tools/rebac-benchmark/package-lock.json
+
+      - run: npm ci
+        working-directory: tools/rebac-benchmark
+
+      - run: npm run typecheck
+        working-directory: tools/rebac-benchmark
+      - run: npm test
+        working-directory: tools/rebac-benchmark
+
   # Advisory only: continue-on-error means this job never blocks a merge.
   # Under this repo's "Standard" governance tier (see docs/github-governance.md)
   # it is intentionally NOT added to the required status checks list, so a
