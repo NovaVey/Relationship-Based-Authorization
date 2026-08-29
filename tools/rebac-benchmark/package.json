@@ -1,0 +1,25 @@
+{
+  "name": "rebac-benchmark",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Neutral, reproducible check-latency and consistency benchmark comparing this repo's own authz service against OpenFGA and SpiceDB on an identical workload.",
+  "type": "module",
+  "scripts": {
+    "bench:authz": "tsx src/runner.ts --engine authz",
+    "bench:openfga": "tsx src/runner.ts --engine openfga",
+    "bench:spicedb": "tsx src/runner.ts --engine spicedb",
+    "bench:all": "tsx src/runner.ts --engine authz,openfga,spicedb",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@authzed/authzed-node": "^1.6.1",
+    "@openfga/sdk": "^0.9.7",
+    "@openfga/syntax-transformer": "^0.2.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

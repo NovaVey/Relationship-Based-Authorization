@@ -1,0 +1,146 @@
+{
+  "args": {
+    "engines": [
+      "authz"
+    ],
+    "depths": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "runsPerDepth": 3,
+    "seed": 42,
+    "consistencyTrials": 3
+  },
+  "results": [
+    {
+      "engine": "authz",
+      "crossValidation": [
+        {
+          "note": "dana -> eng_backend_interns#member -> eng_backend#member -> eng#member -> eng_docs#editor -> eng_handbook#edit (5 hops, two-level group nesting)",
+          "expected": true,
+          "actual": true
+        },
+        {
+          "note": "alice is a direct eng#member -> eng_docs#editor -> eng_handbook#edit (3 hops)",
+          "expected": true,
+          "actual": true
+        },
+        {
+          "note": "org.view = member - banned; mallory is a member but also banned (exclusion)",
+          "expected": false,
+          "actual": false
+        },
+        {
+          "note": "sensitive_review = (viewer|edit) & sensitive_reviewer; carol has both (intersection, positive case)",
+          "expected": true,
+          "actual": true
+        },
+        {
+          "note": "erin has viewer via group:finance but not sensitive_reviewer (intersection, negative case)",
+          "expected": false,
+          "actual": false
+        },
+        {
+          "note": "document:roadmap has no parent folder — direct viewer grant only, depth 0",
+          "expected": true,
+          "actual": true
+        },
+        {
+          "note": "compounds 2 group-nesting hops with 2 folder-inheritance hops (eng_backend_docs has no direct grants of its own)",
+          "expected": true,
+          "actual": true
+        },
+        {
+          "note": "negative control on the union side: mallory has no path into group:eng at all",
+          "expected": false,
+          "actual": false
+        }
+      ],
+      "crossValidationAllPass": true,
+      "depthLatenciesMs": {
+        "1": [
+          7.289065999997547,
+          9.480884999997215,
+          8.037178999999014
+        ],
+        "3": [
+          11.106540000000678,
+          18.937723000002734,
+          11.315193000002182
+        ],
+        "5": [
+          14.085382000004756,
+          13.29859600000782,
+          13.006208999999217
+        ],
+        "10": [
+          22.659503000002587,
+          19.621249000017997,
+          19.07931300002383
+        ]
+      },
+      "depthSummary": [
+        {
+          "depth": 1,
+          "summary": {
+            "n": 3,
+            "min": 7.289065999997547,
+            "p50": 8.037178999999014,
+            "p95": 9.480884999997215,
+            "p99": 9.480884999997215,
+            "max": 9.480884999997215,
+            "mean": 8.26904333333126
+          }
+        },
+        {
+          "depth": 3,
+          "summary": {
+            "n": 3,
+            "min": 11.106540000000678,
+            "p50": 11.315193000002182,
+            "p95": 18.937723000002734,
+            "p99": 18.937723000002734,
+            "max": 18.937723000002734,
+            "mean": 13.786485333335198
+          }
+        },
+        {
+          "depth": 5,
+          "summary": {
+            "n": 3,
+            "min": 13.006208999999217,
+            "p50": 13.29859600000782,
+            "p95": 14.085382000004756,
+            "p99": 14.085382000004756,
+            "max": 14.085382000004756,
+            "mean": 13.463395666670598
+          }
+        },
+        {
+          "depth": 10,
+          "summary": {
+            "n": 3,
+            "min": 19.07931300002383,
+            "p50": 19.621249000017997,
+            "p95": 22.659503000002587,
+            "p99": 22.659503000002587,
+            "max": 22.659503000002587,
+            "mean": 20.453355000014806
+          }
+        }
+      ],
+      "consistencyProbe": {
+        "trialMs": [
+          4.790619999985211,
+          4.222406000015326,
+          4.535000999982003
+        ],
+        "timeouts": 0
+      },
+      "errors": []
+    }
+  ],
+  "generatedAt": "2026-08-29T18:14:54.770Z"
+}

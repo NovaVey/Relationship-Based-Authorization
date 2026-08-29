@@ -1,0 +1,41 @@
+# NOTE: the running harness actually loads openfga-combined.fga (this
+# file's content plus openfga-example.fga's, as one model version — see
+# that file's own doc comment for why). This file stays as the
+# standalone, readable reference translation of just the depth-chain type.
+#
+# The depth-scaling check-latency workload's OpenFGA model — deliberately
+# a SEPARATE, minimal model from openfga-example.fga, uploaded as its own
+# authorization-model version in its own store. It exists to answer one
+# question only: how does raw check latency grow with permission-chain
+# depth, holding everything else fixed?
+#
+# A plain tuple-to-userset chain (`parent: [bench_node]`), NOT a
+# nested-group-membership chain (`member: [bench_node#member]`) —
+# `src/workload.ts`'s own `depthChainWorkload` doc comment covers why:
+# OpenFGA's schema validator rejects a tupleset relation (the left side
+# of `X from Y`) from carrying any userset-typed subject option at all,
+# confirmed live against this harness's own OpenFGA instance. This shape
+# instead mirrors `folder.parent->edit`/`document.parent->edit` from
+# openfga-example.fga — already proven to work identically across all
+# three engines — at a controlled, varying depth.
+#
+# One deliberate divergence from scripts/benchmark-check-depth.ts, spelled
+# out here and in tools/rebac-benchmark/README.md: that script republishes
+# a freshly-named namespace on every run (schema publish/versioning is a
+# real, uniquely-authz feature — see docs/DECISIONS.md D-149). OpenFGA and
+# SpiceDB models are not meant to be recreated per run at that frequency,
+# so this benchmark instead defines `bench_node` ONCE per engine and
+# isolates concurrent/repeat runs with unique object ids
+# (`node_<runId>_<i>`) instead of a unique type.
+model
+  schema 1.1
+
+type user
+
+type bench_node
+  relations
+    define viewer: [user]
+    define parent: [bench_node]
+    # bench_node.view = viewer | parent->view (this repo's DSL spelling:
+    # folder.view = viewer | edit | parent->view, same tuple-to-userset shape)
+    define view: viewer or view from parent
