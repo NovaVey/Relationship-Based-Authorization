@@ -112,8 +112,14 @@ describe('differential fuzzing — production check engine vs. the naive referen
  * The Leopard-index Phase A "third comparison arm," `relationIndex: 'cold'`
  * mode (`docs/LEOPARD-INDEX-PROPOSAL.md`, "Test plan — the third comparison
  * arm") — the always-on, PR-speed companion to the standard 5,000-query run
- * above, at the SAME query budget/seed-count scale (never the nightly
- * "many-seeds" scale a separate, dedicated file owns).
+ * above, at the SAME query budget/seed-count scale.
+ *
+ * **Correction (2026-08-29, documentation audit):** this comment used to
+ * claim the nightly "many-seeds" `relationIndex: 'warm'` scale was owned by
+ * "a separate, dedicated file." No such file exists — it was planned in
+ * `docs/LEOPARD-INDEX-PROPOSAL.md`'s test plan but never built; see that
+ * doc's own correction to the same row. This `'cold'` block is, today, the
+ * only `relationIndex` coverage this fuzz harness actually ships.
  *
  * **What `'cold'` proves, and why it has to be run for real, not just
  * reasoned about.** `'cold'` pins every `productionCheck` call this run

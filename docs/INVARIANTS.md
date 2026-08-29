@@ -339,12 +339,25 @@ This is deliberately _not_ a second, hand-modeled evaluator for what
 intersection/exclusion mean — the real engine already knows, and asking
 it directly for each candidate subset is both simpler and more
 trustworthy than a bespoke non-monotone semantics this tool would have to
-get exactly right on its own. The real fallback for the general,
-unbounded case is SMT (out of scope for v1); `docs/DECISIONS.md` D-118
-has the full design, the tractability tradeoffs behind this project's own
-default bound, and an encoding sketch for what a future SMT-backed phase
-would need to handle — recursion, in particular, being the actual
-obstacle a bare SMT call doesn't solve by itself.
+get exactly right on its own. `docs/DECISIONS.md` D-118 has the full
+design behind this section, the tractability tradeoffs behind this
+project's own default bound, and an encoding sketch for what a real
+SMT-backed phase would need to handle — recursion, in particular, being
+the actual obstacle a bare SMT call doesn't solve by itself.
+
+**Update: the SMT-backed phase D-118 sketched is no longer future work —
+it shipped, and it now runs ahead of bounded search, not instead of it.**
+`tools/schema-verifier/src/smt/` (D-151) added a first SMT tier using
+`z3-solver` directly; `tools/schema-verifier/src/smt/chc.ts` (D-153) added
+a second tier encoding the schema as Horn clauses and handing it to Z3's
+PDR/Spacer fixpoint engine — solving exactly the recursion obstacle named
+above, which a bare SMT call doesn't solve by itself. The real pipeline
+today (`tools/schema-verifier/src/validate/check-and-validate.ts`) is:
+try the SMT tier, then the CHC tier, and only fall through to the bounded
+search this section describes as a last resort when both decline. Several
+fixtures that used to report `proof: 'bounded'` now report `proof: 'exact'`
+from one of the two SMT tiers instead — see `docs/DECISIONS.md` D-151/D-153
+for the full design and verification.
 
 ### Testing the verifier itself (§8)
 
