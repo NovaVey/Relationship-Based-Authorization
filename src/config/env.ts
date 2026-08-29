@@ -187,6 +187,34 @@ export const EnvSchema = z.object({
   // service, per `docs/DECISIONS.md` D-104) never constructs a Redis client
   // at all.
   REDIS_URL: optionalString(),
+
+  // Leopard-style nested-group membership index (opt-in) —
+  // docs/LEOPARD-INDEX-PROPOSAL.md. Accelerates mechanism 2
+  // (sqlRelationMembershipWithWitness, src/resolve/production/resolver.ts)
+  // for PINNED checks only, in this phase. 'false' (the default) means
+  // resolve() never consults the index tables at all — the two new tables
+  // migration 0010 creates sit empty and unread.
+  LEOPARD_INDEX_ENABLED: optionalEnum(z.enum(['true', 'false']).default('false')),
+  // Reserved for Phase B (unpinned-check acceleration) — currently
+  // informational only, no code path in this phase reads it: Phase A never
+  // consults the index for an unpinned check at all (see the proposal's own
+  // "Scope" section), so there is no TTL-bounded staleness for this value
+  // to gate yet. Defined now anyway, in the same schema, the same way this
+  // file's own NODE_ENV field above is shipped and explicitly disclosed as
+  // "currently informational only" ahead of the day something actually
+  // reads it.
+  LEOPARD_INDEX_MAX_STALENESS_MS: optionalNumber(
+    z.coerce.number().int().nonnegative().default(30_000),
+  ),
+  // >0 would make `authz serve` run its own background Leopard-index
+  // refresh loop at this interval, in addition to (never instead of) any
+  // external scheduler an operator also has running `authz leopard
+  // refresh` — both would funnel through the same advisory-lock-guarded
+  // `rebuildRelationMembershipIndex`, so layering both is safe, only
+  // possibly redundant. 0 (the default) means no such loop runs.
+  LEOPARD_INDEX_REFRESH_INTERVAL_MS: optionalNumber(
+    z.coerce.number().int().nonnegative().default(0),
+  ),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

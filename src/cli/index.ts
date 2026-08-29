@@ -23,6 +23,7 @@ import { serve } from './commands/serve.js';
 import { auditVerify, auditAnchor } from './commands/audit.js';
 import { apikeyCreate, apikeyRevoke, apikeyList } from './commands/apikey.js';
 import { privescCli } from './commands/privesc.js';
+import { leopardRefresh, leopardStatus } from './commands/leopard.js';
 
 const packageName = 'authz';
 const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
@@ -276,6 +277,40 @@ audit
   )
   .action(async (object: string, relation: string, options: { expected?: string }) => {
     await privescCli(object, relation, options);
+  });
+
+// The Leopard index (Phase A, docs/LEOPARD-INDEX-PROPOSAL.md) — an opt-in,
+// offline-computed acceleration structure for pinned relation-membership
+// checks. See src/cli/commands/leopard.ts's own top-of-file doc comment
+// for the full CLI contract and exit-code table.
+const leopard = program
+  .command('leopard')
+  .description(
+    'Leopard-index (nested-group membership acceleration) operational commands — see docs/LEOPARD-INDEX-PROPOSAL.md',
+  );
+
+leopard
+  .command('refresh')
+  .description(
+    'Rebuild the Leopard index from the current relation_tuples; runnable regardless of LEOPARD_INDEX_ENABLED',
+  )
+  .option(
+    '--dry-run',
+    'compute the rebuild for real and report the result, but roll back — nothing is persisted',
+  )
+  .option('--format <text|json>', 'output format (default: text)')
+  .action(async (options: { dryRun?: boolean; format?: string }) => {
+    await leopardRefresh(options);
+  });
+
+leopard
+  .command('status')
+  .description(
+    'Report the Leopard index freshness state — disabled, enabled-never-built, or enabled-built',
+  )
+  .option('--format <text|json>', 'output format (default: text)')
+  .action(async (options: { format?: string }) => {
+    await leopardStatus(options);
   });
 
 program

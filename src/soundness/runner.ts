@@ -51,7 +51,9 @@ import type {
 } from '../resolve/reference/resolver.js';
 import { productionCheck } from '../resolve/production/resolver.js';
 import type { ResolutionStep as ProductionResolutionStep } from '../resolve/production/resolver.js';
+import { rebuildRelationMembershipIndex } from '../store/relation-index.js';
 import { classifyResult, computeVerdict, type SoundnessVerdict } from './classify.js';
+import { classifyIndexDivergence } from './classify-index.js';
 import {
   generateFixture,
   generateRandomSeed,
@@ -186,6 +188,63 @@ export interface SoundnessRunOptions {
    * codebase; see that CLI file's top-of-file comment).
    */
   onProgress?: (completed: number, total: number) => void;
+  /**
+   * The Leopard-index third comparison arm (`docs/LEOPARD-INDEX-
+   * PROPOSAL.md`, "Test plan — the third comparison arm"). Default `'off'`
+   * — byte-for-byte unchanged behavior when omitted: no `pinToken` is ever
+   * computed, `checkAllQueries` makes exactly the one unpinned
+   * `productionCheck` call per query it always has, and `CheckedQuery
+   * .productionIndexAllowed`/`productionIndexPath`/`productionIndexCertain`
+   * are never populated.
+   *
+   * **This entire comparison arm only means anything for *pinned* checks**
+   * (`docs/LEOPARD-INDEX-PROPOSAL.md`'s own "Critical precondition" —
+   * `resolve()`'s Leopard-index short-circuit is gated behind
+   * `ctx.relationIndexFloor !== undefined`, which `productionCheck` only
+   * ever sets from its own `atToken !== undefined` branch). Every query this
+   * harness has ever run is, by default, unpinned — left as `'off'`, a
+   * `'cold'`/`'warm'` run would never actually reach
+   * `lookupRelationMembershipIndex` at all, and `indexQueriesHit` would read
+   * `0` forever for the wrong reason (never given the chance, not because
+   * the index correctly missed), making the whole mode silently vacuous.
+   * `'cold'`/`'warm'` therefore both pin every `productionCheck` call this
+   * run makes to a real token — see `pinToken`'s own computation in
+   * `runSoundnessFuzz` for exactly how, and `checkAllQueries`'s own doc
+   * comment for exactly what each mode threads through:
+   *
+   * - `'off'` — today's exact code path. Nothing new touched.
+   * - `'cold'` — every `productionCheck` call this run makes is pinned
+   *   (`atToken: pinToken`, the fixture's own post-write anchor token — a
+   *   plain `select max(token) ... from write_log` issued on this harness's
+   *   own `pool`, **not** a rebuild) and passes `useRelationIndex: true`.
+   *   `rebuildRelationMembershipIndex` is never called for this fixture, so
+   *   `relation_membership_index_state.watermark_token` is still its `0`
+   *   default — genuinely below `pinToken` — so
+   *   `lookupRelationMembershipIndex` is genuinely reached on every single
+   *   call and genuinely misses every single time, falling through to the
+   *   unmodified live CTE. This is the executed, not merely inspected, proof
+   *   that "a deployment that turns the flag on but has never rebuilt is
+   *   provably unaffected." `indexQueriesHit` must read exactly `0` for this
+   *   mode — a nonzero count would mean this arm is, contrary to its whole
+   *   premise, actually consulting real index state, which would itself be
+   *   a bug in this harness, not in the index.
+   * - `'warm'` — after the fixture's tuples are written (and any expiring
+   *   ones backdated), `rebuildRelationMembershipIndex(pool)` is called
+   *   once, with zero writes afterward (Candidate A's own precondition,
+   *   `docs/LEOPARD-INDEX-PROPOSAL.md`); `pinToken` is set to exactly that
+   *   call's own returned `watermarkToken` — "pinned to the rebuild's own
+   *   watermark" and "pinned to this harness's own anchor" are the same
+   *   call, never two numbers that merely happen to agree. Every query is
+   *   then checked *twice*, both pinned to the identical `pinToken`: once
+   *   with `useRelationIndex: false` (`productionAllowed`, today's exact
+   *   field) and once with `useRelationIndex: true`
+   *   (`productionIndexAllowed`, new). `indexQueriesHit` must read `> 0` for
+   *   this mode — the direct, executable fix for the vacuity gap named
+   *   above: even with `pinToken` wired correctly today, a future edit that
+   *   accidentally stops threading it through must not be able to silently
+   *   regress back into a mode that reports `sound` while testing nothing.
+   */
+  relationIndex?: 'off' | 'cold' | 'warm';
 }
 
 /**
@@ -259,6 +318,36 @@ export interface SoundnessRunResult {
   criticalNamespaceFalseGrants: number;
   verdict: SoundnessVerdict;
   divergences: DivergenceRecord[];
+  /**
+   * The Leopard-index third comparison arm. Optional at the type level
+   * only for backward compatibility with pre-existing `SoundnessRunResult`
+   * literals (test fixtures/mocks predating this feature that construct
+   * one without these three fields) — `runSoundnessFuzz` itself always
+   * populates all three on every real result it returns, with `0` whenever
+   * `options.relationIndex` is `'off'` or omitted, exactly like
+   * `falseGrantCount` reporting `0` on a run with no divergences at all.
+   * `docs/DECISIONS.md` D-006's own discipline applies here too, one level
+   * up: this is never folded into `falseGrantCount` itself, since the two
+   * measure different things (agreement with the independent reference
+   * oracle, vs. agreement between the same production engine's own
+   * accelerated and unaccelerated paths) — see `classify-index.ts`'s own
+   * doc comment.
+   */
+  indexFalseGrantCount?: number;
+  /** See `indexFalseGrantCount`'s own doc comment — the non-blocking, "reported never blocking on its own" direction, and the same "optional at the type level only" backward-compatibility note. */
+  indexFalseDenyCount?: number;
+  /**
+   * The non-vacuity counter — mirrors this project's own D-140
+   * `totalAllowed0True > 0` fix for exactly this class of gap. Count of
+   * `productionCheck` calls made with `useRelationIndex: true` (this run's
+   * `'cold'` call, or `'warm'`'s second call) that reported
+   * `ProductionCheckResult.indexHit === true` — i.e. the index was not just
+   * consulted, but actually served a hit, at least once during that check's
+   * whole walk. Always `0` when `relationIndex` is `'off'`. See
+   * `indexFalseGrantCount`'s own doc comment for why this is optional at
+   * the type level.
+   */
+  indexQueriesHit?: number;
 }
 
 const DEFAULT_TRIGGER: NonNullable<SoundnessRunOptions['trigger']> = 'cli';
@@ -304,6 +393,30 @@ const DEFAULT_TRIGGER: NonNullable<SoundnessRunOptions['trigger']> = 'cli';
  */
 const EXPIRY_MARGIN_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * The Leopard-index `'cold'` mode's own pin token source
+ * (`SoundnessRunOptions.relationIndex`, `docs/LEOPARD-INDEX-PROPOSAL.md`,
+ * "Test plan — the third comparison arm"): the fixture's own post-write
+ * anchor — the highest `write_log.token` this harness's own `pool` can
+ * observe once every fixture tuple has been written (and any expiring ones
+ * backdated). **The same query *text*** `src/resolve/production/
+ * resolver.ts`'s private, non-exported `ANCHOR_QUERY_TEXT` uses, declared
+ * separately here rather than imported — that constant cannot be imported
+ * without widening `resolver.ts`'s own export surface, an undisclosed
+ * change this proposal's own "`sqlRelationMembershipWithWitness` is never
+ * modified — not one line" framing does not cover (see `src/store/
+ * relation-index.ts`'s own `REBUILD_WATERMARK_QUERY_TEXT` doc comment for
+ * the identical tradeoff, made the identical way, for the rebuild's own
+ * watermark read). Deliberately **not** `coalesce`d, unlike
+ * `REBUILD_WATERMARK_QUERY_TEXT` — this call always runs after this
+ * harness's own fixture tuples have already been written, so `write_log`
+ * can never be empty at this point; a `null` here would indicate a real
+ * bug in call ordering, not an expected empty-database case, so it's
+ * handled explicitly (see the call site) rather than silently coalesced
+ * away.
+ */
+const SOUNDNESS_PIN_TOKEN_QUERY_TEXT = 'select max(token) as max_token from write_log';
+
 interface CheckedQuery {
   query: GeneratedQuery;
   referenceAllowed: boolean;
@@ -312,6 +425,25 @@ interface CheckedQuery {
   referencePath?: ReferenceResolutionStep;
   /** Present iff `productionAllowed` — see `DivergenceRecord`'s own doc comment. */
   productionPath?: ProductionResolutionStep;
+  /**
+   * The Leopard-index third comparison arm — populated only in `'warm'`
+   * mode (`SoundnessRunOptions.relationIndex`), never `'off'` or `'cold'`.
+   * `'cold'` makes exactly one `productionCheck` call per query (pinned,
+   * `useRelationIndex: true`, populating `productionAllowed` above with
+   * that call's own result — see `checkAllQueries`'s own doc comment for
+   * why `'cold'` doesn't need a second call at all); only `'warm'` makes the
+   * *second*, index-accelerated call this field reports, against the
+   * identical pinned snapshot `productionAllowed` (above) was itself
+   * computed against for that same query. Classified against
+   * `productionAllowed`, never `referenceAllowed`, by `classify-index.ts`'s
+   * `classifyIndexDivergence` — a deliberately different, independent
+   * comparison from `classify.ts`'s own reference-vs-production one.
+   */
+  productionIndexAllowed?: boolean;
+  /** Present iff `productionIndexAllowed` — same "present iff relevant" convention `productionPath` above uses. */
+  productionIndexPath?: ProductionResolutionStep;
+  /** The index-accelerated call's own `ProductionCheckResult.certain` — present iff `!productionIndexAllowed` (that field's own "present iff allowed is false" contract). */
+  productionIndexCertain?: boolean;
 }
 
 export interface BuildDivergenceRecordInput extends CheckedQuery {
@@ -386,6 +518,47 @@ export function buildDivergenceRecord(input: BuildDivergenceRecordInput): Diverg
  * task's own instructions are explicit that this must stay true — see
  * `EXPIRY_MARGIN_MS` for why a real, unsynchronized few-millisecond gap
  * between the two never matters).
+ *
+ * `relationIndex`/`pinToken` (`docs/LEOPARD-INDEX-PROPOSAL.md`, "Test plan —
+ * the third comparison arm"; `SoundnessRunOptions.relationIndex`'s own doc
+ * comment has the full per-mode reasoning) — `pinToken` is threaded through
+ * only when `relationIndex !== 'off'`; `runSoundnessFuzz` never even
+ * computes one otherwise. Per query:
+ *
+ * - `'off'` — exactly one `productionCheck(pool, ..., { maxDepth })` call,
+ *   byte-identical to this function's own behavior before this option
+ *   existed. `productionIndexAllowed` (`CheckedQuery`) is never populated.
+ * - `'cold'` — exactly one `productionCheck` call, `{ maxDepth, atToken:
+ *   pinToken, useRelationIndex: true }`, populating the same
+ *   `productionAllowed` field `'off'` populates (a genuinely different call
+ *   shape — pinned, index-enabled — feeding the one field this mode needs;
+ *   there is nothing to run a *second*, unaccelerated call against, since
+ *   this mode's whole point is "prove the index-enabled-but-never-built
+ *   path alone still falls all the way through to the live CTE and reports
+ *   the identical answer an unpinned call would"). `productionIndexAllowed`
+ *   is never populated for this mode either — see `CheckedQuery
+ *   .productionIndexAllowed`'s own doc comment for why `'cold'` doesn't need
+ *   a second call to prove its own claim.
+ * - `'warm'` — exactly two `productionCheck` calls, both `atToken:
+ *   pinToken`: first `{ useRelationIndex: false }` (`productionAllowed`),
+ *   then `{ useRelationIndex: true }` (`productionIndexAllowed`). **Run
+ *   sequentially, deliberately, never `Promise.all`** — both calls read the
+ *   identical already-committed, already-static snapshot, so ordering
+ *   cannot change either result, but running them concurrently would
+ *   silently double this function's own per-batch connection demand exactly
+ *   when `relationIndex !== 'off'`, reopening the same class of pool-
+ *   pressure hazard D-140/D-142/D-143 already had to close once, for a
+ *   different caller (`docs/LEOPARD-INDEX-PROPOSAL.md`'s own test-plan
+ *   section states this explicitly).
+ *
+ * Returns `indexQueriesHit` alongside the per-query results — a plain count
+ * of how many of the `productionCheck` calls actually made with
+ * `useRelationIndex: true` (the `'cold'` call, or `'warm'`'s second call)
+ * reported `ProductionCheckResult.indexHit === true` — i.e. the index was
+ * not just consulted, but actually returned a hit, at least once during that
+ * check's whole walk. `runSoundnessFuzz` uses this as the non-vacuity
+ * gate `docs/LEOPARD-INDEX-PROPOSAL.md` calls for (`'warm'` must see
+ * `> 0`; `'cold'` must see exactly `0`).
  */
 async function checkAllQueries(
   pool: Pool,
@@ -395,13 +568,23 @@ async function checkAllQueries(
   concurrency: number,
   maxDepth: number,
   expiryAnchor: Date,
+  relationIndex: NonNullable<SoundnessRunOptions['relationIndex']>,
+  pinToken: number | undefined,
   onProgress?: (completed: number, total: number) => void,
-): Promise<CheckedQuery[]> {
+): Promise<{ results: CheckedQuery[]; indexQueriesHit: number }> {
   const results: CheckedQuery[] = [];
+  let indexQueriesHit = 0;
+  // `exactOptionalPropertyTypes` — see `rowToTuple`'s (`src/store/tuples.ts`)
+  // identical "only spread it in when it has a real value" pattern:
+  // `pinToken` is `number | undefined`, but `ProductionCheckOptions.atToken`
+  // is `number`-or-absent, not `number | undefined` present. Computed once,
+  // here, since it's the same for every query this call makes — never
+  // per-query.
+  const pinTokenOption = pinToken !== undefined ? { atToken: pinToken } : {};
   for (let start = 0; start < queries.length; start += concurrency) {
     const batch = queries.slice(start, start + concurrency);
     const batchResults = await Promise.all(
-      batch.map(async (query): Promise<CheckedQuery> => {
+      batch.map(async (query): Promise<{ checked: CheckedQuery; indexHits: number }> => {
         const referenceResult = referenceCheck(
           schema,
           referenceTuples,
@@ -410,23 +593,86 @@ async function checkAllQueries(
           query.relationOrPermission,
           { maxDepth, now: expiryAnchor },
         );
+
+        if (relationIndex === 'off') {
+          const productionResult = await productionCheck(
+            pool,
+            query.subject,
+            query.object,
+            query.relationOrPermission,
+            { maxDepth },
+          );
+          return {
+            checked: {
+              query,
+              referenceAllowed: referenceResult.allowed,
+              productionAllowed: productionResult.allowed,
+              ...(referenceResult.allowed ? { referencePath: referenceResult.path } : {}),
+              ...(productionResult.allowed ? { productionPath: productionResult.path } : {}),
+            },
+            indexHits: 0,
+          };
+        }
+
+        if (relationIndex === 'cold') {
+          const productionResult = await productionCheck(
+            pool,
+            query.subject,
+            query.object,
+            query.relationOrPermission,
+            { maxDepth, ...pinTokenOption, useRelationIndex: true },
+          );
+          return {
+            checked: {
+              query,
+              referenceAllowed: referenceResult.allowed,
+              productionAllowed: productionResult.allowed,
+              ...(referenceResult.allowed ? { referencePath: referenceResult.path } : {}),
+              ...(productionResult.allowed ? { productionPath: productionResult.path } : {}),
+            },
+            indexHits: productionResult.indexHit === true ? 1 : 0,
+          };
+        }
+
+        // `relationIndex === 'warm'` — two calls, sequential (see this
+        // function's own doc comment for why never `Promise.all` here).
         const productionResult = await productionCheck(
           pool,
           query.subject,
           query.object,
           query.relationOrPermission,
-          { maxDepth },
+          { maxDepth, ...pinTokenOption, useRelationIndex: false },
+        );
+        const productionIndexResult = await productionCheck(
+          pool,
+          query.subject,
+          query.object,
+          query.relationOrPermission,
+          { maxDepth, ...pinTokenOption, useRelationIndex: true },
         );
         return {
-          query,
-          referenceAllowed: referenceResult.allowed,
-          productionAllowed: productionResult.allowed,
-          ...(referenceResult.allowed ? { referencePath: referenceResult.path } : {}),
-          ...(productionResult.allowed ? { productionPath: productionResult.path } : {}),
+          checked: {
+            query,
+            referenceAllowed: referenceResult.allowed,
+            productionAllowed: productionResult.allowed,
+            productionIndexAllowed: productionIndexResult.allowed,
+            ...(referenceResult.allowed ? { referencePath: referenceResult.path } : {}),
+            ...(productionResult.allowed ? { productionPath: productionResult.path } : {}),
+            ...(productionIndexResult.allowed
+              ? { productionIndexPath: productionIndexResult.path }
+              : {}),
+            ...(productionIndexResult.certain !== undefined
+              ? { productionIndexCertain: productionIndexResult.certain }
+              : {}),
+          },
+          indexHits: productionIndexResult.indexHit === true ? 1 : 0,
         };
       }),
     );
-    results.push(...batchResults);
+    for (const { checked, indexHits } of batchResults) {
+      results.push(checked);
+      indexQueriesHit += indexHits;
+    }
     // See `SoundnessRunOptions.onProgress`'s own doc comment — called once
     // per batch, after that batch's queries have actually finished
     // checking, never more often. `results.length` is always the true
@@ -435,7 +681,7 @@ async function checkAllQueries(
     // `concurrency` on the final iteration.
     onProgress?.(results.length, queries.length);
   }
-  return results;
+  return { results, indexQueriesHit };
 }
 
 /**
@@ -624,6 +870,10 @@ export async function runSoundnessFuzz(
   // = 1000), which D-070 proved makes an entire real `false_grant` bug
   // class undetectable by this harness at the standard configuration.
   const effectiveMaxDepth = options.maxDepth ?? env.CHECK_MAX_DEPTH;
+  // The Leopard-index third comparison arm — see `SoundnessRunOptions
+  // .relationIndex`'s own doc comment for the full per-mode reasoning.
+  // Resolved once, here, exactly like `effectiveMaxDepth` above.
+  const relationIndex = options.relationIndex ?? 'off';
 
   const fixture = generateFixture(seed, queryCount);
 
@@ -720,6 +970,46 @@ export async function runSoundnessFuzz(
       await backdateExpiringTuples(pool, expiredTuples, expiredBackdateExpiresAt);
     }
 
+    // The Leopard-index third comparison arm's own pin token — computed
+    // here, after every fixture tuple has been written *and* any expiring
+    // ones backdated (so a rebuild below sees the fixture's own final,
+    // already-backdated `expires_at` values, never the pre-backdate ones —
+    // see `SoundnessRunOptions.relationIndex`'s own doc comment for why
+    // `'cold'` never rebuilds at all, and `'warm'` rebuilds exactly once,
+    // right here, with zero writes after this point). `undefined` for
+    // `'off'` — never computed, matching this option's own "byte-for-byte
+    // unchanged behavior when omitted" contract.
+    let pinToken: number | undefined;
+    if (relationIndex === 'cold') {
+      const { rows: pinRows } = await pool.query<{ max_token: string | null }>(
+        SOUNDNESS_PIN_TOKEN_QUERY_TEXT,
+      );
+      const rawPinToken = pinRows[0]?.max_token;
+      if (rawPinToken === null || rawPinToken === undefined) {
+        // See `SOUNDNESS_PIN_TOKEN_QUERY_TEXT`'s own doc comment — this
+        // point is only ever reached after this run's own fixture tuples
+        // have already been written, so `write_log` cannot genuinely be
+        // empty here. A `null` would indicate a real bug in call ordering,
+        // not an expected empty-database case.
+        throw new Error(
+          `soundness run (seed=${seed}): relationIndex: 'cold' could not read a pin token from ` +
+            `write_log after writing this run's own fixture tuples — this is a harness bug, not a ` +
+            `resolver finding`,
+        );
+      }
+      pinToken = Number(rawPinToken);
+    } else if (relationIndex === 'warm') {
+      // Candidate A's own precondition (`docs/LEOPARD-INDEX-PROPOSAL.md`):
+      // zero writes between this rebuild and every `checkAllQueries` call
+      // below. `pinToken` is set to exactly this call's own returned
+      // `watermarkToken` — never an independently-computed value — so
+      // "pinned to the rebuild's own watermark" and "pinned to this
+      // harness's own anchor" are the same call, not two numbers that
+      // merely happen to agree.
+      const rebuildResult = await rebuildRelationMembershipIndex(pool);
+      pinToken = rebuildResult.watermarkToken;
+    }
+
     // D-153: the reference resolver's own tuple array. Same identity data
     // as `fixture.tuples` (the shape `writeTuple`/`deleteTuple` need), but
     // with a real `expiresAt` computed for exactly the two boundaries the
@@ -747,7 +1037,7 @@ export async function runSoundnessFuzz(
     );
 
     const concurrency = Math.max(1, env.MAX_CONCURRENCY);
-    const checked = await checkAllQueries(
+    const { results: checked, indexQueriesHit } = await checkAllQueries(
       pool,
       schema,
       referenceTuples,
@@ -755,6 +1045,8 @@ export async function runSoundnessFuzz(
       concurrency,
       effectiveMaxDepth,
       expiryAnchor,
+      relationIndex,
+      pinToken,
       options.onProgress,
     );
 
@@ -776,7 +1068,55 @@ export async function runSoundnessFuzz(
       }
     }
 
-    const verdict = computeVerdict({ falseGrantCount, coverageOk: fixture.coverage.ok });
+    // The Leopard-index third comparison arm — deliberately never folded
+    // into `falseGrantCount`/`falseDenyCount`/`divergences` above (D-006's
+    // own "never conflate the two" discipline, applied one level up; see
+    // `classify-index.ts`'s own doc comment). Only ever nonzero when
+    // `checkAllQueries` actually populated `productionIndexAllowed` on a
+    // `CheckedQuery` (`'warm'` mode only — see that field's own doc
+    // comment), so this loop is a no-op for `'off'`/`'cold'` by
+    // construction, not by an explicit `relationIndex` check.
+    let indexFalseGrantCount = 0;
+    let indexFalseDenyCount = 0;
+    for (const checkedQuery of checked) {
+      if (checkedQuery.productionIndexAllowed === undefined) continue;
+      const kind = classifyIndexDivergence({
+        productionAllowed: checkedQuery.productionAllowed,
+        productionIndexAllowed: checkedQuery.productionIndexAllowed,
+      });
+      if (kind === 'index_false_grant') indexFalseGrantCount += 1;
+      else if (kind === 'index_false_deny') indexFalseDenyCount += 1;
+    }
+
+    let verdict = computeVerdict({ falseGrantCount, coverageOk: fixture.coverage.ok });
+    // `docs/LEOPARD-INDEX-PROPOSAL.md`, "Test plan — the third comparison
+    // arm": an additional, independent, unconditionally-blocking gate,
+    // never folded into `computeVerdict` itself (`classify.ts` is
+    // deliberately untouched by this feature — see this file's own
+    // top-of-file doc comment on why `false_grant`/`false_deny` and this
+    // arm's own findings are never conflated). Inert (`relationIndex ===
+    // 'off'`) leaves `verdict` exactly as `computeVerdict` returned it,
+    // byte-for-byte unchanged behavior.
+    if (relationIndex !== 'off') {
+      const indexGateFailed =
+        // A real `index_false_grant`, on any query, ever — the identical
+        // "any single one fails the run, full stop" discipline D-006
+        // already established for the reference-vs-production arm.
+        indexFalseGrantCount > 0 ||
+        // The non-vacuity gate: a `'warm'` run that never actually hit the
+        // index proves nothing about the index at all, even if `pinToken`
+        // was wired correctly — see `SoundnessRunOptions.relationIndex`'s
+        // own doc comment for the exact silent-vacuity failure mode this
+        // closes.
+        (relationIndex === 'warm' && indexQueriesHit === 0) ||
+        // The mirror assertion for `'cold'`: any hit at all here means this
+        // harness is, contrary to its whole premise, actually consulting
+        // real index state — a bug in this harness, not in the index.
+        (relationIndex === 'cold' && indexQueriesHit !== 0);
+      if (indexGateFailed) {
+        verdict = 'unsound';
+      }
+    }
 
     const { rows } = await pool.query<{ id: string }>(
       `insert into soundness_runs
@@ -822,6 +1162,14 @@ export async function runSoundnessFuzz(
       criticalNamespaceFalseGrants,
       verdict,
       divergences,
+      // The Leopard-index third comparison arm — in-memory only, never
+      // persisted to `soundness_runs` (this feature adds no migration and
+      // no new column; see this task's own scope). Always `0` for
+      // `relationIndex: 'off'`, matching `falseGrantCount`'s own "`0` on a
+      // run with nothing to report" convention.
+      indexFalseGrantCount,
+      indexFalseDenyCount,
+      indexQueriesHit,
     };
 
     // Real row inserted, real result computed — now erase the evidence

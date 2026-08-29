@@ -48,6 +48,9 @@ const FULLY_POPULATED_VALID_ENV = {
   MAX_CONCURRENCY: '4',
   PG_POOL_MAX: '20',
   ADMIN_API_KEY: 'a'.repeat(40),
+  LEOPARD_INDEX_ENABLED: 'true',
+  LEOPARD_INDEX_MAX_STALENESS_MS: '9999',
+  LEOPARD_INDEX_REFRESH_INTERVAL_MS: '1234',
 };
 
 describe('EnvSchema.safeParse — a fully-populated, valid env object', () => {
@@ -67,6 +70,9 @@ describe('EnvSchema.safeParse — a fully-populated, valid env object', () => {
       MAX_CONCURRENCY: 4,
       PG_POOL_MAX: 20,
       ADMIN_API_KEY: 'a'.repeat(40),
+      LEOPARD_INDEX_ENABLED: 'true',
+      LEOPARD_INDEX_MAX_STALENESS_MS: 9999,
+      LEOPARD_INDEX_REFRESH_INTERVAL_MS: 1234,
     });
   });
 });
@@ -88,6 +94,9 @@ describe('EnvSchema.safeParse({}) — nothing is genuinely required; every field
       MAX_CONCURRENCY: 8,
       PG_POOL_MAX: 10,
       ADMIN_API_KEY: undefined,
+      LEOPARD_INDEX_ENABLED: 'false',
+      LEOPARD_INDEX_MAX_STALENESS_MS: 30000,
+      LEOPARD_INDEX_REFRESH_INTERVAL_MS: 0,
     });
   });
 });
