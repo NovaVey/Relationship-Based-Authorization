@@ -271,6 +271,7 @@ const apiErrorSchema: JsonSchema = {
             'tuple_validation_failed',
             'schema_compile_failed',
             'unauthorized',
+            'forbidden',
             'not_found',
             'rate_limited',
             'infrastructure_unavailable',
@@ -302,6 +303,10 @@ const RESPONSE_400 = jsonResponse(
 );
 const RESPONSE_401 = jsonResponse(
   '401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).',
+  errorResponseRef,
+);
+const RESPONSE_403 = jsonResponse(
+  "403 — forbidden. The bearer token authenticated successfully but is a namespace-scoped API key (src/api/db-api-keys.ts) whose scope does not cover every namespace this specific request targets. Distinct from 401: this deployment knows exactly who the caller is, and that identity's own authority doesn't reach what it asked for. error.message names the exact out-of-scope namespace.",
   errorResponseRef,
 );
 const RESPONSE_429 = jsonResponse(
@@ -377,6 +382,7 @@ function checkOperation(): OpenApiOperation {
       ),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },
@@ -432,6 +438,7 @@ function checkBatchOperation(): OpenApiOperation {
       '200': jsonResponse('One result per input item, same order as the request.', responseSchema),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },
@@ -467,6 +474,7 @@ function expandOperation(): OpenApiOperation {
       ),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },
@@ -516,6 +524,7 @@ function listObjectsOperation(): OpenApiOperation {
       '200': jsonResponse('Every object confirmed via a real, live check.', responseSchema),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },
@@ -549,6 +558,7 @@ function listUsersOperation(): OpenApiOperation {
       '200': jsonResponse('Every concrete subject resolved down to.', responseSchema),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },
@@ -587,6 +597,12 @@ function tupleWriteOperation(): OpenApiOperation {
         type: 'boolean',
         description: 'false when the tuple already existed — still a successful write.',
       },
+      existingExpiresAt: {
+        type: ['string', 'null'],
+        format: 'date-time',
+        description:
+          "Present (possibly null) only when created is false — the existing row's real expiry, ISO-8601, so a caller can tell an already-existed-and-still-active grant from an already-existed-but-expired one. null means the existing row never expires. Absent entirely when created is true.",
+      },
     },
     required: ['token', 'created'],
   };
@@ -606,6 +622,7 @@ function tupleWriteOperation(): OpenApiOperation {
       ),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },
@@ -643,6 +660,7 @@ function tupleDeleteOperation(): OpenApiOperation {
       ),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },
@@ -724,6 +742,7 @@ function schemaPublishOperation(): OpenApiOperation {
       ),
       '400': RESPONSE_400,
       '401': RESPONSE_401,
+      '403': RESPONSE_403,
       '429': RESPONSE_429,
       '503': RESPONSE_503,
     },

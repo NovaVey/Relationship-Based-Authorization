@@ -2682,3 +2682,23 @@ D-159's and D-160's own write-ups both measured the same fact: the standard-budg
 **Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .`, `npm run build` all clean. Fast suite: 70 files, 1077 tests (up from 1040). Full LOCALVERIFY re-run on a freshly reset database: the flagship fuzz suite, both existing metamorphic property files, the D-159 regression suite, and both D-160 properties — 16 tests combined, all passing, zero regressions.
 
 Full account: `docs/DECISIONS.md` D-161.
+
+## Full-repo audit (2026-08-29): 16 findings fixed, zero refuted (D-162)
+
+**Owner:** four isolated-worktree agents for the findings needing the most care (schema-compiler, soundness-engineer, test-author, report-designer), twelve fixed directly.
+
+`Workflow({ name: "full-repo-audit" })` — 14 parallel review dimensions, each finding adversarially re-verified before being reported: 17 raw findings, 16 survived (one pair merged), zero refuted, no critical/high severity, nothing threatening the soundness proof.
+
+**Top pick, the only finding with a live security angle:** the HTTP rate limiter was keyed on IP alone, letting one valid credential multiply its budget across source addresses against the shared database-wide advisory locks every write/check serializes through. `rateLimitKeyGenerator` now keys on the credential alone when one is present — a first draft combining IP+credential was caught in review as not actually closing the gap (still N buckets for N addresses) before it shipped.
+
+**The other headline fix:** a denied check's audit-trail entry couldn't tell an exhaustively-proven "no" from one the depth ceiling or a cycle guard merely gave up on (D-158 through D-161's own `certain` signal was computed correctly but silently discarded at the final return). Now threaded through to a new `certain` column on `checks` (migration `0009`), deliberately excluded from the hash chain so historical rows don't retroactively report as tampered.
+
+**Fourteen smaller fixes:** an order-dependent circular-permission-detection bug and dead `Token.column` in the schema compiler; a raw-NUL-byte source-encoding bug in the audit hash chain (the same anti-pattern D-023 already fixed once); a CLI exit-code ordering bug on `--expires-at`; a silent-no-op signal gap on re-writing an already-expired tuple; a missing `403`/`forbidden` outcome in the OpenAPI document; a real test-coverage gap in the soundness fuzzer's dry-run cleanup path; a fork-PR CI guard so a clean run doesn't show red; a bigint-overflow validation gap in `apikey revoke`; a stale CLI group description; and four small doc-drift fixes (two missing forward cross-references, one stale file count, one stale env-file comment).
+
+**A disclosed incident, caught and corrected before it mattered:** one agent briefly edited the shared checkout by mistake instead of its own worktree, caught it itself, and restored it byte-for-byte before doing anything else — independently reconfirmed clean by this session's own main agent.
+
+**Independently live-verified, not just trusted from agent reports:** the rate-limiter fix (fail-checked via a bare-IP revert), the CLI/API expired-tuple behavior (against a fresh scratch database, including a real HTTP call), the `certain` threading (the exact D-159 mechanism-2 fixture reproduced live at both `maxDepth: 3` and `4`, plus `authz audit verify` confirming the chain intact), the NUL-byte fix's hash-identity claim (recomputed from scratch, bypassing the test file), and the flagship 5,000-query differential-soundness fuzz suite re-run clean after all sixteen fixes landed.
+
+**Verification:** all clean throughout. Fast suite: 72 files, 1107 tests (up from 70/1077). Shipped as eight commits on one PR.
+
+Full account: `docs/DECISIONS.md` D-162.

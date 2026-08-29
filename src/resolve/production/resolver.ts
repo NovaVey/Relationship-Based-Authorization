@@ -58,7 +58,11 @@
  * check issued, folded into one high-water mark — never just the
  * configured ceiling). See this file's own doc comments on `WalkContext
  * .depthReached` and `sqlRelationMembershipWithWitness`'s own return
- * shape for exactly how that's tracked.
+ * shape for exactly how that's tracked. Full-repo audit finding #6 adds a
+ * third field, `certain` (present iff `allowed` is false — see
+ * `ProductionCheckResult.certain`'s own doc comment): a denied check's
+ * audit trail used to have no way to distinguish an exhaustively-proven
+ * "no" from one a cycle guard or depth ceiling merely gave up on.
  *
  * **Why `RelationDisproof` (used only inside an `ExclusionStep`'s
  * `subtractDisproof`, when a relation-membership check needs to prove a
@@ -396,6 +400,31 @@ export interface ProductionCheckResult {
   allowed: boolean;
   /** Present if and only if `allowed` is true. */
   path?: ResolutionStep;
+  /**
+   * Present if and only if `allowed` is false — the mirror image of `path`'s
+   * own "present iff relevant" contract. Surfaces `ProductionOutcome.certain`
+   * (see that type's own doc comment for the full D-158/D-159/D-160/D-161
+   * reasoning) to every application-facing denial, not just to a *containing*
+   * exclusion's own internal negation: `true` means this specific check was
+   * exhaustively proven false (every branch that could have granted it was
+   * actually checked, all the way down); `false` means some branch was cut
+   * off by the TS-level `visited`-Set cycle guard, the TS-level depth
+   * ceiling, or mechanism 2's own genuinely-binding SQL depth ceiling
+   * (`sqlRelationMembershipWithWitness`'s `certain` — see its own doc
+   * comment) before it could be fully proven or disproven either way. Full-
+   * repo audit finding #6: before this field existed, `certain` was computed
+   * correctly (it has to be, for the exclusion/cycle-guard soundness fix
+   * itself to work) but silently discarded the moment `resolve`'s top-level
+   * outcome reached `productionCheck`'s own final return — an operator
+   * looking at a denial in the audit trail had no way to tell a trustworthy,
+   * exhaustively-proven "no" from "the walk gave up before it could tell."
+   * Purely additive: this field is never consulted by `resolve`/`evalRewrite`
+   * themselves and never changes `allowed` — the same "purely additive,
+   * never touches the actual decision" discipline this project's audit-trail
+   * features have always followed (§6.7, the hash chain, expiring-tuple
+   * `touchedExpiringTuple` below).
+   */
+  certain?: boolean;
   /** The actual maximum recursion depth reached anywhere in this check — see this file's own top-of-file doc comment. */
   depth: number;
   /**
@@ -1682,6 +1711,10 @@ export async function productionCheck(
         }
       : {
           allowed: false,
+          // Full-repo audit finding #6 — see `ProductionCheckResult.certain`'s
+          // own doc comment. Threaded through unchanged from the top-level
+          // `resolve` outcome; never re-derived here.
+          certain: outcome.certain,
           depth: depthReached.value,
           touchedExpiringTuple: touchedExpiringTuple.value,
         };

@@ -183,6 +183,80 @@ describe('a-self-referential-permission-is-rejected-not-left-to-hang-whatever-ev
   });
 });
 
+describe('circular-permission-detection-is-order-independent-when-two-permissions-share-a-name', () => {
+  // Full-repo audit finding #2 (MEDIUM): `checkCircularPermissions`
+  // (src/schema/dsl/compiler.ts) built `permissionsByName` and its `deps`
+  // map keyed solely by `permission.name`. When a namespace declares two
+  // permissions sharing a name (already independently rejected via
+  // `checkDuplicateMemberNames`'s `duplicate_member_name`, run
+  // immediately before this check), the later declaration silently
+  // overwrote the earlier one in both maps — so whichever declaration
+  // happened to come *first* in source order was never actually examined
+  // by the cycle DFS. Confirmed live before the fix: `permission x = x;
+  // permission x = owner` (the self-cycle declared first) compiled with
+  // ONLY `duplicate_member_name` — the cycle was silently lost — while
+  // reversing the declaration order (`permission x = owner; permission x
+  // = x`, cycle declared second) surfaced a `circular_permission_definition`
+  // too, proving detection was purely an artifact of map-overwrite order,
+  // not exhaustive analysis. Both orders below must now produce the exact
+  // same set of error codes: `checkCircularPermissions` recognizes this
+  // exact case (two permissions sharing a name in one namespace) as
+  // having no well-defined cycle-graph meaning and skips its own analysis
+  // for the namespace entirely, deferring solely to
+  // `duplicate_member_name` regardless of which declaration came first.
+  // This can never produce an unsound schema either way (both orders are
+  // rejected), but it does make `compileSchema`'s own documented "collects
+  // every semantic error it can find in one pass" claim true regardless of
+  // source order, per this task's own non-negotiable that rejection must
+  // never depend on incidental declaration order. See `docs/DECISIONS.md`.
+  const selfCycleFirst = [
+    'namespace document {', // line 1
+    '  relation owner: user', // line 2
+    '  permission x = x', // line 3 — self-cycle declared FIRST
+    '  permission x = owner', // line 4 — grounded declaration declared second
+    '}', // line 5
+  ].join('\n');
+
+  const selfCycleSecond = [
+    'namespace document {', // line 1
+    '  relation owner: user', // line 2
+    '  permission x = owner', // line 3 — grounded declaration declared first
+    '  permission x = x', // line 4 — self-cycle declared SECOND
+    '}', // line 5
+  ].join('\n');
+
+  it('self-cycle-declared-first-is-rejected-with-only-duplicate-member-name-not-a-generic-parse-error', () => {
+    const errors = compileErr(selfCycleFirst);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.code).toBe('duplicate_member_name');
+    expect(errors[0]?.message).toContain('x');
+    expect(errors.some((e) => e.code === 'circular_permission_definition')).toBe(false);
+  });
+
+  it('self-cycle-declared-second-produces-the-identical-error-set-as-declared-first-order-independent', () => {
+    const errors = compileErr(selfCycleSecond);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.code).toBe('duplicate_member_name');
+    expect(errors[0]?.message).toContain('x');
+    expect(errors.some((e) => e.code === 'circular_permission_definition')).toBe(false);
+  });
+
+  it('does-not-regress-cycle-detection-for-uniquely-named-permissions-self-loop-still-caught', () => {
+    // Guards the fix's own scoping: the short-circuit above only applies
+    // when the namespace has a permission-name collision. A namespace
+    // with no such collision must still catch a genuine self-cycle,
+    // exactly as the pre-existing
+    // `a-self-referential-permission-is-rejected-...` describe block
+    // above already covers — repeated here, colocated with this fix, as
+    // a direct "did the short-circuit over-fire" regression check.
+    const errors = compileErr(
+      ['namespace document {', '  relation owner: user', '  permission x = x', '}'].join('\n'),
+    );
+    expect(errors.some((e) => e.code === 'circular_permission_definition')).toBe(true);
+    expect(errors.some((e) => e.code === 'duplicate_member_name')).toBe(false);
+  });
+});
+
 describe('a-permission-with-a-live-relation-branch-alongside-a-dead-cyclic-branch-is-rejected-as-a-whole-not-partially-accepted', () => {
   // `docs/DECISIONS.md` D-013's own decision text, verbatim: "a permission
   // that has *any* non-cyclic branch reaching a real relation (e.g.

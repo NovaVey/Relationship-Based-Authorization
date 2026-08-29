@@ -226,6 +226,38 @@ const tupleDeleteHandler: ShapeHandler = ({ state, params, bufferOp }) => {
   return { rows: [], rowCount: matches ? 1 : 0 };
 };
 
+// Full-repo audit finding #11 (2026-08-29) — writeTuple's own new
+// follow-up SELECT, run only on the `created: false` (conflict) path, to
+// surface whether the existing row that caused the conflict is actually
+// expired. A plain-write-path read, same as tupleInsertHandler/
+// tupleDeleteHandler immediately above/below — never visibleAsOf-filtered,
+// for the identical reason those two aren't (writeTuple's own plain
+// BEGIN/COMMIT transaction, never a snapshot one; see this file's own
+// top-of-file doc comment on `namespaceConfigNextVersionHandler`'s
+// identical precedent).
+const existingExpiresAtHandler: ShapeHandler = ({ state, params }) => {
+  const [objectNs, objectId, relation, subjectNs, subjectId, subjectRelationParam] = params as [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string | null,
+  ];
+  const subjectRelation = subjectRelationParam ?? null;
+  const key = relationTupleKey({
+    objectNs,
+    objectId,
+    relation,
+    subjectNs,
+    subjectId,
+    subjectRelation,
+  });
+  const existing = state.relationTuples.find((row) => relationTupleKey(row) === key);
+  if (!existing) return { rows: [], rowCount: 0 };
+  return { rows: [{ expires_at: existing.expiresAt }], rowCount: 1 };
+};
+
 const writeLogInsertHandler: ShapeHandler = ({ state, params, bufferOp }) => {
   const [operation, tupleJson] = params as [string, string];
   const tuple = JSON.parse(tupleJson) as TupleKey;
@@ -480,6 +512,15 @@ const SHAPES = new Map<string, ShapeHandler>([
   [
     normalizeSql(`insert into write_log (operation, tuple) values ($1, $2) returning token`),
     writeLogInsertHandler,
+  ],
+  [
+    // Full-repo audit finding #11 (2026-08-29) — must match tuples.ts's own
+    // new follow-up select exactly; see existingExpiresAtHandler above.
+    normalizeSql(`select expires_at from relation_tuples
+         where object_ns = $1 and object_id = $2 and relation = $3
+           and subject_ns = $4 and subject_id = $5
+           and coalesce(subject_relation, '') = coalesce($6, '')`),
+    existingExpiresAtHandler,
   ],
   [
     // D-144 — `expires_at` appended to the select list; must match

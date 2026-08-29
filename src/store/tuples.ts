@@ -41,7 +41,24 @@ export interface TupleError {
 }
 
 export type WriteTupleResult =
-  { ok: true; token: number; created: boolean } | { ok: false; errors: TupleError[] };
+  | {
+      ok: true;
+      token: number;
+      created: boolean;
+      /**
+       * Full-repo audit finding #11 (2026-08-29): present only when
+       * `created` is `false` (the `ON CONFLICT ... DO NOTHING` scope limit
+       * documented on `writeTuple`'s own insert below) — the conflicting
+       * row's real `expires_at`, so a caller can tell "already existed and
+       * still active" from "already existed but its validity window has
+       * already closed" instead of both surfacing identically as a bare
+       * `created: false`. `null` means the existing row never expires;
+       * `undefined` (the field entirely absent) means `created` was `true`
+       * and there is no existing row to report on.
+       */
+      existingExpiresAt?: Date | null;
+    }
+  | { ok: false; errors: TupleError[] };
 
 export type DeleteTupleResult =
   { ok: true; token: number; deleted: boolean } | { ok: false; errors: TupleError[] };
@@ -430,9 +447,39 @@ export async function writeTuple(
         tuple.expiresAt ?? null,
       ],
     );
+    const created = (rowCount ?? 0) > 0;
+    // Full-repo audit finding #11 (2026-08-29): the `ON CONFLICT ... DO
+    // NOTHING` scope limit above means `created: false` alone can't
+    // distinguish "already existed and still active" from "already
+    // existed but its validity window already closed" — a caller
+    // restoring access after an expiry could read either as "grant is
+    // live" and walk away. This is a single cheap, indexed lookup on the
+    // same unique key the conflict above just matched against, run only
+    // on the no-op path, inside the same transaction for a consistent
+    // read.
+    let existingExpiresAt: Date | null = null;
+    if (!created) {
+      const { rows } = await client.query<{ expires_at: Date | null }>(
+        `select expires_at from relation_tuples
+         where object_ns = $1 and object_id = $2 and relation = $3
+           and subject_ns = $4 and subject_id = $5
+           and coalesce(subject_relation, '') = coalesce($6, '')`,
+        [
+          tuple.objectNs,
+          tuple.objectId,
+          tuple.relation,
+          tuple.subjectNs,
+          tuple.subjectId,
+          tuple.subjectRelation ?? null,
+        ],
+      );
+      existingExpiresAt = rows[0]?.expires_at ?? null;
+    }
     const token = await insertWriteLog(client, 'write', tuple);
     await client.query('COMMIT');
-    return { ok: true, token, created: (rowCount ?? 0) > 0 };
+    return created
+      ? { ok: true, token, created: true }
+      : { ok: true, token, created: false, existingExpiresAt };
   } catch (err) {
     // The ROLLBACK call's own failure must never replace `err` — found and
     // fixed via DST D0's crash-injection work (`docs/DECISIONS.md`): a

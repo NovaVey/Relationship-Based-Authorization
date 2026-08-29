@@ -98,7 +98,6 @@ interface Token {
   type: TokenType;
   value: string;
   line: number;
-  column: number;
 }
 
 const WORD_CHAR = /[A-Za-z0-9_]/;
@@ -107,15 +106,11 @@ function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
   let line = 1;
-  let column = 1;
 
   const advance = (count = 1): void => {
     for (let n = 0; n < count; n++) {
       if (source[i] === '\n') {
         line += 1;
-        column = 1;
-      } else {
-        column += 1;
       }
       i += 1;
     }
@@ -134,7 +129,6 @@ function tokenize(source: string): Token[] {
     }
 
     const startLine = line;
-    const startColumn = column;
 
     if (ch !== undefined && WORD_CHAR.test(ch)) {
       let value = '';
@@ -144,12 +138,12 @@ function tokenize(source: string): Token[] {
         value += c;
         advance();
       }
-      tokens.push({ type: 'word', value, line: startLine, column: startColumn });
+      tokens.push({ type: 'word', value, line: startLine });
       continue;
     }
 
     const single = (type: TokenType, value: string, len = 1): void => {
-      tokens.push({ type, value, line: startLine, column: startColumn });
+      tokens.push({ type, value, line: startLine });
       advance(len);
     };
 
@@ -199,7 +193,7 @@ function tokenize(source: string): Token[] {
     }
   }
 
-  tokens.push({ type: 'eof', value: '', line, column });
+  tokens.push({ type: 'eof', value: '', line });
   return tokens;
 }
 

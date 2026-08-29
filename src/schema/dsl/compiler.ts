@@ -292,6 +292,45 @@ function checkDuplicateMemberNames(ns: ParsedNamespace, errors: SchemaError[]): 
  * never contribute to the cycle graph) before this rewrite was trusted.
  */
 function checkCircularPermissions(ns: ParsedNamespace, errors: SchemaError[]): void {
+  // Guard: every map/set built below is keyed solely by `permission.name`
+  // (`permissionsByName`, `deps`, and the DFS's own `color` map) — the
+  // moment a namespace declares two *permissions* sharing a name, the
+  // later declaration overwrites the earlier one in each of those maps,
+  // so cycle detection only ever runs on whichever declaration happened
+  // to be built/visited last. That silently drops a real cycle in the
+  // overwritten declaration when it happens to be the first one (and,
+  // depending on which declaration's dependency set survives the
+  // overwrite, can also fabricate the *appearance* of a cycle that's
+  // really an artifact of the alias) — purely a function of source
+  // order, not of the schema's actual shape. This exact case is already
+  // independently and deterministically rejected by
+  // `checkDuplicateMemberNames`'s `duplicate_member_name` error (run
+  // just before this function, see `compileParsedNamespaces` below), and
+  // "is this permission-permission-cycle graph acyclic" has no
+  // well-defined meaning once two of its nodes share one name and one
+  // map slot anyway — so this function's own cycle analysis is skipped
+  // entirely for a namespace with such a collision, rather than made to
+  // second-guess which of the two colliding declarations "wins" the
+  // graph. This keeps `checkCircularPermissions`'s behavior
+  // order-independent (full-repo audit finding #2, confirmed via
+  // `permission x = x; permission x = owner` compiling with only
+  // `duplicate_member_name` in one declaration order but also gaining a
+  // spurious/accidental `circular_permission_definition` in the other) —
+  // see `docs/DECISIONS.md`. Scoped to permission-permission name
+  // collisions specifically (not every `duplicate_member_name` cause):
+  // a relation and a permission sharing a name doesn't alias anything
+  // here, since `relationNames` and `permissionsByName` are always built
+  // from disjoint source lists and `collectPermissionDeps` below already
+  // treats a name present in `relationNames` as grounding, never as a
+  // permission dependency, regardless of any same-named permission.
+  const permissionNameCounts = new Map<string, number>();
+  for (const permission of ns.permissions) {
+    permissionNameCounts.set(permission.name, (permissionNameCounts.get(permission.name) ?? 0) + 1);
+  }
+  if ([...permissionNameCounts.values()].some((count) => count > 1)) {
+    return;
+  }
+
   const permissionsByName = new Map(ns.permissions.map((p) => [p.name, p]));
   const relationNames = new Set(ns.relations.map((r) => r.name));
 

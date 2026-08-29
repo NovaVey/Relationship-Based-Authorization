@@ -90,7 +90,15 @@ jobs:
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           exit 0
 
+      # Full-repo audit finding (2026-08-29, MEDIUM, same fork-PR gap as
+      # soundness.yml): GitHub forces GITHUB_TOKEN read-only for
+      # fork-originated pull_request events regardless of the
+      # pull-requests: write grant above, so an unguarded comment post
+      # 403s and crashes this step, masking the real DST-suite exit code
+      # below on any fork PR. See soundness.yml's identical guard for the
+      # full reasoning.
       - name: Post or update the DST PR comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/post-dst-comment.mjs

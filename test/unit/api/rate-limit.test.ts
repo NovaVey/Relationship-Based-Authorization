@@ -162,3 +162,100 @@ describe('a gated read route (check) enforces its own real per-route rate-limit 
     expect(body.error.message).toContain('rate limit exceeded');
   });
 });
+
+// Full-repo audit finding #1 (2026-08-29): one valid credential calling
+// from more than one source address used to get an independent 20/minute
+// write budget per distinct address — directly undermining the point of
+// the limit, since every write serializes against one database-wide
+// advisory lock regardless of which address it arrived from.
+// `rateLimitKeyGenerator` (`src/api/server.ts`) closes this by keying on
+// the presented credential alone whenever one is present, ignoring
+// `request.ip` entirely for that case.
+describe('one credential is one rate-limit budget, no matter how many source addresses it calls from', () => {
+  it('the-same-admin-key-calling-from-two-different-remote-addresses-shares-one-20-per-minute-write-budget-not-one-each', async () => {
+    const payload = {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    };
+    const write = (remoteAddress: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/tuples',
+        payload,
+        remoteAddress,
+        headers: { authorization: `Bearer ${CORRECT_KEY}` },
+      });
+
+    // 10 from one address, 10 from a second, genuinely distinct address —
+    // all 20 land in the same credential-keyed bucket, so none of them are
+    // 429 yet (still exactly at the 20/minute ceiling).
+    for (let i = 0; i < 10; i += 1) {
+      expect((await write('203.0.113.10')).statusCode).not.toBe(429);
+    }
+    for (let i = 0; i < 10; i += 1) {
+      expect((await write('203.0.113.20')).statusCode).not.toBe(429);
+    }
+
+    // The 21st request for this same credential — from a THIRD address —
+    // is rejected. Before this fix, each address got its own independent
+    // 20-request budget, so this would still have succeeded.
+    const res21 = await write('203.0.113.30');
+    expect(res21.statusCode).toBe(429);
+  });
+
+  it('two-different-admin-keys-from-the-same-address-still-get-independent-budgets', async () => {
+    // The inverse case: this fix must not accidentally collapse two
+    // genuinely different credentials onto one shared bucket just because
+    // request.ip is no longer part of the key. A second, independently
+    // valid static key (READONLY_API_KEY) hitting a route it's actually
+    // allowed to call, from the exact same address the first key already
+    // exhausted its own write budget from, must be unaffected.
+    const originalReadonlyKey = env.READONLY_API_KEY;
+    env.READONLY_API_KEY = 'rate-limit-test-readonly-key';
+    try {
+      const writePayload = {
+        objectNs: 'document',
+        objectId: 'readme',
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId: 'alice',
+      };
+      for (let i = 0; i < 20; i += 1) {
+        await app.inject({
+          method: 'POST',
+          url: '/tuples',
+          payload: writePayload,
+          remoteAddress: '203.0.113.40',
+          headers: { authorization: `Bearer ${CORRECT_KEY}` },
+        });
+      }
+      const exhausted = await app.inject({
+        method: 'POST',
+        url: '/tuples',
+        payload: writePayload,
+        remoteAddress: '203.0.113.40',
+        headers: { authorization: `Bearer ${CORRECT_KEY}` },
+      });
+      expect(exhausted.statusCode).toBe(429);
+
+      const checkPayload = {
+        subject: { ns: 'user', id: 'alice' },
+        relation: 'view',
+        object: { ns: 'document', id: 'readme' },
+      };
+      const otherKeyRes = await app.inject({
+        method: 'POST',
+        url: '/check',
+        payload: checkPayload,
+        remoteAddress: '203.0.113.40',
+        headers: { authorization: `Bearer ${env.READONLY_API_KEY}` },
+      });
+      expect(otherKeyRes.statusCode).not.toBe(429);
+    } finally {
+      env.READONLY_API_KEY = originalReadonlyKey;
+    }
+  });
+});

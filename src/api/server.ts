@@ -47,6 +47,8 @@
  * rule 10 and D-050's own reasoning already rule out for writes, applied
  * here to read access instead. See `docs/DECISIONS.md` D-064.
  */
+import { createHash } from 'node:crypto';
+
 import Fastify, {
   type FastifyError,
   type FastifyInstance,
@@ -518,6 +520,70 @@ async function runCheckBatch(
 export const trustExactlyOneRealProxyHop = (address: string, hop: number): boolean =>
   hop === 0 && Boolean(address);
 
+/**
+ * Full-repo audit finding #1 (2026-08-29, MEDIUM): `@fastify/rate-limit`'s
+ * own default `keyGenerator` keys every bucket on `request.ip` alone —
+ * every rate/write budget below (`writeRateLimit`, `gatedReadRateLimit`,
+ * even the coarse pre-auth `authFloodGuard`) is meant as a real ceiling on
+ * what one caller can do, but "one caller" and "one source IP" are not the
+ * same thing. A caller holding a single valid `ADMIN_API_KEY`/
+ * `READONLY_API_KEY`/DB-backed key with access to more than one egress
+ * address (a second NAT hop, IPv6 multi-homing, a small pool of proxies)
+ * gets an *independent* budget per distinct address it calls from — and
+ * every write/check in this system serializes against a literally
+ * database-wide `pg_advisory_xact_lock` (`acquireWriteLogLock`,
+ * `src/audit/checks.ts`'s own hash-chain lock), so multiplying one key's
+ * effective throughput this way directly undermines the reason these
+ * limits exist at all, not just a quota nicety.
+ *
+ * **Deliberately keys on the credential ALONE when one is presented, never
+ * `request.ip` combined with it.** Combining the two (`` `${ip}:${cred}` ``)
+ * was the first version written here — it looked like the obvious "add the
+ * credential" fix, but doesn't actually close this finding: a caller with
+ * N distinct source addresses would still land in N distinct
+ * `(ip, credential)` buckets, one per address, exactly the multiplication
+ * this finding exists to stop. Keying on the credential alone means one
+ * key's total budget is one ceiling, no matter how many addresses it's
+ * split across — matching this same registration's own stated design
+ * intent one option down (`redis: redisClient`): "every rate-limit check
+ * in this file [shares] one real, cross-replica budget instead of one per
+ * process" once `REDIS_URL` is configured. Cross-*replica* sharing already
+ * assumes cross-IP sharing for one identity; keying by IP at all was
+ * always a stand-in for "caller identity" from before this API had real
+ * credentials to identify a caller by directly.
+ *
+ * `request.headers.authorization` is read directly, not
+ * `request.authScopes` (which is only set *after* a successful
+ * `requireAdminAuth`/`requireReadAuth`, well after `writeRateLimit`/
+ * `gatedReadRateLimit`'s own counting hook already needs a key — see
+ * D-065's own preHandler-ordering doc comment above `requireAdminAuth`) —
+ * this only needs to separate "which credential was presented," not
+ * whether it was valid; a wrong-key flood is already bounded by
+ * `authFloodGuard`, positioned before this one in every gated route's own
+ * `preHandler` array, and IS still keyed on `request.ip` (unchanged,
+ * `src/api/server.ts`'s own hand-rolled counter below) since an unproven
+ * credential shouldn't get its own dedicated budget to squat on.
+ *
+ * A cheap SHA-256 fingerprint, not `hashApiKey`'s deliberately slow
+ * `scrypt` (`src/api/db-api-keys.ts`) — this runs on every single
+ * rate-limited request, not once at credential-creation time, and the
+ * goal here is only to avoid storing the raw secret verbatim as a
+ * rate-limiter store key (visible, unnecessarily, in a shared
+ * `RedisStore`'s own keyspace per `env.REDIS_URL`), never to resist
+ * offline cracking the way a real password/API-key hash must.
+ *
+ * No `Authorization` header at all (`/health`, `/schema/compile` — the two
+ * routes with no credential to key on) falls back to `request.ip` alone,
+ * unchanged from before this fix — there is no credential to prefer over
+ * it, and both routes' own budgets were never about protecting one
+ * credential's fair share to begin with.
+ */
+export function rateLimitKeyGenerator(request: FastifyRequest): string {
+  const credential = request.headers.authorization;
+  if (!credential) return request.ip;
+  return createHash('sha256').update(credential).digest('hex').slice(0, 32);
+}
+
 export interface BuildServerOptions {
   /**
    * Overrides the Fastify/pino request logger this function would otherwise
@@ -761,6 +827,7 @@ export async function buildServer(
   await app.register(rateLimit, {
     max: 100,
     timeWindow: '1 minute',
+    keyGenerator: rateLimitKeyGenerator,
     // `@fastify/rate-limit` switches its own internal store from the
     // default in-process `LocalStore` to its bundled `RedisStore`
     // automatically once handed a truthy `redis` option (confirmed by

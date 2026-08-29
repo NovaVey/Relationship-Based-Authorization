@@ -155,6 +155,27 @@ describe('authz tuple write --expires-at (D-144)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('a-past-dated-expires-at-value-exits-2-not-3-even-with-no-database-url-configured', async () => {
+    // Full-repo audit finding #3 (2026-08-29): `validateExpiresAt`
+    // (src/store/tuples.ts) is exactly as pure/DB-free as
+    // `validateIdentifiers`, but only ever ran inside `writeTuple` until
+    // this fix — unreachable until after the DATABASE_URL check below
+    // passed. So a past-dated `--expires-at` with no database configured
+    // fell all the way through to the DATABASE_URL check and exited 3
+    // with an infrastructure message, instead of the real, immediately-
+    // decidable exit-2 argument error `expires_at_not_in_future` names.
+    env.DATABASE_URL = undefined;
+    process.exitCode = undefined;
+    const spy = vi.spyOn(tuplesModule, 'writeTuple');
+
+    await tupleWrite('document:readme', 'viewer', 'user:alice', {
+      expiresAt: '2020-01-01T00:00:00.000Z',
+    });
+
+    expect(process.exitCode).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('omitting---expires-at-entirely-still-writes-a-non-expiring-tuple-unchanged-from-before-this-flag-existed', async () => {
     env.DATABASE_URL = UNREACHABLE_DATABASE_URL;
     process.exitCode = undefined;

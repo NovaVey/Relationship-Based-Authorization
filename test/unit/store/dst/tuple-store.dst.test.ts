@@ -93,7 +93,10 @@ describe('DST D0 — the storage seam is genuinely wireable: real writeTuple/del
     const second = await writeTuple(source, tuple);
 
     expect(first).toEqual({ ok: true, token: 1, created: true });
-    expect(second).toEqual({ ok: true, token: 2, created: false });
+    // existingExpiresAt: null — full-repo audit finding #11 (2026-08-29):
+    // present on every created:false result, null here since this tuple
+    // was never written with an expiresAt.
+    expect(second).toEqual({ ok: true, token: 2, created: false, existingExpiresAt: null });
     expect(state.relationTuples).toHaveLength(1);
     expect(state.writeLog).toHaveLength(2);
   });

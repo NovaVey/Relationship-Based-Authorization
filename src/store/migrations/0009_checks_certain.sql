@@ -1,0 +1,31 @@
+-- `checks.certain` — full-repo audit finding #6: a denied check's audit
+-- trail had no way to distinguish an exhaustively-proven "no" from one a
+-- cycle guard or the depth ceiling merely gave up on before it could prove
+-- or disprove anything (see `docs/DECISIONS.md` D-158 through D-161 for the
+-- `certain`/disproof mechanism this column now surfaces to the audit trail;
+-- it was already computed correctly internally, just silently discarded at
+-- `productionCheck`'s own final return before this fix).
+--
+-- Nullable, no default, and populated the mirror-image way
+-- `resolution_path` already is: `resolution_path` is non-null iff `allowed`
+-- is true; `certain` is non-null iff `allowed` is false. There is nothing
+-- meaningful to record here for an allowed row (`ProductionOutcome`'s own
+-- invariant: `allowed: true` is always `certain: true`, by construction,
+-- everywhere in the resolver — recording a trivially-always-true value on
+-- every allowed row would add a column that never carries information).
+-- A row inserted before this migration keeps a NULL `certain` regardless of
+-- its own `allowed` value, exactly like every other historical-boundary
+-- column in this table (`resolution_path`/`consistency_token` before their
+-- own respective migrations) — disclosed, not retroactively backfilled.
+--
+-- Deliberately NOT part of the `checks` hash chain's own covered-field list
+-- (`src/audit/checks.ts`'s `HashableCheckRow`/`canonicalizeCheckRow`) — see
+-- that file's own doc comment for why: this column did not exist when every
+-- row already chained under migration 0006 had its `row_hash` computed, and
+-- retroactively adding a new field to the canonical serialization would make
+-- `authz audit verify` report every single one of those pre-existing,
+-- untampered rows as broken the next time it walks the chain. The same
+-- reasoning `0006_checks_hash_chain.sql` already applies to `id`/`chain_seq`
+-- (real columns on this table, deliberately outside the hash) applies here
+-- to a column added after the chain was already live.
+alter table checks add column certain boolean;

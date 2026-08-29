@@ -193,12 +193,23 @@ export async function check(
     if (options.path === true) {
       if (result.allowed && result.path) {
         for (const line of renderResolutionPath(result.path, relation)) console.log(line);
+      } else if (result.certain === true) {
+        // Full-repo audit finding #6: `result.certain` distinguishes an
+        // exhaustively-proven "no" (`ProductionCheckResult.certain`'s own
+        // doc comment, `resolver.ts`) from one a cycle guard or the depth
+        // ceiling merely gave up on — see the `else` branch below for the
+        // latter. A DENIED result never has a positive witness to show
+        // either way — symmetric with `ProductionCheckResult.path` itself
+        // being `undefined` here (§6.7: present iff allowed).
+        console.log('  DENIED (certain) — no resolution path; nothing granted this');
       } else {
-        // A DENIED result has no positive witness to show — symmetric with
-        // `ProductionCheckResult.path` itself being `undefined` here (§6.7:
-        // present iff allowed). Stated explicitly rather than printing
-        // nothing, so `--path` never looks like it silently did nothing.
-        console.log('  (denied — no resolution path; nothing granted this)');
+        // `result.certain === false`, or (defensively) absent — never
+        // silently claim a proven "no" when this walk didn't actually
+        // finish proving one; the safe, honest direction on ambiguity is
+        // to report *less* confidence, not more.
+        console.log(
+          '  DENIED (inconclusive — hit depth/cycle limit, consider a larger --max-depth)',
+        );
       }
     }
   } catch (err) {

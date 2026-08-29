@@ -88,6 +88,16 @@ describe('authz apikey revoke — argument validation exits 2 before ever touchi
     await apikeyRevoke('42');
     expect(process.exitCode).toBe(3);
   });
+
+  it('an-id-overflowing-bigint-exits-2-not-3-even-with-no-database-configured', async () => {
+    // Full-repo audit finding #12 (2026-08-29): a numeral this large passes
+    // the /^\d+$/ shape check but can never fit `id`'s real Postgres bigint
+    // column (max 2^63 - 1) — before the fix this fell through to the
+    // DATABASE_URL check and exited 3, masking the real argument error.
+    env.DATABASE_URL = undefined;
+    await apikeyRevoke('99999999999999999999');
+    expect(process.exitCode).toBe(2);
+  });
 });
 
 describe('authz apikey list — no database configured exits 3', () => {
