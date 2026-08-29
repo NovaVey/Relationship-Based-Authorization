@@ -10,43 +10,43 @@
  * test-authoring discipline (`.claude/agents/test-author.md`,
  * `.claude/commands/build-authz-service.md` §14).
  *
- * **A real, disclosed deviation from this repo's own established
- * `PostgreSqlContainer` convention (`docs/DECISIONS.md` D-019/D-030),
- * named here rather than silently done.** Every other `*.integration.
- * test.ts` file in this repo starts its own ephemeral Postgres via
- * testcontainers. This sandbox has no outbound Docker-registry network
- * access (confirmed live: `docker pull postgres:16-alpine` fails with a
- * `403 Forbidden` from the image CDN, an organization-policy denial, not a
- * transient error worth retrying), so this file — and its sibling
- * `test/isolation/relation-index-concurrent-rebuild.integration.test.ts`
- * — instead provision their own dedicated, uniquely-named, freshly
- * migrated database directly against a real, already-running local
- * Postgres 16 instance (`DATABASE_URL` must point at a server this
- * process has `CREATEDB` privilege on). The *discipline* this replaces —
- * one fresh, empty, fully-migrated database per test file, torn down
- * afterward, never a hardcoded shared database — is preserved exactly;
- * only the mechanism that provisions it differs.
+ * **This project's own established `PostgreSqlContainer` convention
+ * (`docs/DECISIONS.md` D-019/D-030)** — its own dedicated ephemeral
+ * Postgres *server*, not merely a dedicated database within a shared one,
+ * which trivially satisfies the isolation concern below with no manual
+ * bootstrap of its own. **Corrected here, not the same as first shipped:**
+ * an earlier version of this file (and its sibling,
+ * `test/isolation/relation-index-concurrent-rebuild.integration.test.ts`)
+ * hand-rolled an ephemeral-database-within-an-existing-server mechanism
+ * instead, justified by this being written in a sandbox with no outbound
+ * Docker-registry access — a real constraint on the sandbox that authored
+ * it, but the wrong constraint to design the *shipped* file around: CI
+ * runs every other `*.integration.test.ts` file in this repo against a
+ * real container with no such limitation, and that hand-rolled mechanism
+ * requires a pre-existing `DATABASE_URL`-reachable server CI never
+ * provisions for this job — confirmed live, the first CI run of this file
+ * failed with exactly that "DATABASE_URL must be set" error while every
+ * other, container-based integration file in the same job passed. Fixed
+ * by adopting the same convention as everything else.
  *
- * **Why this file needs its own dedicated database at all, not the
- * shared one this session's own scratch setup already created and
- * migrated:** `relation_membership_index`/`relation_membership_index_
- * state` are singleton, whole-database-global tables (one row, one
- * table, `docs/LEOPARD-INDEX-PROPOSAL.md`'s own deliberate design) that
- * every `rebuildRelationMembershipIndex` call truncates and repopulates
- * from scratch. Vitest's default `pool: 'threads'` runs different test
- * files concurrently; this file's own sibling
+ * **Why this file needs its own dedicated database at all** (now trivially
+ * true, kept for context): `relation_membership_index`/`relation_
+ * membership_index_state` are singleton, whole-database-global tables
+ * (one row, one table, `docs/LEOPARD-INDEX-PROPOSAL.md`'s own deliberate
+ * design) that every `rebuildRelationMembershipIndex` call truncates and
+ * repopulates from scratch. This file's own sibling
  * (`relation-index-concurrent-rebuild.integration.test.ts`) also calls
- * `rebuildRelationMembershipIndex` against the same global tables. Running
- * both against one shared database would make the two files race each
- * other's rebuilds nondeterministically — a real cross-file test-isolation
- * bug, not a hypothetical one. A dedicated ephemeral database per file
- * closes this exactly the way `PostgreSqlContainer`'s own "one container
- * per file" would have.
+ * `rebuildRelationMembershipIndex` against the same-shaped global tables —
+ * running both against one shared database would make the two files race
+ * each other's rebuilds nondeterministically. A dedicated container per
+ * file closes this exactly the way every other file's own isolation
+ * already works.
  */
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import { writeTuple, deleteTuple, type TupleKey } from '../../../src/store/tuples.js';
 import { publishSchema } from '../../../src/schema/publish.js';
@@ -61,77 +61,23 @@ import { runMigrations } from '../../../src/store/migrate.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
 
-// ---------------------------------------------------------------------------
-// Ephemeral-database bootstrap — see this file's own top-of-file doc comment
-// for why this replaces `PostgreSqlContainer` here specifically.
-// ---------------------------------------------------------------------------
-
-function requireAdminConnectionString(): string {
-  const base = process.env.DATABASE_URL;
-  if (!base) {
-    throw new Error(
-      'DATABASE_URL must be set to a reachable Postgres server this process has CREATEDB ' +
-        'privilege on — this file provisions its own ephemeral scratch database against it ' +
-        "(see this file's own top-of-file doc comment for why, in place of this repo's usual " +
-        'PostgreSqlContainer convention, which needs Docker registry network access this ' +
-        'sandbox does not have).',
-    );
-  }
-  const url = new URL(base);
-  url.pathname = '/postgres'; // Postgres's own always-present maintenance database.
-  return url.toString();
-}
-
-function ephemeralDbName(): string {
-  return `leopard_idx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-async function bootstrapEphemeralDatabase(): Promise<{
-  pool: Pool;
-  adminPool: Pool;
-  dbName: string;
-}> {
-  const adminPool = new Pool({ connectionString: requireAdminConnectionString() });
-  adminPool.on('error', (err) => {
-    console.error(`admin pool error (expected during teardown): ${err.message}`);
-  });
-  const dbName = ephemeralDbName();
-  await adminPool.query(`create database "${dbName}"`);
-
-  const url = new URL(process.env.DATABASE_URL!);
-  url.pathname = `/${dbName}`;
-  const pool = new Pool({ connectionString: url.toString() });
-  pool.on('error', (err) => {
-    console.error(`pool error (expected during teardown): ${err.message}`);
-  });
-  await runMigrations(pool, MIGRATIONS_DIR);
-  return { pool, adminPool, dbName };
-}
-
-async function teardownEphemeralDatabase(
-  pool: Pool,
-  adminPool: Pool,
-  dbName: string,
-): Promise<void> {
-  await pool.end();
-  // `with (force)` (Postgres 13+) disconnects any lingering sessions rather
-  // than failing the drop — this process is the only client of this
-  // database, but a just-closed pool can leave a connection in a brief
-  // teardown-in-progress state.
-  await adminPool.query(`drop database if exists "${dbName}" with (force)`);
-  await adminPool.end();
-}
-
+let container: StartedPostgreSqlContainer;
 let pool: Pool;
-let adminPool: Pool;
-let dbName: string;
 
 beforeAll(async () => {
-  ({ pool, adminPool, dbName } = await bootstrapEphemeralDatabase());
-}, 120_000);
+  container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  pool = new Pool({ connectionString: container.getConnectionUri() });
+  pool.on('error', (err) => {
+    // pg's own documented contract — see the identical comment in every
+    // sibling *.integration.test.ts file in this repo.
+    console.error(`pool error (expected during container teardown): ${err.message}`);
+  });
+  await runMigrations(pool, MIGRATIONS_DIR);
+}, 180_000);
 
 afterAll(async () => {
-  await teardownEphemeralDatabase(pool, adminPool, dbName);
+  await pool.end();
+  await container.stop();
 });
 
 // ---------------------------------------------------------------------------

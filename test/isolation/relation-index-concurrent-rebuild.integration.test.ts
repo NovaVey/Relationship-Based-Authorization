@@ -115,14 +115,23 @@
  * during this file's own development), now genuinely passes — re-run
  * directly against real Postgres after the fix landed, `threw` empty.
  *
- * **The same disclosed `PostgreSqlContainer`-convention deviation as this
- * file's own sibling, `test/unit/store/relation-index.integration.
- * test.ts`** — see that file's own top-of-file doc comment for the full
- * reasoning (no outbound Docker-registry network access in this sandbox).
+ * **This project's own established `PostgreSqlContainer` convention**
+ * (`docs/DECISIONS.md` D-019/D-030), the same as every other
+ * `*.integration.test.ts` file in this repo — including this file's own
+ * sibling, `test/unit/store/relation-index.integration.test.ts`, whose
+ * own top-of-file doc comment records the full account of why an earlier
+ * ephemeral-database-within-an-existing-server mechanism (justified by a
+ * sandbox with no outbound Docker-registry access) was the wrong thing to
+ * ship: CI provisions no such pre-existing `DATABASE_URL`-reachable
+ * server for this job, and the first real CI run of that mechanism failed
+ * with exactly the "DATABASE_URL must be set" error that predicts, while
+ * every container-based file in the same job passed. Fixed here too, the
+ * same way.
  */
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
 import { writeTuple } from '../../src/store/tuples.js';
 import { publishSchema } from '../../src/schema/publish.js';
@@ -132,96 +141,45 @@ import { runMigrations } from '../../src/store/migrate.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../src/store/migrations', import.meta.url));
 
-// ---------------------------------------------------------------------------
-// Ephemeral-database bootstrap — see this file's own top-of-file doc comment.
-// ---------------------------------------------------------------------------
+let container: StartedPostgreSqlContainer;
+let pool: Pool;
+/**
+ * A separate `Pool` connected to the SAME container, but with a short
+ * `lock_timeout` applied via the connection's own startup-packet `options`
+ * parameter — see this file's own top-of-file doc comment, point 3, for
+ * why this is the reliable way to force a real Postgres lock-wait error
+ * rather than a `SET` query racing first use. Used only by the
+ * deliberately adversarial `describe` block that names the real finding
+ * above — every other assertion in this file runs on `pool`, Postgres's
+ * own default (no timeout) settings, matching this project's actual
+ * current configuration.
+ */
+let shortLockTimeoutPool: Pool;
 
-function requireAdminConnectionString(): string {
-  const base = process.env.DATABASE_URL;
-  if (!base) {
-    throw new Error(
-      'DATABASE_URL must be set to a reachable Postgres server this process has CREATEDB ' +
-        "privilege on — see this file's own top-of-file doc comment for why, in place of this " +
-        "repo's usual PostgreSqlContainer convention.",
-    );
-  }
-  const url = new URL(base);
-  url.pathname = '/postgres';
-  return url.toString();
-}
-
-function ephemeralDbName(): string {
-  return `leopard_race_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-async function bootstrapEphemeralDatabase(): Promise<{
-  pool: Pool;
-  /**
-   * A separate `Pool` connected to the SAME database, but with a short
-   * `lock_timeout` applied via the connection's own startup-packet
-   * `options` parameter — see this file's own top-of-file doc comment,
-   * point 3, for why this is the reliable way to force a real Postgres
-   * lock-wait error rather than a `SET` query racing first use. Used only
-   * by the deliberately adversarial `describe` block that names the real
-   * finding above — every other assertion in this file runs on `pool`,
-   * Postgres's own default (no timeout) settings, matching this project's
-   * actual current configuration.
-   */
-  shortLockTimeoutPool: Pool;
-  adminPool: Pool;
-  dbName: string;
-}> {
-  const adminPool = new Pool({ connectionString: requireAdminConnectionString() });
-  adminPool.on('error', (err) => {
-    console.error(`admin pool error (expected during teardown): ${err.message}`);
-  });
-  const dbName = ephemeralDbName();
-  await adminPool.query(`create database "${dbName}"`);
-
-  const url = new URL(process.env.DATABASE_URL!);
-  url.pathname = `/${dbName}`;
-  const connectionString = url.toString();
-
-  const pool = new Pool({ connectionString });
+beforeAll(async () => {
+  container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  const connectionString = container.getConnectionUri();
+  pool = new Pool({ connectionString });
   pool.on('error', (err) => {
-    console.error(`pool error (expected during teardown): ${err.message}`);
+    console.error(`pool error (expected during container teardown): ${err.message}`);
   });
   await runMigrations(pool, MIGRATIONS_DIR);
 
   // 50ms — short enough to reliably fire while a multi-hundred-ms rebuild
   // transaction holds `ACCESS EXCLUSIVE` on `relation_membership_index`,
   // long enough not to spuriously fire on ordinary, uncontended queries.
-  const shortLockTimeoutPool = new Pool({ connectionString, options: '-c lock_timeout=50' });
+  shortLockTimeoutPool = new Pool({ connectionString, options: '-c lock_timeout=50' });
   shortLockTimeoutPool.on('error', (err) => {
-    console.error(`short-lock-timeout pool error (expected during teardown): ${err.message}`);
+    console.error(
+      `short-lock-timeout pool error (expected during container teardown): ${err.message}`,
+    );
   });
-
-  return { pool, shortLockTimeoutPool, adminPool, dbName };
-}
-
-async function teardownEphemeralDatabase(
-  pool: Pool,
-  shortLockTimeoutPool: Pool,
-  adminPool: Pool,
-  dbName: string,
-): Promise<void> {
-  await pool.end();
-  await shortLockTimeoutPool.end();
-  await adminPool.query(`drop database if exists "${dbName}" with (force)`);
-  await adminPool.end();
-}
-
-let pool: Pool;
-let shortLockTimeoutPool: Pool;
-let adminPool: Pool;
-let dbName: string;
-
-beforeAll(async () => {
-  ({ pool, shortLockTimeoutPool, adminPool, dbName } = await bootstrapEphemeralDatabase());
-}, 120_000);
+}, 180_000);
 
 afterAll(async () => {
-  await teardownEphemeralDatabase(pool, shortLockTimeoutPool, adminPool, dbName);
+  await pool.end();
+  await shortLockTimeoutPool.end();
+  await container.stop();
 });
 
 // ---------------------------------------------------------------------------
