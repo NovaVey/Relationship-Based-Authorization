@@ -30,6 +30,7 @@ import type { Pool } from 'pg';
 
 import { buildOpenApiDocument, type OpenApiOperation } from '../../../src/api/openapi-document.js';
 import { buildServer } from '../../../src/api/server.js';
+import { API_ERROR_STATUS } from '../../../src/api/errors.js';
 
 // ---------------------------------------------------------------------------
 // Every route `src/api/server.ts` registers today, and whether it's gated
@@ -44,20 +45,33 @@ interface ExpectedRoute {
   path: string;
   method: 'get' | 'post' | 'delete';
   gated: boolean;
+  /**
+   * Whether this route's own handler calls `findOutOfScopeNamespace`
+   * (`src/api/server.ts`) and can therefore really return a 403 `forbidden`
+   * (`src/api/errors.ts` `forbiddenError`) to a namespace-scoped DB-backed
+   * API key. Kept as its own field rather than reused from `gated` above —
+   * today every scope-checked route also happens to be a gated one (an
+   * unauthenticated caller has no scope to check against in the first
+   * place), but the two are independent facts about a route, and asserting
+   * against a dedicated field means a future route that's gated without
+   * being scope-checked (or vice versa) still gets the right expectation
+   * instead of inheriting the wrong one by coincidence.
+   */
+  scopeChecked: boolean;
 }
 
 const EXPECTED_ROUTES: ExpectedRoute[] = [
-  { path: '/check', method: 'post', gated: true },
-  { path: '/check/batch', method: 'post', gated: true },
-  { path: '/expand', method: 'post', gated: true },
-  { path: '/list-objects', method: 'post', gated: true },
-  { path: '/list-users', method: 'post', gated: true },
-  { path: '/tuples', method: 'post', gated: true },
-  { path: '/tuples', method: 'delete', gated: true },
-  { path: '/schema/compile', method: 'post', gated: false },
-  { path: '/schema/publish', method: 'post', gated: true },
-  { path: '/health', method: 'get', gated: false },
-  { path: '/openapi.json', method: 'get', gated: false },
+  { path: '/check', method: 'post', gated: true, scopeChecked: true },
+  { path: '/check/batch', method: 'post', gated: true, scopeChecked: true },
+  { path: '/expand', method: 'post', gated: true, scopeChecked: true },
+  { path: '/list-objects', method: 'post', gated: true, scopeChecked: true },
+  { path: '/list-users', method: 'post', gated: true, scopeChecked: true },
+  { path: '/tuples', method: 'post', gated: true, scopeChecked: true },
+  { path: '/tuples', method: 'delete', gated: true, scopeChecked: true },
+  { path: '/schema/compile', method: 'post', gated: false, scopeChecked: false },
+  { path: '/schema/publish', method: 'post', gated: true, scopeChecked: true },
+  { path: '/health', method: 'get', gated: false, scopeChecked: false },
+  { path: '/openapi.json', method: 'get', gated: false, scopeChecked: false },
 ];
 
 function referencesBearerAuth(operation: OpenApiOperation): boolean {
@@ -113,6 +127,40 @@ describe('buildOpenApiDocument', () => {
       expect(operation?.security).toEqual([]);
     },
   );
+
+  // Finding #7 (doc-drift): every route whose real handler calls
+  // `findOutOfScopeNamespace` (`src/api/server.ts`) can really answer 403
+  // `forbidden` (`src/api/errors.ts` `forbiddenError`) to a namespace-scoped
+  // DB-backed API key, but the document previously jumped straight from
+  // 401 to 429 on all of them. These two blocks pin both directions — a
+  // documented 403 on every scope-checked route, and no *undocumented*
+  // 403 claimed on a route whose handler never actually produces one — so
+  // this can't silently regress, or silently over-claim, again.
+  it.each(EXPECTED_ROUTES.filter((r) => r.scopeChecked))(
+    'documents a 403 response on the scope-checked route $method $path',
+    ({ path, method }) => {
+      const operation = doc.paths[path]?.[method];
+      expect(operation).toBeDefined();
+      expect(operation?.responses['403']).toBeDefined();
+    },
+  );
+
+  it.each(EXPECTED_ROUTES.filter((r) => !r.scopeChecked))(
+    'documents no 403 response on the non-scope-checked route $method $path',
+    ({ path, method }) => {
+      const operation = doc.paths[path]?.[method];
+      expect(operation).toBeDefined();
+      expect(operation?.responses['403']).toBeUndefined();
+    },
+  );
+
+  it('documents the real ApiErrorCode union (src/api/errors.ts) on the shared ApiError schema, including forbidden', () => {
+    const apiError = doc.components.schemas.ApiError as {
+      properties: { error: { properties: { code: { enum: string[] } } } };
+    };
+    const documentedCodes = new Set(apiError.properties.error.properties.code.enum);
+    expect(documentedCodes).toEqual(new Set(Object.keys(API_ERROR_STATUS)));
+  });
 
   it('documents no route this generator was never told about beyond the expected set', () => {
     const documentedPairs = new Set<string>();
