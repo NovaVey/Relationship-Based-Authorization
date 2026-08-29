@@ -297,8 +297,18 @@ export async function createApiKey(
  * value" discipline `src/store/tuples.ts`'s own identifier validation
  * already applies one layer up from its own SQL.
  */
+// Full-repo audit finding #12 (2026-08-29): the `/^\d+$/` shape check alone
+// never bounded magnitude, so an id like a 30-digit numeral passed both this
+// check and the CLI's identical pre-check, then failed only once it reached
+// Postgres — "value out of range for type bigint" from the driver, caught by
+// the outer catch and reported as an exit-3 infrastructure message instead
+// of the exit-2 argument error this file's own doc comment says a malformed
+// id should be. `id`'s real column type is `bigint` (signed 64-bit), whose
+// max value is 2^63 - 1.
+const POSTGRES_BIGINT_MAX = 9223372036854775807n;
+
 export async function revokeApiKey(pool: QueryExecutor, id: string): Promise<boolean> {
-  if (!/^\d+$/.test(id)) {
+  if (!/^\d+$/.test(id) || BigInt(id) > POSTGRES_BIGINT_MAX) {
     throw new Error(`invalid api key id '${id}' — must be a non-negative integer`);
   }
   const { rowCount } = await pool.query(

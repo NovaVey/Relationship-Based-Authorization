@@ -159,7 +159,15 @@ export async function apikeyRevoke(idRaw: string): Promise<void> {
   // here first means a non-numeric id is reported as the argument error it
   // is (exit code 2) regardless of whether `DATABASE_URL` happens to be
   // configured, matching every other command in this CLI.
-  if (!/^\d+$/.test(idRaw)) {
+  // Full-repo audit finding #12 (2026-08-29): the shape check alone never
+  // bounded magnitude — an id too large for a `bigint` (this column's real
+  // Postgres type) passed here, then failed only once it reached Postgres,
+  // surfacing as an exit-3 infrastructure message instead of this exit-2
+  // argument error. Mirrors `revokeApiKey`'s identical bound in
+  // `db-api-keys.ts` (same defense-in-depth duplication as the shape check
+  // itself, one line above).
+  const POSTGRES_BIGINT_MAX = 9223372036854775807n;
+  if (!/^\d+$/.test(idRaw) || BigInt(idRaw) > POSTGRES_BIGINT_MAX) {
     console.error(`invalid api key id '${idRaw}' — must be a non-negative integer`);
     process.exitCode = 2;
     return;

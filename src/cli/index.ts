@@ -179,7 +179,14 @@ soundness
     },
   );
 
-const audit = program.command('audit').description('Checks audit-log hash-chain operations');
+// Full-repo audit finding #13 (2026-08-29): this description no longer
+// covered its own contents once `privesc` (a privilege-escalation/policy-
+// drift scanner, unrelated to hash chains) was nested under this group —
+// a user skimming top-level `--help` for it had no textual signal that
+// `audit` is where to look.
+const audit = program
+  .command('audit')
+  .description('Audit-trail integrity and access-policy review operations');
 
 audit
   .command('verify')

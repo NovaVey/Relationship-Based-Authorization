@@ -188,6 +188,25 @@ describe('revokeApiKey', () => {
     expect(pool.query).not.toHaveBeenCalled();
   });
 
+  it('an-id-overflowing-bigint-is-rejected-before-pool-query-is-ever-called', async () => {
+    // Full-repo audit finding #12 (2026-08-29): a numeral this large passes
+    // the /^\d+$/ shape check but can never fit `id`'s real Postgres bigint
+    // column (max 2^63 - 1) — before the fix this reached pool.query and
+    // failed as an opaque driver-level "value out of range for type bigint".
+    const pool = fakePool([]);
+    await expect(revokeApiKey(pool, '99999999999999999999')).rejects.toThrow(
+      /must be a non-negative integer/,
+    );
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('the-maximum-valid-bigint-id-is-accepted-by-validation', async () => {
+    const pool: QueryExecutor & { query: ReturnType<typeof vi.fn> } = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
+    };
+    await expect(revokeApiKey(pool, '9223372036854775807')).resolves.toBe(true);
+  });
+
   it('a-real-updated-row-rowCount-1-reports-true', async () => {
     const pool: QueryExecutor & { query: ReturnType<typeof vi.fn> } = {
       query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
