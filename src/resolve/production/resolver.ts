@@ -742,7 +742,32 @@ async function resolve(
         // propagate straight through `resolve()`/`evalRewrite()` and fail a
         // check the live CTE alone would have answered correctly — strictly
         // worse than the feature being off).
+        //
+        // **A second, more subtle gap in that same "falls through
+        // unconditionally" claim, found live and closed here — not merely
+        // catching the exception is not enough.** Postgres poisons an
+        // *entire* transaction the instant any statement inside it errors:
+        // every subsequent statement on this same connection fails with
+        // "current transaction is aborted, commands ignored until end of
+        // transaction block," until a `ROLLBACK` (whole transaction) or a
+        // `ROLLBACK TO SAVEPOINT` restores it. Confirmed live: a real
+        // `lock_timeout` racing a concurrent rebuild's own `TRUNCATE` (an
+        // ordinary hardening config, not an exotic one) makes
+        // `lookupRelationMembershipIndex`'s own SELECT fail — the `catch`
+        // below correctly swallows *that* error, but without the
+        // `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` pair here, the immediately
+        // following `sqlRelationMembershipWithWitness` call — on the same,
+        // now-poisoned connection — would itself throw a *second*, uncaught
+        // "transaction is aborted" error, propagating straight through and
+        // failing the whole check exactly as if this boundary didn't exist
+        // at all. A `SAVEPOINT` (Postgres's own standard mechanism for
+        // "try a statement, and if it errors, un-poison the transaction
+        // without a second connection") is genuinely new to this codebase —
+        // `grep -rn "SAVEPOINT" src/` returns nothing before this fix —
+        // disclosed the same way `pg_try_advisory_xact_lock`'s own novelty
+        // already is above.
         let idx: RelationIndexLookup;
+        await ctx.client.query('SAVEPOINT leopard_lookup');
         try {
           idx = await lookupRelationMembershipIndex(
             ctx.client,
@@ -752,7 +777,13 @@ async function resolve(
             remainingDepth,
             ctx.relationIndexFloor,
           );
+          await ctx.client.query('RELEASE SAVEPOINT leopard_lookup');
         } catch {
+          // Restores this connection's transaction to the state it was in
+          // right before the lookup — the fallback call below now runs on
+          // a genuinely healthy connection, not a poisoned one.
+          await ctx.client.query('ROLLBACK TO SAVEPOINT leopard_lookup');
+          await ctx.client.query('RELEASE SAVEPOINT leopard_lookup');
           idx = { hit: false }; // logged/counted elsewhere, never re-thrown
         }
         if (idx.hit) {

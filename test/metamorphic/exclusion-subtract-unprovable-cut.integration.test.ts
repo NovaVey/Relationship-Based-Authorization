@@ -87,6 +87,7 @@ import { writeTuple, type TupleKey } from '../../src/store/tuples.js';
 import { publishSchema } from '../../src/schema/publish.js';
 import { productionCheck } from '../../src/resolve/production/resolver.js';
 import { runMigrations } from '../../src/store/migrate.js';
+import { rebuildRelationMembershipIndex } from '../../src/store/relation-index.js';
 import {
   buildMechanism1Fixture,
   buildMechanism2Fixture,
@@ -361,5 +362,202 @@ describe("Property B — an exclusion subtract branch that hits the SQL relation
     );
 
     expect(totalCutoffChecks).toBe(SEED_COUNT);
+  }, 600_000);
+});
+
+// ---------------------------------------------------------------------------
+// Leopard index Candidate F — the depth-length gate, checked against this
+// file's own Property B fixtures (`docs/LEOPARD-INDEX-PROPOSAL.md`)
+// ---------------------------------------------------------------------------
+
+/**
+ * **Extended, not replaced** (`docs/LEOPARD-INDEX-PROPOSAL.md`'s own
+ * file-by-file test plan, the row naming this exact file): re-runs Property
+ * B's own `buildMechanism2Fixture` seeded shapes with the Leopard index
+ * WARMED by an uncapped rebuild (`rebuildRelationMembershipIndex` — "No
+ * depth ceiling on this recursion," deliberately, per the proposal's own
+ * "The rebuild" section) at a real depth strictly LARGER than the pinned
+ * `maxDepth` values used below. `atToken` for every check is pinned to
+ * exactly that rebuild's own returned `watermarkToken`.
+ *
+ * **An adversarial finding, disclosed rather than silently worked around:
+ * checking `fixture.permissionName` ('view', the `grant - blocked`
+ * exclusion) at `cutoffMaxDepth` — the shape this task's own instructions
+ * first pointed at — CANNOT actually fail-check Candidate F's depth-length
+ * gate, and a fail-check confirmed this live before this file was trusted.**
+ * `blocked` sits in the exclusion's own NEGATED (`subtract`) position.
+ * Tracing `resolver.ts`'s real `exclusion` case: if `subtract.allowed ===
+ * true` (an index hit for `blocked`, regardless of how long its stored path
+ * is), the exclusion resolves `allowed: false` (denied) via the ordinary
+ * `subtractProven` path — safe, by construction, in the ALLOW-only-index
+ * direction, since a *bigger* index (longer permitted path) can only ever
+ * make `blocked` *more* likely to be found true, which only ever makes
+ * `view` *more* likely to (correctly, safely) deny. And per the D-158 fix
+ * already landed in this worktree (see `case 'exclusion'` in
+ * `resolver.ts`), an *uncertain* `subtract` (the live-CTE fallback on a
+ * genuine index miss) ALSO makes the exclusion fail closed to `denied`. Both
+ * of Candidate F's own "gate present" and "gate absent" branches therefore
+ * lead to the IDENTICAL `denied` outcome for `view` — a broken gate cannot
+ * flip this specific check to `allowed: true` at all. A live fail-check
+ * (disabling the gate entirely and re-running the `view`-level assertion)
+ * confirmed this directly: the assertion stayed GREEN with the gate
+ * disabled, proving it was never capable of catching this bug. **Do not
+ * mistake a `view`-level assertion here for a real Candidate F proof — it
+ * is kept below only as a non-regression sanity check (a different, real
+ * failure mode: Leopard index enabled must not somehow break Property B's
+ * own now-passing exclusion behavior), explicitly labeled as such.**
+ *
+ * **The property this file actually load-bears Candidate F with: a DIRECT,
+ * top-level check on the bare `blocked` RELATION itself** (never through
+ * `view`'s own negation) — the positive-position shape
+ * `docs/LEOPARD-INDEX-PROPOSAL.md`'s own Candidate F fail-check names
+ * verbatim: "run a check pinned to `maxDepth: 3` against a subject only
+ * reachable at depth 5 through the index's stored path; confirm it now
+ * wrongly reports ALLOWED, while the same check with the index off...
+ * correctly reports DENIED." A direct top-level check on a bare relation
+ * enters `resolve()` at `depth = 0` (no permission-entry `+1`), so
+ * `remainingDepth = maxDepth` exactly, with NO offset to account for
+ * (unlike a check nested inside `view`'s own exclusion, where `subtract`
+ * only ever receives `ctx.maxDepth - 1` — this file's own
+ * `Mechanism2Fixture.cutoffMaxDepth` doc comment states that derivation).
+ * The real, uncapped rebuild materializes `blocked`'s own full,
+ * `chainLength`-hop-deep membership chain (verified directly against the
+ * real `relation_membership_index` table below, never merely assumed).
+ * Checking `blocked` directly at `maxDepth: fixture.chainLength - 1` (one
+ * hop short of what the live CTE needs — `fetchReachableFrontier`'s own
+ * `m.depth < maxDepth` requirement, per this fixture's own doc comment)
+ * must MISS the too-long stored row and fall through to a genuinely
+ * uncertain live-CTE `denied`; a broken gate instead wrongly serves the
+ * stored hit regardless of budget, flipping this direct check to a live,
+ * reproducible `ALLOWED` — an index_false_grant. A positive control at
+ * `maxDepth: fixture.chainLength` (exactly sufficient) confirms the SAME
+ * stored row correctly HITS one hop of budget later, ruling out "the index
+ * never engaged with this fixture at all" as an alternative explanation for
+ * the miss.
+ */
+describe("Leopard index Candidate F — the depth-length gate must reject a rebuild-discovered path longer than the checking call's own remaining depth budget (mechanism 2, this file's own Property B fixtures, rebuild depth LARGER than the pinned maxDepth)", () => {
+  const SEED_COUNT = 10;
+
+  it(`across ${SEED_COUNT} random seeds (varying nested-group chain length), an UNCAPPED rebuild that genuinely discovers the real 'blocked' membership chain must still leave a DIRECT, top-level index-accelerated check on 'blocked' one hop short of budget DENIED, never a false ALLOW from the index silently overriding the caller's own narrower depth budget; the SAME stored row must correctly HIT one hop of budget later; Property B's own exclusion-level check must not regress either way`, async () => {
+    let totalCutoffChecks = 0;
+    let totalNaturalBoundaryChecks = 0;
+    let totalExclusionRegressionChecks = 0;
+    let rowsConfirmedRealLength = 0;
+
+    for (let seedIndex = 0; seedIndex < SEED_COUNT; seedIndex += 1) {
+      const seed = uniqueName(`leopardF${seedIndex}`);
+      const fixture = buildMechanism2Fixture(seed);
+
+      await publishOk(fixture.schemaSource);
+      await writeAllSequentially(seed, fixture.tuples);
+
+      // No depth cap, ever ("No depth ceiling on this recursion",
+      // docs/LEOPARD-INDEX-PROPOSAL.md's own "The rebuild" section) — the
+      // rebuild discovers the REAL, full-length 'blocked' membership chain
+      // regardless of how small the pinned maxDepth values checked below
+      // are. Zero writes happen between this rebuild and every check below
+      // for this seed.
+      const rebuildResult = await rebuildRelationMembershipIndex(pool);
+      expect(
+        rebuildResult.lockAcquired,
+        `${fixture.description}\nseed=${seed}: the rebuild's advisory lock was not acquired — cannot proceed with this seed`,
+      ).toBe(true);
+      expect(
+        rebuildResult.published,
+        `${fixture.description}\nseed=${seed}: the rebuild did not publish`,
+      ).toBe(true);
+      const pinToken = rebuildResult.watermarkToken;
+
+      // Non-vacuity, live-queried directly against the real table (never
+      // trusted from the rebuild's own row count alone): the row this
+      // whole property depends on must actually exist, and its real
+      // via_path hop count must genuinely equal this fixture's own
+      // chainLength — otherwise a "miss" below would be trivially true for
+      // the wrong reason (no row at all), never because the length gate
+      // did its job.
+      const { rows: indexRows } = await pool.query<{ via_path: string[] }>(
+        `select via_path from relation_membership_index
+           where object_ns = $1 and object_id = $2 and relation = 'blocked'
+             and subject_ns = 'user' and subject_id = $3`,
+        [fixture.docNamespace, fixture.queryObjectId, fixture.subjectId],
+      );
+      const indexedRow = indexRows[0];
+      expect(
+        indexedRow,
+        `${fixture.description}\nseed=${seed}: the uncapped rebuild did not materialize a 'blocked' membership row at all — this test cannot exercise the length gate without one`,
+      ).toBeDefined();
+      const storedHopCount = (indexedRow?.via_path.length ?? 0) - 1;
+      expect(
+        storedHopCount,
+        `${fixture.description}\nseed=${seed}: the rebuild's own stored via_path hop count (${storedHopCount}) does not match this fixture's real chainLength (${fixture.chainLength}) — a generator/rebuild mismatch, not a resolver finding`,
+      ).toBe(fixture.chainLength);
+      rowsConfirmedRealLength += 1;
+
+      // *** The core, load-bearing Candidate F assertion: a DIRECT,
+      // top-level check on the bare 'blocked' relation, one hop short of
+      // the real chain's own length, with the index enabled. ***
+      const directCutoffMaxDepth = fixture.chainLength - 1;
+      totalCutoffChecks += 1;
+      const directCutoffResult = await productionCheck(
+        pool,
+        ref('user', fixture.subjectId),
+        ref(fixture.docNamespace, fixture.queryObjectId),
+        'blocked',
+        { atToken: pinToken, maxDepth: directCutoffMaxDepth, useRelationIndex: true },
+      );
+      expect(
+        directCutoffResult.allowed,
+        `${fixture.description}\nseed=${seed}: a DIRECT top-level check on 'blocked' at maxDepth=${directCutoffMaxDepth} (one hop short of the real, ${fixture.chainLength}-hop chain) WITH the Leopard index enabled and warmed by an uncapped rebuild resolved ALLOWED — the depth-length gate (Candidate F, docs/LEOPARD-INDEX-PROPOSAL.md) failed to reject a stored path longer than this call's own remaining depth budget, silently overriding the caller's own narrower maxDepth. This is a live index_false_grant, not a hypothetical one.`,
+      ).toBe(false);
+
+      // Positive control, same stored row, one hop more budget: proves the
+      // miss above is really the length gate at work, not the index simply
+      // never engaging with this fixture's shape at all for some unrelated
+      // reason (e.g. a stale watermark, the wrong root).
+      totalNaturalBoundaryChecks += 1;
+      const directNaturalResult = await productionCheck(
+        pool,
+        ref('user', fixture.subjectId),
+        ref(fixture.docNamespace, fixture.queryObjectId),
+        'blocked',
+        { atToken: pinToken, maxDepth: fixture.chainLength, useRelationIndex: true },
+      );
+      expect(
+        directNaturalResult.allowed,
+        `${fixture.description}\nseed=${seed}: a DIRECT top-level check on 'blocked' at maxDepth=${fixture.chainLength} (exactly enough budget for the real chain) WITH the index enabled resolved DENIED — the same stored row that correctly missed one hop of budget earlier should now correctly HIT; if this fails, the miss above may be for an unrelated reason (stale watermark, wrong root), not the length gate specifically`,
+      ).toBe(true);
+
+      // Non-regression sanity, NOT a Candidate F fail-check by itself (see
+      // this describe block's own doc comment for why 'blocked' sitting in
+      // an exclusion's negated position makes every combination of
+      // index-hit/miss here safe regardless of the length gate) — confirms
+      // Leopard-index acceleration does not somehow break Property B's own
+      // already-fixed, now-passing exclusion behavior at its own pinned
+      // cutoffMaxDepth.
+      totalExclusionRegressionChecks += 1;
+      const exclusionResult = await productionCheck(
+        pool,
+        ref('user', fixture.subjectId),
+        ref(fixture.docNamespace, fixture.queryObjectId),
+        fixture.permissionName,
+        { atToken: pinToken, maxDepth: fixture.cutoffMaxDepth, useRelationIndex: true },
+      );
+      expect(
+        exclusionResult.allowed,
+        `${fixture.description}\nseed=${seed}: (non-regression) at maxDepth=${fixture.cutoffMaxDepth} with the Leopard index enabled, '${fixture.permissionName}' resolved ALLOWED — Property B's own already-fixed exclusion behavior regressed when the index was turned on`,
+      ).toBe(false);
+    }
+
+    console.log(
+      `[Leopard index Candidate F] ${SEED_COUNT} seeds; ${rowsConfirmedRealLength} rows independently ` +
+        `confirmed real-length in relation_membership_index; ${totalCutoffChecks} direct one-hop-short ` +
+        `checks all correctly DENIED; ${totalNaturalBoundaryChecks} direct exactly-enough-budget checks ` +
+        `all correctly ALLOWED; ${totalExclusionRegressionChecks} exclusion-level non-regression checks ` +
+        `all correctly DENIED`,
+    );
+
+    expect(totalCutoffChecks).toBe(SEED_COUNT);
+    expect(totalNaturalBoundaryChecks).toBe(SEED_COUNT);
+    expect(rowsConfirmedRealLength).toBe(SEED_COUNT);
   }, 600_000);
 });

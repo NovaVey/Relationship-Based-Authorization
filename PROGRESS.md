@@ -2702,3 +2702,25 @@ Full account: `docs/DECISIONS.md` D-161.
 **Verification:** all clean throughout. Fast suite: 72 files, 1107 tests (up from 70/1077). Shipped as eight commits on one PR.
 
 Full account: `docs/DECISIONS.md` D-162.
+
+## The Leopard index (Phase A): an offline, pinned-checks-only, ALLOW-only acceleration structure for nested-group membership (D-163)
+
+**Owner:** design synthesized from four independent explorations + a four-lens adversarial review, before any implementation; implementation split across three agents (soundness-engineer for the store/resolver core and the soundness-harness third arm, general-purpose for the CLI/env surface), then three parallel test-authoring agents for the test suite; every real-Postgres test independently re-run live by this session's own main agent.
+
+Accelerates `sqlRelationMembershipWithWitness`'s nested-group-membership walk (mechanism 2) via an offline, periodically-rebuilt materialization — Zanzibar's own "Leopard index," scoped down deliberately: pinned checks only, ALLOW-only. An index miss, for any reason, falls through unmodified to the unchanged live CTE; the index never asserts an authoritative DENY.
+
+**Process, not just code.** `docs/LEOPARD-INDEX-PROPOSAL.md` records the full design → adversarial review → correct discipline (D-140's own precedent) applied to a brand-new feature before implementation began: four independent draft designs synthesized into one proposal, then a genuine four-lens review that found and fixed real defects in the draft's own code samples — a hardcoded safety flag that would have reopened D-144's expiring-tuple gap, a missing exception boundary, a wrong `via_path` shape, no rebuild collision-handling, and a test plan that would have silently tested nothing in its own `'warm'` verification mode.
+
+**What shipped:** the migration + `src/store/relation-index.ts` (`rebuildRelationMembershipIndex`/`lookupRelationMembershipIndex`), the `resolve()` integration in `src/resolve/production/resolver.ts`, `authz leopard refresh/status` (`src/cli/commands/leopard.ts`), and the differential-fuzz harness's third comparison arm (`relationIndex: 'off'|'cold'|'warm'`, comparing production against _itself_ rather than the reference oracle).
+
+**Three more real bugs found and fixed live during implementation, none of them soundness bugs, one of them serious.** `rebuild_finished_at`/`rebuild_started_at` used `now()`, which Postgres freezes to a transaction's own start rather than the real finish time — confirmed live via a `pg_sleep(2)` bracketed by two `now()` reads; switched to `clock_timestamp()`. `rebuildRelationMembershipIndex` had no way to tell "lock already held" apart from "ran and found nothing" — closed with a dedicated `lockAcquired` field. The serious one: the exception boundary around the index lookup swallowed its own error correctly, but Postgres poisons a whole transaction on any statement error, so the very next statement — the live-CTE fallback the boundary exists to protect — threw a second, uncaught error under real lock contention (a realistic `lock_timeout` setting, not an exotic one), defeating the "falls through unconditionally" guarantee. Reproduced live (15/15 clean at the default `lock_timeout=0`, 15/15 real throws at `lock_timeout=50ms`), fixed with a `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` pair — a genuinely new pattern in this codebase, disclosed as such.
+
+**An infrastructure failure, worked around rather than retried blindly.** The first attempt to write the test suite used worktree-isolated workflow agents; all three failed identically at the harness's own permission layer before doing any work. Relaunched directly via plain (non-isolated) agents against the shared checkout instead — safe since each wrote disjoint files — and all three completed.
+
+**A real design flaw in the task's own first-suggested test shape, found and corrected before shipping:** checking the Candidate F depth-length gate through an exclusion's own negated branch can't actually prove anything, since D-158's own fail-closed convergence makes a working gate and a broken one produce the identical `denied` result. Rebuilt around a direct, positive-position check on the bare relation instead — confirmed live that this version genuinely catches the bug the exclusion-level version couldn't.
+
+**Independently re-verified live, every real-Postgres test personally re-run by this session's own main agent, not just trusted from reports** — including a fourth bug this pass found on its own: `authz leopard status --format json` returned `stalenessMs` as a quoted string instead of a JSON number (Postgres `numeric` returned as a raw string by `pg`, never coerced), fixed with the same `Number(...)`-at-the-read discipline the adjacent `watermark_token` field already used.
+
+**Verification:** `npx tsc --noEmit`, `npx eslint .`, `npx prettier --check .` all clean. Fast suite: 73 files, 1119 tests (up from 72/1107). Every real-Postgres test for this feature re-run individually against a live Postgres 16 instance and confirmed passing.
+
+Full account: `docs/DECISIONS.md` D-163.

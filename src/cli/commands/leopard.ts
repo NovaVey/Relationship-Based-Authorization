@@ -179,7 +179,18 @@ export async function leopardStatus(options: LeopardStatusCliOptions): Promise<v
     const { rows } = await pool.query<{
       watermark_token: string;
       rebuild_finished_at: Date | null;
-      staleness_ms: number | null;
+      // `extract(epoch from ...)` returns Postgres `numeric`, which `pg`
+      // hands back as a raw string (never auto-coerced, to avoid silent
+      // precision loss) — the exact same class of bug `tokens.ts`'s own
+      // doc comment warns about for `write_log.token`. Confirmed live: a
+      // real `authz leopard status --format json` run returned
+      // `"stalenessMs":"1953.832000"` (a quoted JSON string) before this
+      // fix, despite `LeopardIndexStatusInfo.stalenessMs` being typed
+      // `number | null` — a real contract violation for any JSON consumer,
+      // caught by actually running the command against real Postgres, not
+      // by the type system (a `string | null` lie at the query's own type
+      // annotation is exactly what let this slip past `tsc`).
+      staleness_ms: string | null;
     }>(
       `select
          watermark_token,
@@ -191,7 +202,10 @@ export async function leopardStatus(options: LeopardStatusCliOptions): Promise<v
     const row = rows[0];
     const watermarkToken = Number(row?.watermark_token ?? 0);
     const finishedAt = row?.rebuild_finished_at ?? null;
-    const stalenessMs = row?.staleness_ms ?? null;
+    const stalenessMs =
+      row?.staleness_ms !== null && row?.staleness_ms !== undefined
+        ? Number(row.staleness_ms)
+        : null;
 
     const { rows: writeLogRows } = await pool.query<{ max_token: string | null }>(
       'select max(token) from write_log',
