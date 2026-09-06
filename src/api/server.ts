@@ -65,7 +65,8 @@ import { performCheck, type PerformCheckResult } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { listObjects, listUsers } from '../audit/list.js';
 import { writeTuple, deleteTuple, type TupleKey, type WriteTupleResult } from '../store/tuples.js';
-import { decodeToken } from '../store/tokens.js';
+import { decodeToken, currentToken } from '../store/tokens.js';
+import { fetchWatchEvents, WATCH_DEFAULT_BATCH_LIMIT } from '../store/watch.js';
 import { compileSchema } from '../schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
 import { publishSchema, listLatestNamespaceVersions } from '../schema/publish.js';
@@ -91,6 +92,8 @@ import {
   schemaCompileResponse,
   schemaPublishResponse,
   healthResponse,
+  watchEventFrame,
+  watchConnectedFrame,
 } from './responses.js';
 import {
   unauthorizedError,
@@ -263,6 +266,23 @@ const listUsersBodySchema = z
   })
   .strict();
 
+// `GET /watch` (D-174) — a query-string schema, not a body one (every other
+// gated route here is `POST` with a JSON body; this is the one exception —
+// see that route's own doc comment for why `GET` fits here specifically).
+// `since` is validated as a non-empty string here and decoded
+// (`decodeToken`) by the route handler itself, exactly like every other
+// route's `atToken` — a malformed value produces the same
+// `invalidRequestError` shape either way, not a differently-worded Zod
+// error. `.strict()` for the identical reason every body schema above has
+// it (full-repo audit finding #4): a typo'd query-param name must be a
+// visible 400, never silently ignored.
+const watchQuerySchema = z
+  .object({
+    since: z.string().min(1).optional(),
+    namespace: identifierField().optional(),
+  })
+  .strict();
+
 const tupleBodySchema = z
   .object({
     objectNs: z.string().min(1),
@@ -369,6 +389,11 @@ function parseExpiresAt(
 
 async function sendApiError(reply: FastifyReply, err: ApiErrorResponse): Promise<void> {
   await reply.code(err.status).send(err.body);
+}
+
+/** `GET /watch`'s own poll-interval pacing — a plain, uninterruptible delay. See that route's own doc comment for why a disconnect mid-sleep is noticed on the next wake, not instantly. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -1226,6 +1251,17 @@ export async function buildServer(
     config: { rateLimit: { max: 200, timeWindow: '1 minute', hook: 'preHandler' as const } },
   };
 
+  // `GET /watch` (D-174) — how many watch connections *this process* holds
+  // open right now, across every credential. A single closure-scoped
+  // counter, the same "per-process, not per-credential, resource guard"
+  // shape `CHECK_CACHE_MAX_ENTRIES`/`AUTH_FLOOD_STATE_MAX_ENTRIES` already
+  // use elsewhere in this file — incremented once a connection passes every
+  // check below and is about to be hijacked, decremented in that
+  // connection's own `finally` block, so it stays accurate regardless of
+  // which of the loop's several exit paths (disconnect, backpressure, a
+  // poll-query error) actually ends a given connection.
+  let openWatchConnections = 0;
+
   // The check-result cache (post-audit improvement, closes D-028 —
   // `src/resolve/production/cache.ts`). `createCheckCache` returns
   // `undefined` — never constructing anything — for `env.CHECK_CACHE_TTL_MS`'s
@@ -1505,6 +1541,187 @@ export async function buildServer(
       if (result === undefined) return;
       const resp = listUsersResponse(object, relation, result);
       await reply.code(resp.status).send(resp.body);
+    },
+  );
+
+  /**
+   * `GET /watch` (new feature, closes `docs/CAPABILITY-GAPS.md`'s "A Watch
+   * endpoint" gap, D-174) — a live, Server-Sent-Events stream of every
+   * `write_log` row from `?since=<token>` (or "now," if omitted) forward.
+   * `GET`, not `POST` like every other gated route here: it takes two flat
+   * scalars (`since`, `namespace`), not the nested `{ns,id}` shapes that
+   * justify `POST` elsewhere in this file's own top-of-file doc comment,
+   * and a real browser `EventSource` can only ever issue a `GET`.
+   *
+   * **Namespace scope, combining two existing precedents rather than
+   * inventing a third.** `namespace` given: gated exactly like
+   * `/list-objects`' `objectNs` (`findOutOfScopeNamespace`) — a scoped
+   * credential may watch only a namespace within its own scope. `namespace`
+   * omitted: gated exactly like `/metrics` — only an *unscoped* credential
+   * may watch with no namespace filter at all, since "every namespace,
+   * unfiltered" has no per-request namespace to scope-check against,
+   * the same reasoning `/metrics`'s own doc comment gives.
+   *
+   * **DB-polling, deliberately, not Postgres LISTEN/NOTIFY** — see
+   * `docs/DECISIONS.md` D-174 for the full tradeoff. One consequence worth
+   * stating here: every currently-open `/watch` connection runs its *own*
+   * independent poll loop, with its own cursor — there is no shared
+   * in-process broadcast state between connections, and therefore nothing
+   * here that could desync one connection's delivery because of another's.
+   * Multi-replica fan-out falls out of this for free: every replica's own
+   * loop polls the same, single `write_log` table this whole store already
+   * treats as the one source of truth, exactly the same way `REDIS_URL`'s
+   * own doc comment (`src/config/env.ts`) describes this project's *other*
+   * multi-replica-safe mechanisms — except this one needed no Redis, or
+   * any cross-process signaling at all, to get there.
+   *
+   * **Backpressure and disconnect are real exit paths, not just the happy
+   * path's inverse** — a slow/stalled client is disconnected once its own
+   * unflushed write buffer exceeds `WATCH_MAX_BUFFERED_BYTES`
+   * (`reply.raw.writableLength`), and a genuinely gone client is noticed via
+   * `request.raw`'s own `'close'` event, at the latest one
+   * `WATCH_POLL_INTERVAL_MS` tick later. Both are always safe to reconnect
+   * from with `?since=<last delivered token>` — `write_log` is the durable
+   * source of truth this whole route reads from, never anything held only
+   * in memory, so nothing already-written is ever lost by dropping a
+   * connection.
+   */
+  app.get(
+    '/watch',
+    { preHandler: gatedReadPreHandlers(), ...gatedReadRateLimit },
+    async (request, reply) => {
+      const parsed = watchQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const { since, namespace } = parsed.data;
+
+      if (namespace !== undefined) {
+        const outOfScope = findOutOfScopeNamespace(request.authScopes, [namespace]);
+        if (outOfScope !== undefined) {
+          await sendApiError(
+            reply,
+            forbiddenError(
+              `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+            ),
+          );
+          return;
+        }
+      } else if (request.authScopes !== null && request.authScopes !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            "this credential is scoped to a specific set of namespaces — /watch requires a 'namespace' filter for a scoped credential (an unscoped credential may omit it to watch every namespace)",
+          ),
+        );
+        return;
+      }
+
+      let sinceToken: number;
+      if (since !== undefined) {
+        try {
+          sinceToken = decodeToken(since);
+        } catch (err) {
+          await sendApiError(reply, invalidRequestError((err as Error).message));
+          return;
+        }
+      } else {
+        // Omitted `since` means "future writes only, starting now" —
+        // deliberately never an implicit full replay of write_log from the
+        // beginning. `?? 0` for a genuinely empty database (no write has
+        // ever happened, `currentToken` returns `null`): the next real
+        // write is token 1, and `token > 0` already catches it.
+        sinceToken = (await currentToken(pool)) ?? 0;
+      }
+
+      if (openWatchConnections >= env.WATCH_MAX_CONNECTIONS) {
+        await sendApiError(
+          reply,
+          infrastructureUnavailableError(
+            `this server already holds ${env.WATCH_MAX_CONNECTIONS} concurrent /watch connections open (WATCH_MAX_CONNECTIONS) — try again shortly`,
+          ),
+        );
+        return;
+      }
+
+      // Every check above can still fail normally (400/403/503, the exact
+      // same `sendApiError` path every other route uses) — nothing past
+      // this point can. `reply.hijack()` tells Fastify this handler now
+      // owns the raw response for the rest of the connection's life; nothing
+      // it does after this line goes through Fastify's own reply
+      // lifecycle/serialization again.
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        // A conventional hint some reverse proxies (nginx) respect to
+        // disable their own response buffering for a streamed response —
+        // harmless to send unconditionally, including behind a proxy that
+        // ignores it.
+        'X-Accel-Buffering': 'no',
+      });
+      reply.raw.write(watchConnectedFrame(sinceToken));
+
+      openWatchConnections++;
+      let closed = false;
+      request.raw.once('close', () => {
+        closed = true;
+      });
+      const heartbeatTimer = setInterval(() => {
+        if (!closed) reply.raw.write(': heartbeat\n\n');
+      }, env.WATCH_HEARTBEAT_INTERVAL_MS);
+
+      try {
+        let cursor = sinceToken;
+        while (!closed) {
+          let events;
+          try {
+            events = await fetchWatchEvents(pool, cursor, {
+              ...(namespace !== undefined ? { namespace } : {}),
+              limit: WATCH_DEFAULT_BATCH_LIMIT,
+            });
+          } catch (err) {
+            // Mid-stream infrastructure failure — headers are long since
+            // sent, so `sendApiError` (a fresh status/body) is no longer
+            // possible; end the connection honestly instead of silently
+            // skipping this tick, matching this route's own doc comment
+            // ("reconnect with `since` is always safe"). The client sees
+            // the stream end and can reconnect from `cursor` — nothing
+            // already delivered is lost, and nothing undelivered is
+            // silently dropped.
+            request.log.error({ err }, 'GET /watch: poll query failed');
+            break;
+          }
+          if (closed) break;
+          for (const event of events) {
+            reply.raw.write(watchEventFrame(event));
+            cursor = event.token;
+          }
+          if (closed) break;
+          if (reply.raw.writableLength > env.WATCH_MAX_BUFFERED_BYTES) {
+            request.log.warn(
+              { bufferedBytes: reply.raw.writableLength },
+              'GET /watch: client is not reading fast enough, closing connection',
+            );
+            break;
+          }
+          // An empty batch means "caught up as of this tick" — pace the
+          // next check by the poll interval. A non-empty batch means there
+          // may already be more waiting past this tick's own
+          // WATCH_DEFAULT_BATCH_LIMIT cap — loop again immediately to drain
+          // a backlog as fast as the database allows, rather than pacing a
+          // catch-up read by the same interval a caught-up connection uses.
+          if (events.length === 0) {
+            await sleep(env.WATCH_POLL_INTERVAL_MS);
+          }
+        }
+      } finally {
+        clearInterval(heartbeatTimer);
+        openWatchConnections--;
+        if (!reply.raw.writableEnded) reply.raw.end();
+      }
     },
   );
 

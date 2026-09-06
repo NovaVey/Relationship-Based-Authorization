@@ -51,6 +51,10 @@ const FULLY_POPULATED_VALID_ENV = {
   LEOPARD_INDEX_ENABLED: 'true',
   LEOPARD_INDEX_MAX_STALENESS_MS: '9999',
   LEOPARD_INDEX_REFRESH_INTERVAL_MS: '1234',
+  WATCH_POLL_INTERVAL_MS: '500',
+  WATCH_MAX_CONNECTIONS: '50',
+  WATCH_HEARTBEAT_INTERVAL_MS: '20000',
+  WATCH_MAX_BUFFERED_BYTES: '2000000',
 };
 
 describe('EnvSchema.safeParse — a fully-populated, valid env object', () => {
@@ -73,6 +77,10 @@ describe('EnvSchema.safeParse — a fully-populated, valid env object', () => {
       LEOPARD_INDEX_ENABLED: 'true',
       LEOPARD_INDEX_MAX_STALENESS_MS: 9999,
       LEOPARD_INDEX_REFRESH_INTERVAL_MS: 1234,
+      WATCH_POLL_INTERVAL_MS: 500,
+      WATCH_MAX_CONNECTIONS: 50,
+      WATCH_HEARTBEAT_INTERVAL_MS: 20000,
+      WATCH_MAX_BUFFERED_BYTES: 2000000,
     });
   });
 });
@@ -97,6 +105,10 @@ describe('EnvSchema.safeParse({}) — nothing is genuinely required; every field
       LEOPARD_INDEX_ENABLED: 'false',
       LEOPARD_INDEX_MAX_STALENESS_MS: 30000,
       LEOPARD_INDEX_REFRESH_INTERVAL_MS: 0,
+      WATCH_POLL_INTERVAL_MS: 250,
+      WATCH_MAX_CONNECTIONS: 100,
+      WATCH_HEARTBEAT_INTERVAL_MS: 15000,
+      WATCH_MAX_BUFFERED_BYTES: 1000000,
     });
   });
 });
@@ -123,6 +135,10 @@ describe('EnvSchema.safeParse — finding #12\'s fix: every defaulted field, not
     ['SOUNDNESS_FUZZ_QUERIES', 5000],
     ['MAX_CONCURRENCY', 8],
     ['PG_POOL_MAX', 10],
+    ['WATCH_POLL_INTERVAL_MS', 250],
+    ['WATCH_MAX_CONNECTIONS', 100],
+    ['WATCH_HEARTBEAT_INTERVAL_MS', 15000],
+    ['WATCH_MAX_BUFFERED_BYTES', 1000000],
   ] as const)(
     '%s: "" resolves to its documented default (%j), not a too_small/invalid_enum_value failure',
     (field, expectedDefault) => {
