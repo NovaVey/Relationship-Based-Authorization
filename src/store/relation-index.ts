@@ -33,6 +33,7 @@
  * aware this file exists.
  */
 import type { ConnectionSource, QueryExecutor } from './query-executor.js';
+import { currentToken } from './tokens.js';
 
 /**
  * An object or subject reference — `ns:id`. Field-for-field identical to,
@@ -483,5 +484,132 @@ export async function lookupRelationMembershipIndex(
     certain: true,
     path: row.via_path,
     touchedExpiringTuple: row.min_expires_at !== null,
+  };
+}
+
+/** A real, index-served candidate list — every id in it still passes through a real, independent `productionCheck` (`src/audit/list.ts`) before ever reaching a caller; see `docs/REVERSE-LOOKUP-PROPOSAL.md` for why that makes this structurally incapable of a false grant. */
+export interface ReverseIndexHit {
+  hit: true;
+  objectIds: string[];
+  /** Whether the subject's own reachable-object count under this relation exceeded `limit` — the same meaning `ListObjectsResult.truncated` already documents, just correctly scoped to what *this* query enumerated (see `docs/REVERSE-LOOKUP-PROPOSAL.md`'s own "no byte-identical parity" section for why this is never compared bit-for-bit against `fetchCandidateObjectIds`'s own, differently-scoped `truncated`). */
+  truncated: boolean;
+}
+
+/** A miss, for any reason at all — the index isn't caught up to right now, the query found nothing, or the query itself failed — always falls through to `src/audit/list.ts`'s own unmodified `fetchCandidateObjectIds` scan. */
+export type ReverseIndexLookup = ReverseIndexHit | { hit: false };
+
+/**
+ * `docs/REVERSE-LOOKUP-PROPOSAL.md`'s gates 2 and 3 (`fetchCandidateObjectIds`'s subject-keyed accelerant for `listObjects`) — deliberately **not** gates 1/4/5, which the caller (`src/audit/list.ts`) owns: the env check (mirroring `resolver.ts`'s own `env.LEOPARD_INDEX_ENABLED`/`options?.useRelationIndex` split, kept out of this file the same way that split already keeps it out of `lookupRelationMembershipIndex` above) and the schema-shaped checks (is `relationOrPermission` a bare relation, does it declare a wildcard-eligible subject type) both need `getLatestNamespaceConfig` (`src/schema/publish.ts`), which this file never imports — `store/` importing from `schema/` would run the dependency graph backwards (`schema/publish.ts` already imports `store/query-executor.ts`'s types), the identical reasoning this file's own top-of-file comment already gives for never importing `resolve/production/resolver.ts`.
+ *
+ * **Gate 2 — the index must be caught up to *right now*, not merely past
+ * some caller-supplied floor.** This is the one property that separates
+ * this function from `lookupRelationMembershipIndex` above in a way that
+ * actually matters, not just a stylistic difference: a forward miss there
+ * falls through to a live, correct answer, so staleness can only ever
+ * change *whether* the fast path engages, never the result. A miss here
+ * falls through to `fetchCandidateObjectIds`'s own live, correct scan for
+ * the identical reason — but a *false hit* here (an index that's behind
+ * and doesn't know it) would silently drop a real candidate from the
+ * enumeration, with nothing downstream to catch the omission. Comparing
+ * against the caller's own `atToken` (the way `lookupRelationMembershipIndex`
+ * does) doesn't close this — a caller can hold an arbitrarily old floor.
+ * Comparing against `currentToken()`, read live, does: reading the
+ * watermark first and `currentToken()` second means `watermark >= current`
+ * can only be true if no write has landed between this rebuild's own
+ * publish and this exact read, which makes the index provably complete as
+ * of *now*. See `docs/REVERSE-LOOKUP-PROPOSAL.md`'s own "Gate 2" section
+ * for the two independent counterexamples that made the weaker,
+ * floor-only comparison a real, disclosed bug in this feature's own first
+ * draft, not a hypothetical concern.
+ *
+ * **Gate 3 — an empty or errored result is a miss, never a final answer.**
+ * Two independent hazards this closes in one rule: (a) Leopard's own
+ * rebuild `TRUNCATE`s and repopulates this exact table — live-verified
+ * elsewhere in this codebase
+ * (`test/isolation/relation-index-concurrent-rebuild.integration.test.ts`)
+ * that a reader whose snapshot predates a `TRUNCATE` blocks for the whole
+ * rebuild and then sees the table as genuinely **empty**, neither the old
+ * generation nor the new one — and gate 2's own watermark check (against
+ * `relation_membership_index_state`, a table that's only ever `UPDATE`d,
+ * never `TRUNCATE`d) can pass even while a concurrent rebuild is mid-flight
+ * against *this* table, e.g. an operator re-running `authz leopard refresh`
+ * against unchanged data. (b) A never-built index (`watermark_token` at its
+ * `0` default) with `currentToken()` also `0` (nothing ever written)
+ * trivially satisfies gate 2 — this function's own row query then finds
+ * nothing, for the honest reason "there is nothing," and gate 3 treats that
+ * identically to the concurrent-`TRUNCATE` case: fall through. No
+ * `SAVEPOINT` is needed for the error half of this gate, unlike
+ * `lookupRelationMembershipIndex`'s own callers — that lookup runs inside
+ * the same `REPEATABLE READ` transaction as the rest of one check, so an
+ * uncaught error there would poison statements after it; this function's
+ * own query is a standalone, autocommit read with no surrounding
+ * transaction (`src/audit/list.ts`'s subsequent `productionCheck` calls
+ * each already open their own independent connection), so a plain
+ * `try`/`catch` fully contains the failure.
+ *
+ * **Only the candidate query itself is wrapped — the two reads before it
+ * (the watermark, `currentToken()`) deliberately are not, and that's not an
+ * inconsistency.** `TRUNCATE`'s `ACCESS EXCLUSIVE` lock is scoped to the one
+ * table it targets, `relation_membership_index` — it cannot block or fail a
+ * read against `relation_membership_index_state` (only ever `UPDATE`d) or
+ * `write_log` (append-only, untouched by any Leopard rebuild) at all. A
+ * genuine error from either of those two reads is therefore a real
+ * infrastructure problem, not a symptom of the specific race this gate
+ * exists to tolerate, and propagates uncaught — matching
+ * `listObjects`'s own documented "a genuinely unreachable database still
+ * throws" contract, which this function must not silently defeat by
+ * swallowing every possible error into a miss.
+ *
+ * The query itself is a single index-only scan against
+ * `relation_membership_index_subject_idx` (migration `0011`) — all five
+ * columns this query needs (`subject_ns, subject_id, relation, object_ns`
+ * as equality predicates, `object_id` as the one returned column) live in
+ * that index, in that order, so `order by object_id asc` is the index's
+ * own natural key order for a fixed four-column prefix, not a separate
+ * sort. `limit + 1` is the identical overflow-detection trick
+ * `fetchCandidateObjectIds` (`src/audit/list.ts`) already uses for
+ * `LIST_OBJECTS_MAX_CANDIDATES`.
+ */
+export async function fetchReverseIndexCandidates(
+  pool: QueryExecutor,
+  subject: EntityRef,
+  relation: string,
+  objectNs: string,
+  limit: number,
+): Promise<ReverseIndexLookup> {
+  const { rows: state } = await pool.query<{ watermark_token: string }>(
+    `select watermark_token from relation_membership_index_state where id = 1`,
+  );
+  const watermark = Number(state[0]?.watermark_token ?? 0);
+  const current = (await currentToken(pool)) ?? 0;
+  if (watermark < current) return { hit: false }; // gate 2 — not caught up to right now
+
+  let rows: Array<{ object_id: string }>;
+  try {
+    const result = await pool.query<{ object_id: string }>(
+      `select object_id from relation_membership_index
+        where subject_ns = $1 and subject_id = $2
+          and relation = $3 and object_ns = $4
+        order by object_id asc
+        limit $5`,
+      [subject.ns, subject.id, relation, objectNs, limit + 1],
+    );
+    rows = result.rows;
+  } catch {
+    // A real Postgres failure (e.g. a lock_timeout racing a concurrent
+    // rebuild's own TRUNCATE) — gate 3 treats this exactly like an empty
+    // result: fall through to the live scan, never propagate. Not logged
+    // here — this file has no logger dependency today (see the top-of-file
+    // comment on this file's own deliberately narrow import surface); the
+    // caller is better positioned to decide whether/how to log a miss it
+    // already has to handle either way.
+    return { hit: false };
+  }
+  if (rows.length === 0) return { hit: false }; // gate 3 — never trust an empty result as final
+
+  return {
+    hit: true,
+    objectIds: rows.slice(0, limit).map((r) => r.object_id),
+    truncated: rows.length > limit,
   };
 }

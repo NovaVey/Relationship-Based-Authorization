@@ -162,7 +162,18 @@ mechanical bulk-load step — a batch write path plus NDJSON import/export
 would give that migration deliverable a mechanism DELIVERY.md currently
 doesn't name at all.
 
-### Reverse lookup that isn't capped in the way it matters — partially addressed
+### Reverse lookup that isn't capped in the way it matters — built, `docs/DECISIONS.md` D-175
+
+**Status: built and shipped.** This section records the gap as it stood
+before it was closed — see D-175 for what actually shipped (a five-gate
+reverse-lookup accelerant for `listObjects`, reusing the Leopard index's
+own `relation_membership_index` table in the other direction via one new
+secondary index; a real design revision, not a first-draft ship, after a
+genuine adversarial review found the initial floor-comparison freshness
+gate could silently omit real objects) and for the full account of why the
+"genuinely new fourth direction, not something already named and deferred"
+framing below turned out to be exactly right — confirmed by research
+before design work began, not assumed.
 
 `listObjects` (`src/audit/list.ts:347-370`) enumerates candidates via
 `select distinct object_id from relation_tuples where object_ns = $1 order
