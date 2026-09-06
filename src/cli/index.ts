@@ -15,7 +15,7 @@ import {
   diffSchemaFile,
   rollbackSchema,
 } from './commands/schema.js';
-import { tupleWrite, tupleDelete } from './commands/tuple.js';
+import { tupleWrite, tupleDelete, tupleExport, tupleImport } from './commands/tuple.js';
 import { check } from './commands/check.js';
 import { soundnessRun } from './commands/soundness.js';
 import { expandCli } from './commands/expand.js';
@@ -117,6 +117,30 @@ tuple
   )
   .action(async (object: string, relation: string, subject: string) => {
     await tupleDelete(object, relation, subject);
+  });
+
+tuple
+  .command('export')
+  .description(
+    'Export every stored tuple (optionally one namespace) as NDJSON to stdout — closes docs/CAPABILITY-GAPS.md’s bulk-write gap',
+  )
+  .option('--namespace <ns>', 'only export tuples on this object namespace')
+  .action(async (options: { namespace?: string }) => {
+    await tupleExport(options);
+  });
+
+tuple
+  .command('import')
+  .description(
+    'Import NDJSON tuples (authz tuple export’s own output shape) from <file>, or stdin if omitted',
+  )
+  .argument('[file]', 'NDJSON file to read; omit to read from stdin')
+  .option(
+    '--progress <n>',
+    'print "imported X/Y lines" to stderr every n lines — see authz soundness run --progress for the identical convention',
+  )
+  .action(async (file: string | undefined, options: { progress?: string }) => {
+    await tupleImport(file, options);
   });
 
 program

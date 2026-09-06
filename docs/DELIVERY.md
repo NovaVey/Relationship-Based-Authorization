@@ -11,7 +11,9 @@ follows directly.
 - A namespace schema modeled from your actual product's object and
   permission structure — not this repository's `document`/`folder`/
   `group`/`org` example, your real objects, your real relations.
-- A tuple store migrated onto your infrastructure.
+- A tuple store migrated onto your infrastructure — mechanically, via
+  `authz tuple export`/`import` (NDJSON) or `POST /tuples/batch` (D-170);
+  see "Out of scope" below for what this does and doesn't cover.
 - The check engine wired into your API (or exposed as its own service
   your API calls) — the same `check`/`expand`/`write`/`schema` surface
   this repository's own `authz serve` exposes, pointed at your schema.
@@ -56,7 +58,11 @@ is.
   because they're in the group that owns its parent folder" actually
   means in relation-tuple terms, for your real objects — **is** the
   product. Outsourcing that step entirely defeats the purpose of doing
-  this at all.
+  this at all. Once that mapping exists, the mechanical bulk-load itself
+  is real, not hand-waved: `authz tuple export`/`import` round-trips the
+  whole store (or one namespace) as NDJSON, and `POST /tuples/batch`
+  writes up to 50 already-mapped tuples per call — see `docs/
+DECISIONS.md` D-170.
 
 ## Acceptance
 

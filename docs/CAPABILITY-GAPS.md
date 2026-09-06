@@ -100,7 +100,16 @@ triggers on `write_log` inserts, plus the usual SSE concerns
 (reconnect-with-`since`, backpressure, multi-replica fan-out). None of that
 is designed yet.
 
-### Bulk writes and import/export — partially addressed
+### Bulk writes and import/export — built, `docs/DECISIONS.md` D-170
+
+**Status: built and shipped.** This section records the gap as it stood
+before it was closed — see D-170 for what actually shipped
+(`POST /tuples/batch` mirroring `/check/batch`'s design, plus
+`authz tuple export`/`import` over NDJSON) and for the one real design
+correction that pass made: unlike `/check/batch`, an individual item in a
+tuple-write batch can genuinely fail its own validation, so the batch
+route reports partial success per item rather than an all-or-nothing
+verdict.
 
 The 20/min `writeRateLimit` on `POST /tuples`
 (`src/api/server.ts:1144-1145`, applied at line 1429) is already costing

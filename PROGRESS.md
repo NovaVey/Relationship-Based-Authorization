@@ -2792,3 +2792,13 @@ Full account: `docs/DECISIONS.md` D-168.
 Live end-to-end verification (real Postgres, the real built server, exactly D-168's own host-level recipe) caught a real bug before it shipped: after an allowed check, `authz_uncertain_checks_total` read 1 — impossible, since an allowed result is never uncertain. Root cause: `certain` is present if and only if `allowed` is false, so it's always `undefined` on an allowed result, and the first draft's `certain !== true` check counted that `undefined` as uncertain too — which would have made the metric read as "almost everything is uncertain" against real traffic. Fixed by gating on `!result.allowed` first, and rewrote the unit test that had encoded the wrong behavior as correct, not just the implementation.
 
 Full account: `docs/DECISIONS.md` D-169.
+
+## Third capability-gap item: bulk writes — `POST /tuples/batch` and NDJSON `export`/`import`
+
+**Owner:** main agent.
+
+`POST /tuples/batch` mirrors `/check/batch`'s design (gated, rate-limited, order-preserving, up to 50 items, scope-checked against every namespace in the batch before any write runs) but with one deliberate, real difference: unlike a check, an individual tuple write can genuinely fail its own validation (an undeclared relation, a disallowed subject type), so this route reports partial success per item — one bad tuple never sinks the other 49 — rather than the all-or-nothing verdict `/check/batch` gives. `authz tuple export`/`import` round out the same gap for the CLI: export streams every stored tuple (or one namespace) as NDJSON to stdout, paginated by the tuple table's own stable `id` cursor; import writes NDJSON back through the real `writeTuple`, concurrency-bounded like the batch route, with the identical one-bad-line-doesn't-sink-the-import principle — except a genuinely _thrown_ error (a real Postgres failure, not a per-item rejection) aborts the whole import immediately, matching this codebase's own established "an infrastructure failure is never smoothed into an ordinary per-item outcome" discipline.
+
+Live end-to-end verified against a real Postgres: a batch write with one deliberately-invalid tuple among three correctly wrote the other two and reported the bad one's real validation error; a full 22-tuple export/import round-trip into a fresh database resolved identical `check` verdicts afterward (the two-level nested-group grant, the `banned`-exclusion denial); a re-import reported 0 written/22 already existed (idempotent); a mixed-validity import wrote the one good line and reported the other two as failed, exit code 2; a `--progress` import printed milestone lines correctly.
+
+Full account: `docs/DECISIONS.md` D-170.
