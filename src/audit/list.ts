@@ -195,10 +195,13 @@ import {
   type EntityRef,
   type ProductionCheckOptions,
 } from '../resolve/production/resolver.js';
-import { expand, type ExpandNode, type ExpandOptions } from './expand.js';
+import { expand, type ExpandNode, type ExpandOptions, type SubjectRef } from './expand.js';
 
 /** Re-exported from `src/resolve/production/resolver.ts` rather than redeclared — matching `src/audit/checks.ts`'s own established precedent of reusing the resolver's own `EntityRef` for a thin wrapper file, not `resolver.ts`/`expand.ts`'s own mutual "independently redeclare, never import" discipline (that discipline exists specifically for the reference-vs-production resolver isolation boundary, §6.2 — `list.ts` is neither of those two resolvers, it's a downstream consumer of both, so nothing about that boundary applies here). Structurally identical to `expand.ts`'s own `EntityRef` regardless (both are plain `{ns, id}`), so passing one where the other's declared type is expected (as `listUsers` does, handing this file's `EntityRef` values to `expand()`) type-checks without any conversion. */
 export type { EntityRef };
+
+/** Re-exported from `src/audit/expand.ts` — the single source of truth for "concrete vs. wildcard subject" (D-162), since `expandRelation` is the earliest point that distinction is knowable. */
+export type { SubjectRef };
 
 // ---------------------------------------------------------------------------
 // listObjects
@@ -378,64 +381,225 @@ export interface ListUsersOptions {
   maxDepth?: number;
 }
 
-export interface ListUsersResult {
-  /** Every distinct concrete (`subject_relation IS NULL`) subject that the real rewrite-rule-combined boolean formula for `relationOrPermission` on `object` resolves to — deduplicated, sorted by `(ns, id)` for a stable, reproducible order (correctness is set equality; the sort is purely for a readable, diffable result, never load-bearing on its own). */
-  subjects: EntityRef[];
-}
+/**
+ * D-162 (public/wildcard subjects) — `listUsers`'s result is either the
+ * exact, fully-enumerated subject list (concrete subjects plus, where a
+ * relation grants an entire namespace, a `{kind:'wildcard', ns}` entry
+ * standing in for "everyone of that namespace" rather than expanding it),
+ * or an explicit refusal when the real answer is genuinely co-finite — see
+ * `subtractMemberSets`'s own doc comment for exactly which shape that is.
+ * Refusing loudly rather than silently returning a wrong (over- or
+ * under-inclusive) list matches this codebase's own established
+ * fail-closed, disclosed-not-hidden discipline; `/check` and `/listObjects`
+ * are never affected by this limitation, since neither is built on this
+ * `MemberSet` representation — both stay on the resolvers' own recursive
+ * walk (`src/resolve/production/resolver.ts`'s `subjectMatches`), which has
+ * no analogous "unenumerable" case at all.
+ */
+export type ListUsersResult =
+  | {
+      /** Every distinct subject — concrete or wildcard — that the real rewrite-rule-combined boolean formula for `relationOrPermission` on `object` resolves to. Wildcard entries sort first (by `ns`), then concrete entries sort by `(ns, id)` — a stable, documented convention; correctness is set equality, the sort is purely for a readable, diffable result. */
+      subjects: SubjectRef[];
+    }
+  | {
+      /** The real answer is "everyone of `ns` except finitely many named exceptions" — co-finite, and not representable as an enumerated list. See `subtractMemberSets`'s own doc comment. */
+      unenumerable: true;
+      ns: string;
+      reason: 'wildcardMinusConcreteExceptions';
+    };
 
 function subjectKey(ref: EntityRef): string {
   return `${ref.ns}:${ref.id}`;
 }
 
-/** Union of every set — the correct combinator for an `ExpandNode` `union` node and for a `tupleToUserset` node's own children (each followed object's own resolved set independently contributes, unconditionally). */
-function unionOfMemberSets(
-  sets: readonly ReadonlyMap<string, EntityRef>[],
-): Map<string, EntityRef> {
-  const result = new Map<string, EntityRef>();
-  for (const set of sets) {
-    for (const [key, ref] of set) result.set(key, ref);
+// ---------------------------------------------------------------------------
+// listUsers's wildcard-aware set combinators (D-162).
+//
+// A naive fix that only widens the RESULT type to represent a wildcard
+// entry (leaving the union/intersection/exclusion combinators themselves
+// keyed on literal concrete ids, as they were before D-162) is WRONG under
+// exclusion: for `view = viewer - banned` with `viewer@user:alice` and
+// `banned@user:*`, `check()` correctly denies alice (D-162's own resolver
+// fix, both resolvers' one shared match funnel), but a naive listUsers fix
+// would find no literal key in `banned`'s own evaluated set equal to
+// alice's, and so would falsely still list her — a real, silent
+// `/check`-vs-`listUsers` divergence, independent of the "mis-flattens a
+// stored wildcard tuple into one literal '*' entry" bug this replaces.
+//
+// The fix: every combinator below tracks wildcard COVERAGE per subject
+// namespace (`MemberSet.wildcardNs`), not just concrete keys, and
+// `isCovered` — not raw `Map.has` — is the one place "does this concrete
+// subject already satisfy this set" is decided, everywhere a combinator
+// needs to ask that question.
+// ---------------------------------------------------------------------------
+
+/**
+ * The internal computation shape `evaluateExpandNode` builds and combines:
+ * every concrete subject reached so far, plus every subject namespace
+ * covered "in full" by a wildcard grant. A wildcard's own (infinite, in
+ * principle) membership is never materialized — only which namespaces it
+ * covers is tracked.
+ */
+export interface MemberSet {
+  concrete: Map<string, EntityRef>;
+  wildcardNs: Set<string>;
+}
+
+function emptyMemberSet(): MemberSet {
+  return { concrete: new Map(), wildcardNs: new Set() };
+}
+
+/** Is `entity` a member of `set` — either named directly, or covered by a wildcard over its own namespace? The one place this question is decided; every combinator below asks it this way, never via a raw `Map.has`. */
+function isCovered(entity: EntityRef, set: MemberSet): boolean {
+  return set.wildcardNs.has(entity.ns) || set.concrete.has(subjectKey(entity));
+}
+
+/**
+ * `base` (or anything built from it) resolved to "everyone of a namespace
+ * except finitely many named exceptions" — see `subtractMemberSets`'s own
+ * doc comment for exactly when this arises. A genuinely co-finite set
+ * `MemberSet` cannot represent; this is the internal signal that propagates
+ * up to `ListUsersResult`'s own `unenumerable` shape.
+ */
+export interface Unenumerable {
+  unenumerable: true;
+  ns: string;
+}
+
+export type EvaluateExpandResult = MemberSet | Unenumerable;
+
+/** Exported for testability (mirrors this codebase's own established precedent of exporting an internal-but-useful predicate, e.g. `src/store/tuples.ts`'s `WRITE_LOG_LOCK_CLASSID`) — true iff `evaluateExpandNode`'s result is the co-finite refusal rather than an enumerable `MemberSet`. */
+export function isUnenumerable(value: EvaluateExpandResult): value is Unenumerable {
+  return 'unenumerable' in value;
+}
+
+/** Converts a `relation` leaf's raw `directSubjects` (`SubjectRef[]`) into a `MemberSet`, partitioning concrete entries from wildcard-covered namespaces. A concrete entry made redundant by a wildcard on the SAME leaf (both `user:alice` and `user:*` stored on one relation) is dropped, matching `unionMemberSets`'s own identical cleanup across branches. */
+function partitionDirectSubjects(subjects: readonly SubjectRef[]): MemberSet {
+  const concrete = new Map<string, EntityRef>();
+  const wildcardNs = new Set<string>();
+  for (const subject of subjects) {
+    if (subject.kind === 'wildcard') {
+      wildcardNs.add(subject.ns);
+    } else {
+      concrete.set(subjectKey(subject), subject);
+    }
   }
-  return result;
+  for (const [key, ref] of [...concrete]) {
+    if (wildcardNs.has(ref.ns)) concrete.delete(key);
+  }
+  return { concrete, wildcardNs };
+}
+
+/**
+ * Union of every set — the correct combinator for an `ExpandNode` `union`
+ * node, a `tupleToUserset` node's own children, and a `relation` leaf's own
+ * `directSubjects` combined with its `usersets[]` expansions. Propagates
+ * `unenumerable` unconditionally: once any operand can't be exactly
+ * enumerated, nothing built from it can be either (D-162's own deliberate
+ * "refuse loudly, don't approximate" scope boundary).
+ */
+function unionMemberSets(sets: readonly EvaluateExpandResult[]): EvaluateExpandResult {
+  for (const set of sets) {
+    if (isUnenumerable(set)) return set;
+  }
+  const concrete = new Map<string, EntityRef>();
+  const wildcardNs = new Set<string>();
+  for (const set of sets as readonly MemberSet[]) {
+    for (const [key, ref] of set.concrete) concrete.set(key, ref);
+    for (const ns of set.wildcardNs) wildcardNs.add(ns);
+  }
+  // A concrete entry made redundant by a wildcard gathered from a
+  // DIFFERENT branch (e.g. `viewer@user:alice` unioned with
+  // `editor@user:*`) is dropped — `wildcardNs` already covers it, and a
+  // leftover concrete entry would be a stale, misleading duplicate of what
+  // the wildcard already states.
+  for (const [key, ref] of [...concrete]) {
+    if (wildcardNs.has(ref.ns)) concrete.delete(key);
+  }
+  return { concrete, wildcardNs };
 }
 
 /**
  * Intersection of every set — the correct combinator for an `ExpandNode`
  * `intersection` node. `sets.length === 0` is handled defensively (returns
  * the empty set rather than throwing or, worse, treating "no branches" as
- * "everyone") but should be unreachable in practice: the schema compiler's
- * own grammar requires an `intersection` rewrite rule to have at least one
- * operand (`a & b`, never a bare `&` with zero operands), so a real
- * `ExpandNode.kind === 'intersection'` node's own `children` array can
- * never actually be empty — mirroring this codebase's own established
- * `assertNeverRewriteRule`-style "defended but disclosed as
- * compiler-unreachable" pattern (`src/resolve/production/resolver.ts`,
- * `src/audit/expand.ts`, `src/schema/dsl/compiler.ts`), applied here to a
- * different, but equally real, "this shouldn't happen but let's not crash
- * or silently over-grant if it somehow does" case.
+ * "everyone") but should be unreachable in practice — see this function's
+ * own pre-D-162 doc comment history for why (the schema compiler's own
+ * grammar requires an `intersection` rewrite rule to have at least one
+ * operand). A namespace covered by a wildcard in EVERY branch is itself
+ * wildcard-covered in the intersection (`user:*` intersected with `user:*`
+ * is still `user:*`); a namespace wildcard-covered in only SOME branches
+ * falls back to per-subject `isCovered` checks against every branch, which
+ * correctly treats "covered by a wildcard" and "named concretely" as
+ * equally valid membership. Propagates `unenumerable` unconditionally, per
+ * `unionMemberSets`'s own doc comment.
  */
-function intersectionOfMemberSets(
-  sets: readonly ReadonlyMap<string, EntityRef>[],
-): Map<string, EntityRef> {
-  if (sets.length === 0) return new Map();
-  const [firstSet] = sets;
-  if (firstSet === undefined) return new Map(); // unreachable given the length check immediately above
-  const result = new Map<string, EntityRef>();
-  for (const [key, ref] of firstSet) {
-    if (sets.every((set) => set.has(key))) result.set(key, ref);
+function intersectMemberSets(sets: readonly EvaluateExpandResult[]): EvaluateExpandResult {
+  for (const set of sets) {
+    if (isUnenumerable(set)) return set;
   }
-  return result;
+  const enumerable = sets as readonly MemberSet[];
+  if (enumerable.length === 0) return emptyMemberSet();
+  const wildcardNs = new Set<string>();
+  const [first] = enumerable;
+  if (first !== undefined) {
+    for (const ns of first.wildcardNs) {
+      if (enumerable.every((set) => set.wildcardNs.has(ns))) wildcardNs.add(ns);
+    }
+  }
+  const candidates = new Map<string, EntityRef>();
+  for (const set of enumerable) {
+    for (const [key, ref] of set.concrete) candidates.set(key, ref);
+  }
+  const concrete = new Map<string, EntityRef>();
+  for (const [key, ref] of candidates) {
+    if (wildcardNs.has(ref.ns)) continue; // already represented by the namespace-level wildcard above
+    if (enumerable.every((set) => isCovered(ref, set))) concrete.set(key, ref);
+  }
+  return { concrete, wildcardNs };
 }
 
-/** `base` minus `subtract`, by key — the correct combinator for an `ExpandNode` `exclusion` node's `base - subtract`. */
-function subtractMemberSet(
-  base: ReadonlyMap<string, EntityRef>,
-  subtract: ReadonlyMap<string, EntityRef>,
-): Map<string, EntityRef> {
-  const result = new Map<string, EntityRef>();
-  for (const [key, ref] of base) {
-    if (!subtract.has(key)) result.set(key, ref);
+/**
+ * `base` minus `subtract` — the correct combinator for an `ExpandNode`
+ * `exclusion` node's `base - subtract`. Exact and closed-form except one
+ * genuinely co-finite shape: `base` covers a namespace `ns` by wildcard,
+ * and `subtract` names *some* concrete members of `ns` but carries no
+ * `ns`-wide wildcard of its own — the true answer ("everyone of `ns` except
+ * these N named exceptions") is an unbounded set with finite exceptions,
+ * which `MemberSet` cannot represent. **Decisive call: refuse loudly,
+ * rather than approximate** (returns `Unenumerable` instead of either
+ * silently dropping the wildcard, which would under-report, or silently
+ * keeping it, which would over-report subjects `subtract` actually
+ * excludes) — this is a deliberate scope boundary (D-162), not an
+ * oversight; see `ListUsersResult`'s own doc comment for why `/check` and
+ * `/listObjects` are never affected by it. `unenumerable` on either operand
+ * propagates unconditionally, for the identical reason `unionMemberSets`
+ * and `intersectMemberSets` already do — this codebase has no way to
+ * "un-lose" which subjects an already-unenumerable set's own exceptions
+ * named.
+ */
+function subtractMemberSets(
+  base: EvaluateExpandResult,
+  subtract: EvaluateExpandResult,
+): EvaluateExpandResult {
+  if (isUnenumerable(base)) return base;
+  if (isUnenumerable(subtract)) return subtract;
+  for (const ns of base.wildcardNs) {
+    if (
+      !subtract.wildcardNs.has(ns) &&
+      [...subtract.concrete.values()].some((ref) => ref.ns === ns)
+    ) {
+      return { unenumerable: true, ns };
+    }
   }
-  return result;
+  const wildcardNs = new Set([...base.wildcardNs].filter((ns) => !subtract.wildcardNs.has(ns)));
+  const concrete = new Map<string, EntityRef>();
+  for (const [key, ref] of base.concrete) {
+    if (subtract.wildcardNs.has(ref.ns)) continue;
+    if (subtract.concrete.has(key)) continue;
+    concrete.set(key, ref);
+  }
+  return { concrete, wildcardNs };
 }
 
 /** Exhaustiveness guard — independently written for this file's own `ExpandNode` switch, matching this project's own established per-module convention (`docs/DECISIONS.md` D-022) of never sharing this helper across files even though every copy is textually near-identical. */
@@ -445,10 +609,9 @@ function assertNeverExpandNode(node: never): never {
 
 /**
  * Recursively evaluates an `ExpandNode` (`src/audit/expand.ts`) into the
- * actual `Map` (keyed by `"ns:id"`, values the real `EntityRef`) of
- * concrete subjects it resolves to — pure, synchronous, zero I/O; every
- * fact `expand()` already fetched is right there in the tree it returned,
- * no new `relation_tuples` reads needed.
+ * `MemberSet` (or `Unenumerable` refusal, D-162) it resolves to — pure,
+ * synchronous, zero I/O; every fact `expand()` already fetched is right
+ * there in the tree it returned, no new `relation_tuples` reads needed.
  *
  * **The correctness trap this function exists to avoid: naively flattening
  * every `directSubjects`/userset-member leaf across the whole tree,
@@ -470,22 +633,26 @@ function assertNeverExpandNode(node: never): never {
  *  - For `a - b` (exclusion), the real set is `a`'s members MINUS `b`'s —
  *    naive flattening would wrongly include every member of `b` that's also
  *    (irrelevantly, from a flattening perspective) present somewhere in
- *    `a`'s own leaves, when they should be excluded.
+ *    `a`'s own leaves, when they should be excluded. See
+ *    `subtractMemberSets`'s own doc comment for the D-162 wildcard-specific
+ *    version of this same trap.
  *
  * The combinator semantics implemented below, one case per `ExpandNode.kind`:
  *
- *  - `union`: union of each child's evaluated set.
- *  - `intersection`: intersection of each child's evaluated set (see
- *    `intersectionOfMemberSets`'s own doc comment for the empty-children
- *    defensive case).
- *  - `exclusion`: `base`'s evaluated set minus `subtract`'s evaluated set.
+ *  - `union`: union of each child's evaluated set (`unionMemberSets`).
+ *  - `intersection`: intersection of each child's evaluated set
+ *    (`intersectMemberSets` — see its own doc comment for the
+ *    empty-children defensive case).
+ *  - `exclusion`: `base`'s evaluated set minus `subtract`'s evaluated set
+ *    (`subtractMemberSets`).
  *  - `tupleToUserset`: union of each `children[].expansion`'s evaluated
  *    set — every followed object independently, unconditionally
  *    contributes (mirroring how `resolver.ts`'s own `evalRewrite`
  *    `tupleToUserset` case treats each followed object as its own
  *    unconditional union branch, never a combinator that could exclude one
  *    followed object's members based on another's).
- *  - `relation` (the only real leaf): `directSubjects`, unioned with, for
+ *  - `relation` (the only real leaf): `directSubjects` (partitioned into
+ *    concrete/wildcard by `partitionDirectSubjects`), unioned with, for
  *    each `usersets[]` entry, that entry's own `expansion`'s evaluated set
  *    — recursive, because a userset member (`group:eng#member`, say) is
  *    never itself a final answer, only ever a pointer to keep expanding;
@@ -507,47 +674,46 @@ function assertNeverExpandNode(node: never): never {
  * two different branches (e.g. both a direct grant and a nested-group
  * path) collapses to exactly one entry, not two.
  */
-export function evaluateExpandNode(node: ExpandNode): Map<string, EntityRef> {
+export function evaluateExpandNode(node: ExpandNode): EvaluateExpandResult {
   switch (node.kind) {
     case 'union':
-      return unionOfMemberSets(node.children.map((child) => evaluateExpandNode(child)));
+      return unionMemberSets(node.children.map((child) => evaluateExpandNode(child)));
     case 'intersection':
-      return intersectionOfMemberSets(node.children.map((child) => evaluateExpandNode(child)));
+      return intersectMemberSets(node.children.map((child) => evaluateExpandNode(child)));
     case 'exclusion':
-      return subtractMemberSet(evaluateExpandNode(node.base), evaluateExpandNode(node.subtract));
+      return subtractMemberSets(evaluateExpandNode(node.base), evaluateExpandNode(node.subtract));
     case 'tupleToUserset':
-      return unionOfMemberSets(node.children.map((child) => evaluateExpandNode(child.expansion)));
-    case 'relation': {
-      const result = new Map<string, EntityRef>();
-      for (const subject of node.directSubjects) result.set(subjectKey(subject), subject);
-      for (const member of node.usersets) {
-        for (const [key, ref] of evaluateExpandNode(member.expansion)) result.set(key, ref);
-      }
-      return result;
-    }
+      return unionMemberSets(node.children.map((child) => evaluateExpandNode(child.expansion)));
+    case 'relation':
+      return unionMemberSets([
+        partitionDirectSubjects(node.directSubjects),
+        ...node.usersets.map((member) => evaluateExpandNode(member.expansion)),
+      ]);
     case 'cycleGuard':
     case 'depthLimitReached':
     case 'undeclared':
-      return new Map();
+      return emptyMemberSet();
     default:
       return assertNeverExpandNode(node);
   }
 }
 
 /**
- * Every concrete subject that has `relationOrPermission` on `object` — a
- * flattened, deduplicated answer to the same question `/expand` already
- * answers as a tree. Built entirely on top of `expand()` (`src/audit/
- * expand.ts`): fetches the real subject tree, then evaluates it with
- * `evaluateExpandNode` (pure, no additional I/O) — see this file's own
- * top-of-file doc comment for why this does not, and cannot yet, support
- * `atToken` pinning.
+ * Every subject — concrete, or wildcard-covering an entire namespace
+ * (D-162) — that has `relationOrPermission` on `object`. Built entirely on
+ * top of `expand()` (`src/audit/expand.ts`): fetches the real subject tree,
+ * then evaluates it with `evaluateExpandNode` (pure, no additional I/O) —
+ * see this file's own top-of-file doc comment for why this does not, and
+ * cannot yet, support `atToken` pinning.
  *
  * Never throws for an ordinary "no members" case (an undeclared
  * relation/permission, a relation with zero tuples) — returns `{ subjects:
  * [] }`, mirroring `expand()`'s own fail-closed-to-an-explicit-node
  * contract for those cases. A genuinely unreachable database still throws,
- * unchanged from `expand()`'s own contract.
+ * unchanged from `expand()`'s own contract. Returns `{ unenumerable: true,
+ * ... }` instead of a `subjects` list for the one genuinely co-finite shape
+ * `subtractMemberSets` cannot represent — see `ListUsersResult`'s own doc
+ * comment.
  */
 export async function listUsers(
   pool: ConnectionSource,
@@ -558,9 +724,18 @@ export async function listUsers(
   const expandOptions: ExpandOptions =
     options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {};
   const tree = await expand(pool, object, relationOrPermission, expandOptions);
-  const members = evaluateExpandNode(tree);
-  const subjects = [...members.values()].sort((a, b) =>
-    a.ns === b.ns ? a.id.localeCompare(b.id) : a.ns.localeCompare(b.ns),
-  );
-  return { subjects };
+  const result = evaluateExpandNode(tree);
+  if (isUnenumerable(result)) {
+    return { unenumerable: true, ns: result.ns, reason: 'wildcardMinusConcreteExceptions' };
+  }
+  const concreteSubjects: SubjectRef[] = [...result.concrete.values()]
+    .sort((a, b) => (a.ns === b.ns ? a.id.localeCompare(b.id) : a.ns.localeCompare(b.ns)))
+    .map((ref): SubjectRef => ({ kind: 'concrete', ns: ref.ns, id: ref.id }));
+  const wildcardSubjects: SubjectRef[] = [...result.wildcardNs]
+    .sort((a, b) => a.localeCompare(b))
+    .map((ns): SubjectRef => ({ kind: 'wildcard', ns }));
+  // Wildcard entries listed first, then concrete — a stable, documented
+  // convention, not load-bearing for correctness (the contract is set
+  // equality; the sort is purely for a readable, diffable result).
+  return { subjects: [...wildcardSubjects, ...concreteSubjects] };
 }

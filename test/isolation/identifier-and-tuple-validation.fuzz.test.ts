@@ -28,6 +28,7 @@ import { compileSchema } from '../../src/schema/dsl/compiler.js';
 import {
   IDENTIFIER_PATTERN,
   MAX_IDENTIFIER_LENGTH,
+  WILDCARD_SUBJECT_ID,
   type NamespaceConfig,
 } from '../../src/schema/dsl/types.js';
 import { writeTuple, deleteTuple, type TupleKey } from '../../src/store/tuples.js';
@@ -926,23 +927,32 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
       }
     }
 
-    it('for 2,000 random generated strings, a subject/object id is accepted if and only if it matches the published identifier grammar — the same property, run against the id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it', async () => {
+    it("for 2,000 random generated strings, a subject/object id is accepted if and only if it matches the published identifier grammar — the same property, run against the id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it. D-162 adds one, and only one, carve-out to this property: a subjectId of exactly WILDCARD_SUBJECT_ID ('*') proceeds past identifier validation even though it never matches IDENTIFIER_PATTERN — objectId has no such carve-out, so the two positions genuinely diverge for this one candidate value.", async () => {
       await assert(
         asyncProperty(string({ maxLength: 200 }), async (candidate) => {
-          const expected =
+          const matchesGrammar =
             IDENTIFIER_PATTERN.test(candidate) &&
             candidate.length > 0 &&
             candidate.length <= MAX_IDENTIFIER_LENGTH;
 
+          // D-162: subjectId (and only subjectId) also accepts the reserved
+          // wildcard sentinel — src/store/tuples.ts's validateIdentifiers
+          // carves subjectId === WILDCARD_SUBJECT_ID out of its own
+          // IDENTIFIER_PATTERN check, unconditionally, before any schema
+          // lookup ever runs (so this candidate proceeds past identifier
+          // validation regardless of whether any relation actually declared
+          // a wildcard subject type — that's a later, schema-aware
+          // rejection, not an identifier-grammar one).
+          const expectedSubject = matchesGrammar || candidate === WILDCARD_SUBJECT_ID;
           const subjectProceeded = await proceedsPastIdentifierValidation(
             tupleWith({ subjectId: candidate }),
           );
-          expect(subjectProceeded).toBe(expected);
+          expect(subjectProceeded).toBe(expectedSubject);
 
           const objectProceeded = await proceedsPastIdentifierValidation(
             tupleWith({ objectId: candidate }),
           );
-          expect(objectProceeded).toBe(expected);
+          expect(objectProceeded).toBe(matchesGrammar);
         }),
         { numRuns: 2000 },
       );

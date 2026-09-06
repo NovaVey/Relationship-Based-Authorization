@@ -143,7 +143,11 @@ import type {
 } from '../../store/query-executor.js';
 
 import { env } from '../../config/env.js';
-import type { NamespaceConfig, RewriteRule } from '../../schema/dsl/types.js';
+import {
+  WILDCARD_SUBJECT_ID,
+  type NamespaceConfig,
+  type RewriteRule,
+} from '../../schema/dsl/types.js';
 import { getLatestNamespaceConfig } from '../../schema/publish.js';
 import { assertTokenObserved } from '../../store/tokens.js';
 import {
@@ -217,6 +221,8 @@ export interface DirectGrantStep {
   object: EntityRef;
   relation: string;
   subject: EntityRef;
+  /** Present (and `'wildcard'`) only when this grant matched via a stored `<ns>:*` wildcard tuple (D-162) rather than a tuple naming `subject` directly. */
+  via?: 'wildcard';
 }
 
 export interface UsersetMembershipStep {
@@ -1353,8 +1359,12 @@ function parseFrontierKeyString(raw: string): RelationClosureKey {
   };
 }
 
-/** Reconstructs a positive proof from a winning frontier row's own `path` — a plain linear walk, not a search. */
-function reconstructProof(path: readonly string[], plainSubject: EntityRef): ResolutionStep {
+/** Reconstructs a positive proof from a winning frontier row's own `path` — a plain linear walk, not a search. `via` (D-162) tags the terminal `directGrant` step as wildcard-matched when the real matching tuple's subject was the `'*'` sentinel rather than `plainSubject` itself. */
+function reconstructProof(
+  path: readonly string[],
+  plainSubject: EntityRef,
+  via?: 'wildcard',
+): ResolutionStep {
   const nodes = path.map(parseFrontierKeyString);
   const lastIndex = nodes.length - 1;
   const last = nodes[lastIndex];
@@ -1366,6 +1376,7 @@ function reconstructProof(path: readonly string[], plainSubject: EntityRef): Res
     object: { ns: last.ns, id: last.id },
     relation: last.relation,
     subject: plainSubject,
+    ...(via !== undefined ? { via } : {}),
   };
   for (let i = lastIndex - 1; i >= 0; i -= 1) {
     const node = nodes[i];
@@ -1382,6 +1393,34 @@ function reconstructProof(path: readonly string[], plainSubject: EntityRef): Res
     };
   }
   return current;
+}
+
+/**
+ * The single canonical predicate deciding "does this stored tuple's subject
+ * satisfy this query's subject?" (D-162) — used at the one match site,
+ * `sqlRelationMembershipWithWitness` below. A tuple whose `subject_id` is
+ * the `'*'` wildcard sentinel (`WILDCARD_SUBJECT_ID`) matches ANY subject of
+ * the same namespace, in addition to the ordinary exact-id match. Exported
+ * deliberately: this is the single place "does a stored tuple satisfy this
+ * subject" is decided in the production resolver, so it is reusable by
+ * anything else that needs to make the identical judgment — in particular,
+ * any test or verifier that inspects a `ClosureTuple`'s `plain` variant to
+ * independently confirm a disproof (e.g. a resolution-path verifier test)
+ * MUST apply this same predicate itself when judging whether a rendered
+ * `{kind:'plain', subject: {ns, id:'*'}}` entry would have covered the
+ * queried subject — otherwise that verifier, not the resolver, becomes the
+ * stale copy of match logic.
+ */
+export function subjectMatches(
+  tupleSubjectNs: string,
+  tupleSubjectId: string,
+  querySubjectNs: string,
+  querySubjectId: string,
+): boolean {
+  return (
+    tupleSubjectNs === querySubjectNs &&
+    (tupleSubjectId === querySubjectId || tupleSubjectId === WILDCARD_SUBJECT_ID)
+  );
 }
 
 function closureTupleFromRow(row: FrontierTupleRow): ClosureTuple {
@@ -1563,14 +1602,19 @@ async function sqlRelationMembershipWithWitness(
   const orderedFrontier = [...frontier.values()].sort((a, b) => a.depth - b.depth);
   for (const row of orderedFrontier) {
     const tuples = tuplesByFrontierKey.get(frontierKeyStr(row)) ?? [];
-    const match = tuples.some(
+    const matchedTuple = tuples.find(
       (t) =>
-        t.subject_relation === null && t.subject_ns === subject.ns && t.subject_id === subject.id,
+        t.subject_relation === null &&
+        subjectMatches(t.subject_ns, t.subject_id, subject.ns, subject.id),
     );
-    if (match) {
+    if (matchedTuple) {
+      const via =
+        matchedTuple.subject_id === WILDCARD_SUBJECT_ID && matchedTuple.subject_id !== subject.id
+          ? ('wildcard' as const)
+          : undefined;
       return {
         allowed: true,
-        proof: reconstructProof(row.path, subject),
+        proof: reconstructProof(row.path, subject, via),
         depthReached,
         touchedExpiringTuple,
       };

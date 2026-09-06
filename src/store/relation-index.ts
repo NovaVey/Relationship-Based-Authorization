@@ -252,6 +252,29 @@ const REBUILD_WATERMARK_QUERY_TEXT = 'select coalesce(max(token), 0) as watermar
  * "Operational surface" section specifies; closed here with a dedicated
  * signal rather than left as a heuristic the CLI would otherwise have to
  * guess at.
+ *
+ * **D-162 (public/wildcard subjects) — a stored wildcard tuple is inert
+ * here, never a soundness hazard.** A wildcard tuple (`subject_id = '*'`,
+ * `subject_relation` null — `src/schema/dsl/types.ts`'s
+ * `WILDCARD_SUBJECT_ID`) is swept into `candidate_rows` below like any
+ * other plain tuple, producing a candidate row literally keyed on
+ * `subject_id = '*'`. That row can never satisfy a concrete subject's
+ * lookup: `lookupRelationMembershipIndex` does an exact-equality point
+ * lookup against the REAL queried subject's own `(ns, id)`, so a literal
+ * `'*'` row is a permanent, safe miss — per this file's own documented
+ * invariant that an under-populated root can only produce a safe
+ * `{hit:false}` miss downstream, never a false hit. Every wildcard-covered
+ * check simply falls through, unaccelerated, to the SQL path in
+ * `src/resolve/production/resolver.ts`'s `sqlRelationMembershipWithWitness`
+ * (`subjectMatches`), which is always correct for a wildcard. This is a
+ * disclosed, accepted performance gap (wildcard-heavy relations aren't
+ * index-served), not a soundness one. Deliberately not noted as a SQL
+ * comment inside the query text below: this function's own recursive
+ * `INSERT` is matched by exact (whitespace-normalized) text against a
+ * hardcoded copy in `src/store/dst/shapes.ts`'s DST fake, so any change to
+ * the literal query text — including an added SQL comment — must be made
+ * in both places or the fake stops recognizing it; this note lives here
+ * instead, where it costs nothing to keep current.
  */
 export async function rebuildRelationMembershipIndex(
   pool: ConnectionSource,

@@ -9,7 +9,7 @@
  * job (`report-designer`); this is the functional CLI surface Phase 6's
  * own exit criterion asks for.
  */
-import type { ExpandNode } from '../../audit/expand.js';
+import type { ExpandNode, SubjectRef } from '../../audit/expand.js';
 import { expand } from '../../audit/expand.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
@@ -20,6 +20,11 @@ const REF_USAGE = "object must be 'namespace:id' (e.g. 'document:readme')";
 
 function entityStr(e: { ns: string; id: string }): string {
   return `${e.ns}:${e.id}`;
+}
+
+/** D-162: a wildcard subject renders as `<ns>:*`, matching the DSL's own `<ns>:*` write syntax. */
+function subjectRefStr(subject: SubjectRef): string {
+  return subject.kind === 'wildcard' ? `${subject.ns}:*` : entityStr(subject);
 }
 
 /** Renders one `ExpandNode`, indented, mirroring the real rewrite-rule tree structure. */
@@ -50,7 +55,7 @@ function renderNode(node: ExpandNode, indent: string, lines: string[]): void {
     case 'relation':
       lines.push(`${indent}relation ${node.relation} on ${entityStr(node.object)}`);
       for (const subject of node.directSubjects) {
-        lines.push(`${indent}  ${entityStr(subject)}`);
+        lines.push(`${indent}  ${subjectRefStr(subject)}`);
       }
       for (const member of node.usersets) {
         lines.push(`${indent}  ${entityStr(member.userset)}#${member.relation}`);

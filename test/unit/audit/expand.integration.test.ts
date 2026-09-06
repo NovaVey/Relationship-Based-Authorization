@@ -62,7 +62,7 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { writeTuple, type TupleKey } from '../../../src/store/tuples.js';
 import { publishSchema } from '../../../src/schema/publish.js';
 import { expand } from '../../../src/audit/expand.js';
-import type { EntityRef, ExpandNode } from '../../../src/audit/expand.js';
+import type { EntityRef, ExpandNode, SubjectRef } from '../../../src/audit/expand.js';
 import { runMigrations } from '../../../src/store/migrate.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
@@ -132,12 +132,27 @@ async function publishOk(source: string): Promise<void> {
   if (!result.ok) throw new Error(`fixture schema failed to publish: ${result.errors.join('; ')}`);
 }
 
+/** This file writes no wildcard tuple anywhere — every `directSubjects` entry is expected concrete. Fails loudly (never silently drops) if that ever stops being true, so a wildcard-shaped bug here can't hide as "one fewer subject than expected." D-162's own wildcard-specific `expand()`/`expandRelation` coverage lives in the tests added alongside this file's own wildcard describe block below. */
+function concreteId(subject: SubjectRef): string {
+  if (subject.kind !== 'concrete') {
+    throw new Error(`expected a concrete subject in this fixture, got ${JSON.stringify(subject)}`);
+  }
+  return subject.id;
+}
+
+function toEntityRef(subject: SubjectRef): EntityRef {
+  if (subject.kind !== 'concrete') {
+    throw new Error(`expected a concrete subject in this fixture, got ${JSON.stringify(subject)}`);
+  }
+  return { ns: subject.ns, id: subject.id };
+}
+
 /** Collects every `directSubjects` entry anywhere in a tree, for an order-independent "who's really in this set" assertion. */
 function collectDirectSubjects(node: ExpandNode): EntityRef[] {
   switch (node.kind) {
     case 'relation':
       return [
-        ...node.directSubjects,
+        ...node.directSubjects.map(toEntityRef),
         ...node.usersets.flatMap((m) => collectDirectSubjects(m.expansion)),
       ];
     case 'union':
@@ -220,7 +235,7 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
     const relationBranch = tree.children.find((c) => c.kind === 'relation');
     expect(relationBranch).toBeDefined();
     if (relationBranch?.kind === 'relation') {
-      expect(relationBranch.directSubjects.map((s) => s.id)).toEqual(['carol']);
+      expect(relationBranch.directSubjects.map(concreteId)).toEqual(['carol']);
     }
 
     const ttuBranch = tree.children.find((c) => c.kind === 'tupleToUserset');
@@ -240,7 +255,7 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
       expect(usersetMember?.relation).toBe('member');
       expect(usersetMember?.expansion.kind).toBe('relation');
       if (usersetMember?.expansion.kind === 'relation') {
-        expect(usersetMember.expansion.directSubjects.map((s) => s.id).sort()).toEqual([
+        expect(usersetMember.expansion.directSubjects.map(concreteId).sort()).toEqual([
           'alice',
           'bob',
         ]);
@@ -305,14 +320,14 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
     expect(designChild?.through).toEqual({ ns: folderNs, id: 'design' });
     expect(designChild?.expansion.kind).toBe('relation');
     if (designChild?.expansion.kind === 'relation') {
-      expect(designChild.expansion.directSubjects.map((s) => s.id)).toEqual(['alice']);
+      expect(designChild.expansion.directSubjects.map(concreteId)).toEqual(['alice']);
     }
 
     const specsChild = byFolder.get('specs');
     expect(specsChild?.through).toEqual({ ns: folderNs, id: 'specs' });
     expect(specsChild?.expansion.kind).toBe('relation');
     if (specsChild?.expansion.kind === 'relation') {
-      expect(specsChild.expansion.directSubjects.map((s) => s.id)).toEqual(['bob']);
+      expect(specsChild.expansion.directSubjects.map(concreteId)).toEqual(['bob']);
     }
 
     // Order-independent: the full subject set is exactly both editors,
@@ -352,8 +367,7 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
       const relationLeaves = intersectionTree.children.filter((c) => c.kind === 'relation');
       expect(relationLeaves).toHaveLength(2);
       for (const leaf of relationLeaves) {
-        if (leaf.kind === 'relation')
-          expect(leaf.directSubjects.map((s) => s.id)).toEqual(['dave']);
+        if (leaf.kind === 'relation') expect(leaf.directSubjects.map(concreteId)).toEqual(['dave']);
       }
     }
 
@@ -363,7 +377,7 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
       expect(exclusionTree.base.kind).toBe('relation');
       expect(exclusionTree.subtract.kind).toBe('relation');
       if (exclusionTree.base.kind === 'relation') {
-        expect(exclusionTree.base.directSubjects.map((s) => s.id)).toEqual(['frank']);
+        expect(exclusionTree.base.directSubjects.map(concreteId)).toEqual(['frank']);
       }
       if (exclusionTree.subtract.kind === 'relation') {
         // expand() shows both sides of an exclusion — banned's own real
@@ -371,7 +385,7 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
         // gina is excluded from the *checked* permission's real answer for
         // any given subject; expand answers "who's in each named set,"
         // not "who ends up authorized."
-        expect(exclusionTree.subtract.directSubjects.map((s) => s.id)).toEqual(['gina']);
+        expect(exclusionTree.subtract.directSubjects.map(concreteId)).toEqual(['gina']);
       }
     }
   });
@@ -399,7 +413,7 @@ describe('expand() returns the exact subject tree, including tuple-to-userset an
     expect(tree.kind).toBe('relation');
     if (tree.kind !== 'relation') return;
     // The real, direct grant is still there.
-    expect(tree.directSubjects.map((s) => s.id)).toEqual(['mabel']);
+    expect(tree.directSubjects.map(concreteId)).toEqual(['mabel']);
     // The cyclic userset member is present, but its own expansion is a
     // cycleGuard node (a-> b -> a caught, not silently dropped and not an
     // infinite structure).

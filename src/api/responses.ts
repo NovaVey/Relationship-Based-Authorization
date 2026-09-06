@@ -73,7 +73,7 @@
 import type { PerformCheckResult } from '../audit/checks.js';
 import type { ResolutionStep } from '../resolve/production/resolver.js';
 import type { ExpandNode } from '../audit/expand.js';
-import type { ListObjectsResult, ListUsersResult } from '../audit/list.js';
+import type { ListObjectsResult, ListUsersResult, SubjectRef } from '../audit/list.js';
 import type { WriteTupleResult, DeleteTupleResult } from '../store/tuples.js';
 import { encodeToken } from '../store/tokens.js';
 import type { SchemaCompileResult } from '../schema/dsl/errors.js';
@@ -316,12 +316,36 @@ export function listObjectsResponse(
   };
 }
 
-export interface ListUsersResponseBody {
-  object: ApiEntityRef;
-  relation: string;
-  /** Every concrete subject `listUsers` resolved `object`'s real rewrite-rule formula down to — see `src/audit/list.ts`'s `evaluateExpandNode` for why this is not a naive tree-flatten. */
-  subjects: ApiEntityRef[];
-}
+/**
+ * D-162 (public/wildcard subjects): `subjects` entries are discriminated
+ * (`{kind:'concrete', ns, id}` or `{kind:'wildcard', ns}`, `src/audit/
+ * list.ts`'s `SubjectRef`, reused verbatim rather than reshaped — the same
+ * "don't reshape a real evidence-carrying type for display convenience"
+ * discipline this file's own top-of-file doc comment states for deep
+ * evidence trees, applied here to a shallow but still discriminated shape).
+ * The `unenumerable` variant is a normal `200`, never an error status — the
+ * same "every success status is literal, what happened is a body field"
+ * discipline this file's own top-of-file doc comment states for `allowed`/
+ * `created`/`deleted`/`truncated`: a genuinely co-finite real answer is a
+ * complete, honest response, not a failure to compute one. See
+ * `src/audit/list.ts`'s `ListUsersResult`/`subtractMemberSets` for exactly
+ * when this arises.
+ */
+export type ListUsersResponseBody =
+  | {
+      object: ApiEntityRef;
+      relation: string;
+      /** Every subject — concrete or wildcard-covering an entire namespace — that `listUsers` resolved `object`'s real rewrite-rule formula down to. See `src/audit/list.ts`'s `evaluateExpandNode` for why this is not a naive tree-flatten. */
+      subjects: SubjectRef[];
+    }
+  | {
+      object: ApiEntityRef;
+      relation: string;
+      /** The real answer is "everyone of `ns` except finitely many named exceptions" — co-finite, not representable as an enumerated list. */
+      unenumerable: true;
+      ns: string;
+      reason: 'wildcardMinusConcreteExceptions';
+    };
 
 export interface ListUsersApiResponse {
   status: 200;
@@ -334,6 +358,12 @@ export function listUsersResponse(
   relation: string,
   result: ListUsersResult,
 ): ListUsersApiResponse {
+  if ('unenumerable' in result) {
+    return {
+      status: 200,
+      body: { object, relation, unenumerable: true, ns: result.ns, reason: result.reason },
+    };
+  }
   return { status: 200, body: { object, relation, subjects: result.subjects } };
 }
 

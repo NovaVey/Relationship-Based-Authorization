@@ -440,12 +440,12 @@ describe('with the correct admin key, /list-objects and /list-users call their d
 
   it('a-correct-admin-key-on-post-list-users-calls-listusers-with-object-and-relation-only-and-returns-its-result-verbatim', async () => {
     env.ADMIN_API_KEY = ADMIN_KEY;
-    const canned: ListUsersResult = {
+    const canned = {
       subjects: [
-        { ns: 'user', id: 'alice' },
-        { ns: 'user', id: 'bob' },
+        { kind: 'concrete', ns: 'user', id: 'alice' },
+        { kind: 'concrete', ns: 'user', id: 'bob' },
       ],
-    };
+    } satisfies ListUsersResult;
     const spy = vi.spyOn(listModule, 'listUsers').mockResolvedValue(canned);
 
     const res = await app.inject({
@@ -487,6 +487,57 @@ describe('with the correct admin key, /list-objects and /list-users call their d
     const body = await parseBody(res);
     expect(Array.isArray(body.subjects)).toBe(true);
     expect(body.subjects).toEqual([]);
+  });
+
+  it('a-wildcard-subject-in-the-listusers-result-passes-through-as-a-discriminated-kind-wildcard-entry-d-162', async () => {
+    env.ADMIN_API_KEY = ADMIN_KEY;
+    const canned = {
+      subjects: [{ kind: 'wildcard', ns: 'user' }],
+    } satisfies ListUsersResult;
+    vi.spyOn(listModule, 'listUsers').mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/list-users',
+      payload: validListUsersBody,
+      headers: authHeaders(ADMIN_KEY),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = await parseBody(res);
+    expect(body).toEqual({
+      object: validListUsersBody.object,
+      relation: validListUsersBody.relation,
+      subjects: canned.subjects,
+    });
+  });
+
+  it('an-unenumerable-listusers-result-renders-as-a-200-with-unenumerable-ns-and-reason-fields-never-a-subjects-array-d-162', async () => {
+    env.ADMIN_API_KEY = ADMIN_KEY;
+    const canned = {
+      unenumerable: true,
+      ns: 'user',
+      reason: 'wildcardMinusConcreteExceptions',
+    } satisfies ListUsersResult;
+    vi.spyOn(listModule, 'listUsers').mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/list-users',
+      payload: validListUsersBody,
+      headers: authHeaders(ADMIN_KEY),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = await parseBody(res);
+    expect(body).toEqual({
+      object: validListUsersBody.object,
+      relation: validListUsersBody.relation,
+      unenumerable: true,
+      ns: 'user',
+      reason: 'wildcardMinusConcreteExceptions',
+    });
+    expect(Object.prototype.hasOwnProperty.call(body, 'subjects')).toBe(false);
   });
 
   it('a-list-users-response-never-carries-an-attoken-field-at-all-not-even-as-an-explicit-undefined-key', async () => {
