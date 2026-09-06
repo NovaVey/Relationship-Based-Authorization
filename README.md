@@ -260,10 +260,14 @@ own. The survey's own biggest result was never any one schema — it's this
 finding about the invariant language itself, and the fact that closing
 part of it is now a real, tracked, in-progress story rather than a static
 snapshot. Full table and reasoning: [`docs/FINDINGS.md`](docs/FINDINGS.md).
-An OpenFGA front end (D-178) now translates a real `.fga`/JSON model into
-this project's own DSL automatically, verified against the real upstream
-source for all five OpenFGA survey entries; a SpiceDB front end is scoped
-but not yet built.
+An OpenFGA front end (D-178) and a SpiceDB front end (D-179) now both
+translate a real model into this project's own DSL automatically, each
+verified against the real upstream source for every survey entry in its
+own ecosystem — including, on the SpiceDB side, a real precedence
+inversion (SpiceDB's own `+` binds tighter than `&`/`-`, the opposite of
+this DSL's own grammar) handled correctly with no special-casing at all,
+since the same printer built for OpenFGA already parenthesizes from tree
+shape alone.
 
 `docs/DECISIONS.md` D-114 through D-131 has the complete build history —
 the small-model property and exactly where it stops applying, the SMT

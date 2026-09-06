@@ -35,6 +35,7 @@ import { buildSchemaGraph } from '../ir/index.js';
 import { parseInvariants } from '../invariants/index.js';
 import { checkAndValidate } from '../validate/index.js';
 import { translateOpenfgaFile } from '../frontends/openfga/translate-file.js';
+import { translateSpicedbFile } from '../frontends/spicedb/translate-file.js';
 import { combineExitCodes, invariantExitCode, type InvariantExitCode } from './exitCodes.js';
 import { formatHuman, toJsonReport, type InvariantVerification } from './format.js';
 
@@ -97,10 +98,16 @@ export async function runVerify(options: RunVerifyOptions): Promise<RunVerifyRes
     for (const note of translated.notes) err(`translate-openfga: ${note.detail}`);
     schemaSource = translated.dslText;
   } else if (options.fromSpicedb !== undefined) {
-    // Not yet built — see docs/CAPABILITY-GAPS.md's "Package the schema
-    // verifier separately" section.
-    err(`--from-spicedb is not yet implemented ('${options.fromSpicedb}')`);
-    return { exitCode: 3 };
+    schemaLabel = options.fromSpicedb;
+    const translated = translateSpicedbFile(options.fromSpicedb, {
+      bestEffort: options.bestEffort ?? false,
+    });
+    if (!translated.ok) {
+      err(translated.error);
+      return { exitCode: 3 };
+    }
+    for (const note of translated.notes) err(`translate-spicedb: ${note.detail}`);
+    schemaSource = translated.dslText;
   } else {
     schemaLabel = options.schemaFile!;
     try {

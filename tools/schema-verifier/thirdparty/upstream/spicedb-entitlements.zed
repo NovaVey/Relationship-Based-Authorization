@@ -1,0 +1,27 @@
+/**
+* an entity that can be granted permissions
+*/
+definition user {}
+
+/**
+* organizations contain users
+*/
+definition organization {
+  relation member: user
+}
+
+/**
+* an entitlement is a grant given to an organization
+*/
+definition entitlement {
+  relation org: organization
+  permission subscribed_member = org->member
+}
+
+/**
+ * features are given to entitlements
+ */
+definition feature {
+  relation associated_entitlement: entitlement
+  permission access = associated_entitlement->subscribed_member
+}

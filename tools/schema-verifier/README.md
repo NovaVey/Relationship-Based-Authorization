@@ -376,15 +376,35 @@ npx tsx tools/schema-verifier/src/cli/index.ts --from-openfga <model-file> --inv
 (disclosed, not silent) — the default matches this survey's own
 established policy of excluding condition-heavy models rather than
 best-effort-translating them into something that no longer represents the
-real schema. A SpiceDB front end (`--from-spicedb`) is scoped but not yet
-built — see `docs/CAPABILITY-GAPS.md`'s "Package the schema verifier
-separately" section for why it's realistically smaller than it might look
-(SpiceDB's own grammar already maps onto this DSL's almost one-to-one) and
-`docs/DECISIONS.md` D-178 for the one open question this front end
-surfaced: the verifier's own reachability/bounded/SMT tiers have no code
-anywhere that reads a subject type's `wildcard` flag, and whether that's
-sound in every case (not just this survey's own witness-driven cases) is
+real schema. `docs/DECISIONS.md` D-178's own open question:
+the verifier's own reachability/bounded/SMT tiers have no code anywhere
+that reads a subject type's `wildcard` flag, and whether that's sound in
+every case (not just this survey's own witness-driven cases) is
 disclosed, not resolved.
+
+A SpiceDB front end works the same way (`docs/DECISIONS.md` D-179):
+
+```
+npx tsx tools/schema-verifier/src/frontends/spicedb/cli.ts <schema-file> [--best-effort] [--out <file>]
+npx tsx tools/schema-verifier/src/cli/index.ts --from-spicedb <schema-file> --invariants <file>
+```
+
+`--best-effort` here drops SpiceDB's own `self` keyword where it appears
+as one term of a union (`thirdparty/README.md`'s own long-disclosed gap —
+"no equivalent here"); `self` alone, or as a lone intersection/exclusion
+operand, still refuses even under `--best-effort` (no well-defined drop).
+Two real translation problems D-179 found and fixed, neither anticipated
+by this section's own earlier framing: SpiceDB's schema language gives
+union (`+`) _tighter_ precedence than intersection (`&`)/exclusion (`-`)
+— the opposite of this DSL's own grammar — handled correctly with zero
+special-casing, since the parser builds the right tree and the existing
+printer (built for OpenFGA) already parenthesizes from tree shape alone;
+and a `type#relation` nested-userset subject type can target _any_
+permission in SpiceDB, needing a real three-case resolution algorithm
+(expand losslessly, restructure via an auxiliary relation, or leave
+alone) — see D-179 for the full account, including a third, independent
+problem (an arrow whose followed relation has a subject type that
+doesn't define the target at all) confirmed against `spicedb-superuser`.
 
 ## What's not built yet
 

@@ -1,0 +1,8 @@
+definition user {}
+definition serviceaccount {}
+
+definition document {
+	relation viewer: user
+	relation admin: serviceaccount
+	permission edit = viewer & admin
+}

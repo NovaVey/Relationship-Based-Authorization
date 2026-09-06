@@ -343,17 +343,17 @@ real, load-bearing practice here, not just a slogan.
 
 ## Proof machinery
 
-### Package the schema verifier separately — two of three pieces built, `docs/DECISIONS.md` D-173, D-178
+### Package the schema verifier separately — built, `docs/DECISIONS.md` D-173, D-178, D-179
 
-**Status: two of three pieces built.** D-173 closed the cheapest piece
+**Status: built and shipped.** D-173 closed the cheapest piece
 (`tools/schema-verifier/action.yml`, a reusable composite GitHub Action
 wrapping `verify-schema`, dogfooded in this repo's own
 `.github/workflows/schema-verifier.yml` via a local
 `uses: ./tools/schema-verifier` reference). D-178 closed the OpenFGA front
-end — see that entry for what shipped
-(`tools/schema-verifier/src/frontends/openfga/`, plus a shared
-`frontends/common/` layer both front ends use). The SpiceDB front end
-remains unbuilt.
+end and D-179 the SpiceDB front end — see those entries for what shipped
+(`tools/schema-verifier/src/frontends/{openfga,spicedb}/`, sharing one
+`frontends/common/` layer). All three pieces this section originally
+named are now built.
 
 The third-party survey — **8 VIOLATED / 4 HOLDS, 0 UNKNOWN**
 (`docs/FINDINGS.md:131`, current as of D-151's SMT tier correcting
@@ -394,21 +394,26 @@ previously got wrong:**
    verifier's own reachability/bounded/SMT tiers reason _soundly_ about a
    wildcard-declared relation in every case, not just this survey's own
    witness-driven cases — disclosed there, not resolved).
-3. **The SpiceDB front end is smaller than this section previously
-   framed.** "The one genuinely new parser this needs" made it sound like
-   the harder of the two halves; `thirdparty/README.md`'s own methodology
-   section already documents why it isn't: SpiceDB's own
-   `definition`/`relation`/`permission`/`+`/`&`/`-`/`->` grammar maps onto
-   this DSL's `namespace`/`relation`/`permission`/`|`/`&`/`-`/`->` almost
-   one-to-one — a hand-written lexer/parser for it is realistically a
-   light fork of `src/schema/dsl/parser.ts`'s own tokenizer/recursive-
-   descent shape, not a from-scratch grammar. It reuses the same
-   `frontends/common/` layer D-178 already built (no `splitMember`-style
-   translation needed at all, since SpiceDB already keeps `relation`/
-   `permission` separate — `splitMember` is a documented no-op pass-
-   through for every member SpiceDB's own front end will emit). Still
-   unbuilt, but the remaining work is smaller than "the one genuinely new
-   parser this needs" implied.
+3. **The SpiceDB front end's _parser_ was indeed smaller than this section
+   previously framed, exactly as D-178 predicted — but D-179 found two
+   genuinely new, real translation problems neither this section nor
+   D-178 anticipated at all.** The parser itself is the light fork of
+   `src/schema/dsl/parser.ts` D-178 predicted, and it reuses the shared
+   `frontends/common/` layer with zero `splitMember`-style work of its
+   own. But: (a) SpiceDB's own schema-language reference states plainly
+   that union (`+`) binds _tighter_ than intersection (`&`)/exclusion
+   (`-`) — the exact opposite of this DSL's own grammar — a real
+   precedence inversion a naive per-operator text substitution would get
+   silently wrong; and (b) a nested-userset subject type can target _any_
+   permission in SpiceDB (not just ones reducible to a single relation the
+   way OpenFGA's own split mechanism always produces), needing a real
+   three-case resolution algorithm, plus a third, independent problem
+   (`spicedb-superuser`'s own `owner: user | organization` followed by
+   `owner->admin`, where `user` alone has no `admin` at all) that this
+   DSL's own stricter compiler would otherwise reject outright. See D-179
+   for the full account, including how the shared `dsl-print.ts`
+   parenthesization logic (built for OpenFGA) turned out to already handle
+   the precedence inversion correctly with zero SpiceDB-specific code.
 
 ### Close the invariant-language root cause — the stale number is now fixed; a genuinely new primitive stays open
 
