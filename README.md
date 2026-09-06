@@ -760,19 +760,20 @@ of this project has.
 `authz serve` exposes the same operations over HTTP, plus two bulk
 reverse-lookup operations with no CLI command of their own:
 
-| Method   | Route             | Auth                                  | Rate limit | Does                                                                       |
-| -------- | ----------------- | ------------------------------------- | ---------- | -------------------------------------------------------------------------- |
-| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                           |
-| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-152) |
-| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                              |
-| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                         |
-| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                       |
-| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                       |
-| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                    |
-| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)          |
-| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                      |
-| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version    |
-| `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                    |
+| Method   | Route             | Auth                                  | Rate limit | Does                                                                                                        |
+| -------- | ----------------- | ------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                                                            |
+| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-152)                                  |
+| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                                                               |
+| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                                                          |
+| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                                                        |
+| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                                                        |
+| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                                                     |
+| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)                                           |
+| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                                                       |
+| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version                                     |
+| `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                                                     |
+| `GET`    | `/metrics`        | `ADMIN_API_KEY` only, unscoped        | 200/min    | Prometheus text exposition — check counts, cache hit rate, Leopard-index hits, uncertain-check rate (D-169) |
 
 `READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
 the four read/list routes above without also granting write access.

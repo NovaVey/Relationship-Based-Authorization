@@ -178,7 +178,14 @@ label; it would need its own soundness write-up alongside the other three
 
 ## Operational
 
-### Metrics — partially addressed
+### Metrics — built, `docs/DECISIONS.md` D-169
+
+**Status: built and shipped.** This section records the gap as it stood
+before it was closed — see D-169 for what actually shipped (`GET /metrics`,
+a hand-rolled Prometheus text-exposition registry) and for a real bug live
+verification caught before it shipped: an early draft counted every
+_allowed_ check as "uncertain," because `certain` is only ever populated on
+a _denied_ result.
 
 Logging is Fastify's own built-in pino logger, configured from
 `env.LOG_LEVEL` (`src/api/server.ts`, `src/config/env.ts:99`) — and nothing

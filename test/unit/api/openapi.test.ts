@@ -46,16 +46,20 @@ interface ExpectedRoute {
   method: 'get' | 'post' | 'delete';
   gated: boolean;
   /**
-   * Whether this route's own handler calls `findOutOfScopeNamespace`
-   * (`src/api/server.ts`) and can therefore really return a 403 `forbidden`
+   * Whether this route's own handler can really return a 403 `forbidden`
    * (`src/api/errors.ts` `forbiddenError`) to a namespace-scoped DB-backed
-   * API key. Kept as its own field rather than reused from `gated` above —
-   * today every scope-checked route also happens to be a gated one (an
-   * unauthenticated caller has no scope to check against in the first
-   * place), but the two are independent facts about a route, and asserting
-   * against a dedicated field means a future route that's gated without
-   * being scope-checked (or vice versa) still gets the right expectation
-   * instead of inheriting the wrong one by coincidence.
+   * API key — whether via `findOutOfScopeNamespace` (`src/api/server.ts`,
+   * every route below except `/metrics`) or, for `/metrics` specifically, a
+   * blunter check rejecting *any* scoped key outright, since that route's
+   * counters are a single global aggregate with no per-request namespace to
+   * check scope against in the first place. Kept as its own field rather
+   * than reused from `gated` above — today every scope-checked route also
+   * happens to be a gated one (an unauthenticated caller has no scope to
+   * check against in the first place), but the two are independent facts
+   * about a route, and asserting against a dedicated field means a future
+   * route that's gated without being scope-checked (or vice versa) still
+   * gets the right expectation instead of inheriting the wrong one by
+   * coincidence.
    */
   scopeChecked: boolean;
 }
@@ -72,6 +76,7 @@ const EXPECTED_ROUTES: ExpectedRoute[] = [
   { path: '/schema/publish', method: 'post', gated: true, scopeChecked: true },
   { path: '/health', method: 'get', gated: false, scopeChecked: false },
   { path: '/openapi.json', method: 'get', gated: false, scopeChecked: false },
+  { path: '/metrics', method: 'get', gated: true, scopeChecked: true },
 ];
 
 function referencesBearerAuth(operation: OpenApiOperation): boolean {
@@ -246,7 +251,7 @@ describe('buildOpenApiDocument() vs. the live Fastify route table', () => {
    * someone genuinely adds on purpose in the future would still show up as
    * a real, uncaught mismatch below, exactly as it should.
    */
-  const IGNORED_LIVE_ROUTES = new Set(['HEAD /health', 'HEAD /openapi.json']);
+  const IGNORED_LIVE_ROUTES = new Set(['HEAD /health', 'HEAD /openapi.json', 'HEAD /metrics']);
 
   function documentedRouteSet(): Set<string> {
     const doc = buildOpenApiDocument();

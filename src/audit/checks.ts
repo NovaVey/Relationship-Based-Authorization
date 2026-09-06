@@ -276,6 +276,7 @@ import {
   type ProductionCheckResult,
 } from '../resolve/production/resolver.js';
 import { buildCacheKey, type CheckCache } from '../resolve/production/cache.js';
+import { recordCacheHit, recordCacheMiss, recordCheck } from '../metrics/registry.js';
 
 export type PerformCheckOptions = ProductionCheckOptions;
 
@@ -567,6 +568,8 @@ export async function performCheck(
     const hitStart = performance.now();
     const hit = cache.get(cacheKey);
     if (hit !== undefined) {
+      recordCacheHit();
+      recordCheck(hit);
       const hitDurationMs = Math.round(performance.now() - hitStart);
       await insertCheckRow(
         pool,
@@ -579,6 +582,13 @@ export async function performCheck(
       );
       return hit;
     }
+    // A cache was actually configured (`CHECK_CACHE_TTL_MS > 0`) and this
+    // key genuinely wasn't in it — a real miss, not the "no cache concept
+    // at all" case below, which never touches these two counters. See
+    // `src/metrics/registry.ts`'s own doc comment for why
+    // `authz_check_cache_hits_total`/`_misses_total` stay at 0 with caching
+    // disabled rather than being omitted entirely.
+    recordCacheMiss();
   }
 
   // Captured before `productionCheck` even starts, per this function's own
@@ -589,6 +599,12 @@ export async function performCheck(
   const start = performance.now();
   const result = await productionCheck(pool, subject, object, relationOrPermission, options);
   const durationMs = Math.round(performance.now() - start);
+  // Unconditional — every real check counts toward `authz_checks_total` and
+  // the depth-ceiling/cycle-guard/Leopard-index counters regardless of
+  // whether caching is even enabled for this deployment; caching only ever
+  // changes how a *repeat* of the identical check gets answered, never
+  // whether this one counts.
+  recordCheck(result);
 
   await insertCheckRow(pool, subject, object, relationOrPermission, options, result, durationMs);
 
