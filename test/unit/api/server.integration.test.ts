@@ -258,7 +258,7 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
       (c) => c.kind === 'relation' && c.relation === 'viewer',
     );
     expect(viewerChild).toBeDefined();
-    expect(viewerChild.directSubjects).toEqual([{ ns: 'user', id: 'alice' }]);
+    expect(viewerChild.directSubjects).toEqual([{ kind: 'concrete', ns: 'user', id: 'alice' }]);
 
     // delete — revocation must be immediately effective on the next check.
     const deleteRes = await app.inject({
