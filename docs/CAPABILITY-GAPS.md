@@ -218,7 +218,13 @@ signals (cache hit rate, indexHit-vs-fallback), into something that alerts
 a human before a `certain: false` spike quietly reads as "real users losing
 access" only in hindsight, via a manual SQL query.
 
-### A Dockerfile
+### A Dockerfile — built, `docs/DECISIONS.md` D-168
+
+**Status: built and shipped.** This section records the gap as it stood
+before it was closed — see D-168 for what actually shipped (a multi-stage
+`Dockerfile` plus a `docker-compose.yml` `app` service) and for a real,
+previously-latent packaging bug (`fast-check` misclassified as a
+devDependency) this work found live, not by inspection.
 
 Confirmed: no Dockerfile exists anywhere in the repo (`find . -iname
 "Dockerfile*"` returns nothing), and `docker-compose.yml`'s only service is

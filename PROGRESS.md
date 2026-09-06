@@ -2770,3 +2770,15 @@ Full account: `docs/DECISIONS.md` D-166.
 **5 — a larger, pinned-version benchmark rerun.** `openfga@v1.19.0`/`spicedb@v1.56.1` pinned explicitly; OpenFGA/SpiceDB bumped to `n=50` matching this repo's own precedent; authz deliberately stayed at `n=10` — a disclosed, measured consequence of its own real rate limit, not a shortcut. Same qualitative findings as the first run, now on more evidence.
 
 Full account, every independent re-verification, and the one real mistake made and disclosed along the way: `docs/DECISIONS.md` D-167.
+
+## A capability-gap analysis, then the first item built: a Dockerfile — and a real packaging bug it caught
+
+**Owner:** main agent.
+
+An internal architecture-review brainstorm named ten things this repo doesn't do yet. Verified every one against current source (an 11-agent pass, one per idea) rather than transcribed as asserted prose — `docs/CAPABILITY-GAPS.md`. Six of the ten turned out already partly built, mischaracterized, or resolvable from code; the most consequential correction: a live re-run of `verify-schema` against all twelve third-party fixtures returns 8 VIOLATED/4 HOLDS today, not the 7/5 `docs/FINDINGS.md` still publishes, because D-151's SMT tier now runs ahead of the bounded search that produced the old verdict.
+
+Started building the backlog, first item: a `Dockerfile` plus a `docker-compose.yml` `app` service, closing the "no image for the service, only Postgres" gap. Verifying it directly was blocked by this sandbox's own egress policy (Docker Hub pulls 403 — the same "Docker unreachable" constraint D-165's benchmark work already disclosed), so verified instead by reproducing the Dockerfile's exact two-stage recipe on the host against a real Postgres: full build, then a **separate**, from-scratch production-only `npm ci --omit=dev` — exactly what the image's runtime stage does. This crashed immediately: `fast-check` was a `devDependency`, but `src/cli/index.ts` eagerly imports the `soundness` command (a real, documented capability) at the top level regardless of which subcommand runs, and that command imports `fast-check` — meaning **every** from-scratch production install of the built CLI was broken by this, `authz doctor` included, and nothing in this repo's own CI had ever exercised a production-only install before this Dockerfile did.
+
+Fixed by moving `fast-check` to `dependencies`. Re-verified the full chain clean afterward: migrations applied, server serving, `/health` reachable, the demo graph seeded, and two real `/check` calls against the running production-only server returning the exact correct verdicts (the two-level nested-group grant, the `banned` exclusion denial). Closed the structural gap, not just this instance: `ci.yml`'s `build` job gained a step that does a genuine production-only install and runs `authz --help` — confirmed live that it reproduces the original crash against the pre-fix `package.json` and passes clean against the fix.
+
+Full account: `docs/DECISIONS.md` D-168.
