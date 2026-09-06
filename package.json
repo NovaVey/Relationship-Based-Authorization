@@ -56,7 +56,7 @@
     "pg": "^8.23.0",
     "toad-cache": "^3.7.4",
     "z3-solver": "^5.2.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
