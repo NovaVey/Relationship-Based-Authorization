@@ -2816,3 +2816,17 @@ Two new permanent, real-Postgres metamorphic properties are the mandatory gate t
 Verified live end-to-end against a real, natively-installed Postgres: schema publish, wildcard tuple write, `check` (both the covered and the named-exception case), `expand` rendering `user:*` in the real tree, `POST /list-users` returning both the plain-wildcard shape and the live `unenumerable` refusal with the exact predicted JSON, write-time rejection of a wildcard on a relation that never declared it, and a full NDJSON export/import round-trip (including an idempotent re-import) reproducing identical `check` verdicts. Two pre-existing tests broke as a side effect of the change and were fixed, not routed around: a DST fake's exact-SQL-text recognizer (an added SQL comment inside a query it matches verbatim), and an identifier-grammar fuzz property that needed a one-line carve-out for the new sentinel.
 
 Full account: `docs/DECISIONS.md` D-171.
+
+## Fifth capability-gap item: release integrity — an SBOM + signed-tag-enforcing release workflow
+
+**Owner:** main agent.
+
+The four items from the original capability-gap plan were done; continued into the broader backlog the same analysis had named but not selected. "Release integrity" turned out to need a real scoping decision before any code: this repo has never cut a release (zero git tags) and explicitly, deliberately removed its npm-publish scaffolding early on (D-002 — "a private deployed service, not a published library"). Checked with the user before building anything, since starting a release _process_ from scratch is a different kind of call than the previous four items (each added a capability to an existing, already-used subsystem).
+
+Confirmed: build it, scoped to a GitHub Release, never npm. `.github/workflows/release.yml` fires only on a pushed `vX.Y.Z` tag, rejects it outright unless it's a real, GitHub-verified signed annotated tag (checked via the GitHub API — the same mechanism behind the "Verified" badge, never a local GPG keyring the workflow manages itself), builds, generates a CycloneDX SBOM via a real `package-lock.json`-pinned devDependency, and attaches it to the release. `package.json` stays `"private": true` throughout — npm provenance stays correctly out of scope until that changes.
+
+A small, satisfying find along the way: `dependabot-auto-merge.yml`'s own comments had referenced a `release.yml` file since it was written — a stale pointer at the exact file D-002 deleted, broken silently for that comment's entire life. The new workflow happens to use the identical permissions pattern for the identical reason, so the reference is accurate again without editing it.
+
+Verified what's actually verifiable without pushing a real tag to a real repo as a side effect of testing: the SBOM tool run locally produces valid CycloneDX output; the tag-verification bash/jq logic unit-tested against all three real branches (lightweight, unsigned, verified) via a mocked `gh` binary; the D-168 production-install guard re-confirmed unaffected by the new devDependency.
+
+Full account: `docs/DECISIONS.md` D-172.

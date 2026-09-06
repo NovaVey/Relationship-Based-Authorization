@@ -1,0 +1,102 @@
+name: Release
+
+# Fires only on a pushed release tag (vX.Y.Z). This repo has cut zero
+# releases as of this workflow's own introduction (`git tag -l` was empty)
+# and is a continuously-deployed private service, not a published package
+# — this workflow never touches npm publishing (`package.json` stays
+# `"private": true`, per `docs/DECISIONS.md` D-002's own explicit decision
+# to remove this project's previous npm-publish scaffolding). It exists
+# solely to close the two real, externally-visible gaps
+# `docs/CAPABILITY-GAPS.md`'s "Release integrity" section named — no SBOM,
+# no signed tags — for a GitHub Release, never a package-registry publish.
+# See `docs/DECISIONS.md` D-172 for the full reasoning, including why this
+# is compatible with D-002 rather than reopening it.
+#
+# A release tag must be a real, annotated, GPG/SSH-signed tag
+# (`git tag -s vX.Y.Z -m '...'`, made with a key registered to your GitHub
+# account) — the first job step verifies that through the GitHub REST API
+# (the exact same mechanism that produces the "Verified" badge on a
+# tag/commit in GitHub's own UI), never by managing a GPG keyring itself.
+# A lightweight tag (`git tag vX.Y.Z`, no `-s`/`-a`) can never carry a
+# signature at all — git only supports signing an annotated tag object —
+# so it's rejected outright, with a clear pointer at the fix, rather than
+# silently treated the same as "no signature found."
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions: {}
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    # Scoped to this job, not declared workflow-wide — same reasoning
+    # dependabot-auto-merge.yml's own identical comment gives (OpenSSF
+    # Scorecard's Token-Permissions check flags workflow-level `write`).
+    permissions:
+      contents: write
+    steps:
+      # Deliberately plain `gh api` (returns raw JSON, unambiguous) piped
+      # through a real `jq -r`, never `gh api --jq` directly — this makes
+      # the parsing correctness independently verifiable against jq's own
+      # well-documented raw-output semantics, not dependent on exactly how
+      # `gh`'s own `--jq` flag happens to format a scalar leaf value.
+      - name: Reject a lightweight or unsigned tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          ref_json=$(gh api "repos/$REPO/git/refs/tags/$TAG")
+          object_type=$(jq -r '.object.type' <<<"$ref_json")
+          if [[ "$object_type" != "tag" ]]; then
+            echo "::error::'$TAG' is a lightweight tag (created with 'git tag $TAG', no -s/-a) — lightweight tags can never carry a signature. Delete it (git tag -d $TAG && git push origin :refs/tags/$TAG) and push a real annotated, signed tag instead: git tag -s $TAG -m 'release notes' && git push origin $TAG"
+            exit 1
+          fi
+
+          tag_sha=$(jq -r '.object.sha' <<<"$ref_json")
+          tag_json=$(gh api "repos/$REPO/git/tags/$tag_sha")
+          verified=$(jq -r '.verification.verified' <<<"$tag_json")
+          reason=$(jq -r '.verification.reason' <<<"$tag_json")
+          if [[ "$verified" != "true" ]]; then
+            echo "::error::tag '$TAG' is not a GitHub-verified signed tag (reason: $reason). Sign it with a GPG or SSH key registered to your GitHub account (Settings -> SSH and GPG keys) before pushing a release tag: git tag -s $TAG -m 'release notes'"
+            exit 1
+          fi
+          echo "tag '$TAG' is a verified, signed annotated tag (reason: $reason)."
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Prove the tagged commit actually builds before ever cutting a
+      # release from it — the same "prove it, don't assert it" discipline
+      # D-168's own production-install CI guard applies elsewhere.
+      - name: Build
+        run: npm run build
+
+      # A real devDependency (package-lock.json-pinned, Dependabot-tracked),
+      # not a floating `npx <package>@latest` — see docs/DECISIONS.md D-172
+      # for why an unpinned version here would be the exact "floating
+      # reference a future push could silently repoint" risk
+      # docs/github-governance.md's own pinned-GitHub-Actions bullet
+      # already treats as a real hazard elsewhere in this repo.
+      - name: Generate SBOM (CycloneDX)
+        run: npx cyclonedx-npm --output-format json --output-file sbom.cdx.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@e598afbe1493e6b1bafb1f389cabb956eab91231 # v3.0.3
+        with:
+          files: sbom.cdx.json
+          generate_release_notes: true

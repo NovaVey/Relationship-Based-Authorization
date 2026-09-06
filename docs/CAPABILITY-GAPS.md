@@ -286,7 +286,17 @@ to the onboarding problem rather than also credited with fixing `npx authz`.
 `README.md:13` links a live Railway deployment — so this is an
 onboarding/reproducibility gap, not a deployability blocker.)
 
-### Release integrity — partially addressed
+### Release integrity — mostly built, `docs/DECISIONS.md` D-172
+
+**Status: mostly built and shipped.** This section records the gap as it
+stood before D-172 closed most of it — a new `.github/workflows/release.yml`,
+triggered only on a pushed `vX.Y.Z` git tag, rejects a lightweight or
+unsigned tag (verified through the GitHub REST API, the same mechanism
+behind the "Verified" badge), builds, generates a CycloneDX SBOM, and
+attaches it to a GitHub Release. Deliberately never touches npm
+publishing — `package.json` stays `"private": true`, per D-002's own still-
+standing decision — so the npm-provenance piece named below remains
+correctly out of scope, not silently dropped.
 
 CodeQL (`.github/workflows/codeql.yml`, security-extended queries, weekly +
 every push/PR to main), OpenSSF Scorecard
