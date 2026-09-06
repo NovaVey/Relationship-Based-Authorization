@@ -248,14 +248,22 @@ nine came back `VIOLATED` and three `HOLDS`, with eight of those nine
 sharing one root cause — the invariant language had no way to state a
 _negative_ precondition, so any goal reachable via a directly-grantable
 relation was trivially escapable. Closing that gap for two of the nine (a
-new `notRelationEquals` primitive, D-131) moved the real, current count to
-**7 `VIOLATED`, 5 `HOLDS`** — six of the seven remaining violations still
-share the original root cause; the seventh (`openfga-expenses`) is a
-distinct self-referential-manager-loop case. The survey's own biggest
-result was never any one schema — it's this finding about the invariant
-language itself, and the fact that closing part of it is now a real,
-tracked, in-progress story rather than a static snapshot. Full table and
-reasoning: [`docs/FINDINGS.md`](docs/FINDINGS.md).
+new `notRelationEquals` primitive, D-131) moved the count to
+**7 `VIOLATED`, 5 `HOLDS`** for a time — one of those five later moved
+back to `VIOLATED` once a newer exact SMT tier (D-151) started deciding
+its goal instead of an earlier, non-exhaustive bounded search (D-176),
+the real, current, and now permanently regression-tested count is **8
+`VIOLATED`, 4 `HOLDS`**. Six of the eight violations still share the
+original root cause; the other two (`openfga-expenses`,
+`spicedb-userdefined-roles`) are each a distinct escape shape of their
+own. The survey's own biggest result was never any one schema — it's this
+finding about the invariant language itself, and the fact that closing
+part of it is now a real, tracked, in-progress story rather than a static
+snapshot. Full table and reasoning: [`docs/FINDINGS.md`](docs/FINDINGS.md).
+An OpenFGA front end (D-178) now translates a real `.fga`/JSON model into
+this project's own DSL automatically, verified against the real upstream
+source for all five OpenFGA survey entries; a SpiceDB front end is scoped
+but not yet built.
 
 `docs/DECISIONS.md` D-114 through D-131 has the complete build history —
 the small-model property and exactly where it stops applying, the SMT

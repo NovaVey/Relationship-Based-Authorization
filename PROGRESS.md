@@ -2904,3 +2904,23 @@ Writing the new fault-injection tests caught a genuinely separate, real bug befo
 The client-disconnect question got a real answer, not an assumption: firing many concurrent real HTTP requests against a real listening server and aborting each one immediately, genuinely racing the abort against the server's own in-flight handling, confirms nothing crashes and the same server keeps serving ordinary requests correctly afterward.
 
 Full account: `docs/DECISIONS.md` D-177.
+
+## An OpenFGA front end for the schema verifier — real upstream models translate automatically, matching every hand-translated verdict
+
+**Owner:** main agent.
+
+The last of the four remaining disclosed gaps: the user chose to build both an OpenFGA and a SpiceDB front end for the schema verifier, so real third-party schemas could be translated into this project's own DSL automatically instead of by hand. This entry ships the OpenFGA half.
+
+Verified the design against reality before writing any implementation: traced four of the five real upstream OpenFGA sample-store schemas by hand, term for term, against this repo's own existing hand-translated fixtures and their documented translation rules. Every relation and permission the design would produce matched the existing hand translation exactly.
+
+Built a small shared translation layer meant to carry a SpiceDB front end too, whenever that gets built next: a neutral intermediate form, the one splitting rule OpenFGA's `define` needs that this project's own separate relation/permission concepts don't (automating exactly what the hand-translated files already document doing by hand), and a from-scratch printer for this DSL's own source text — nothing printed it before, every `.authz` file so far was hand-written. Getting the printer's parenthesization right, so a generated expression always re-parses to the exact tree that was printed, was the one genuinely fiddly part; every printed test case round-trips through the real compiler and asserts the re-parsed shape, not just "it compiles."
+
+On top of that: real `.fga`/JSON models parse via OpenFGA's own published parser (no grammar written here at all), a wildcard-subject type restriction now translates for real instead of being dropped (closing a gap the hand-translated files disclosed before this project's own DSL supported wildcards at all), and a nested-userset subject reference that would point at a computed permission instead of a storable relation gets automatically narrowed and disclosed — exactly the correction two of the existing hand-translated files already had to make by hand.
+
+The strongest test built for this: translating the real, raw upstream source for all five OpenFGA survey entries — never the hand-translated file, never a synthetic stand-in — through the complete real pipeline and checking that each one reproduces the exact same verdict already published for it. All five passed on the first run.
+
+One real, honest question surfaced along the way and deliberately left open rather than quietly resolved: the verifier's own proof engines have no code anywhere that pays attention to a wildcard subject type at all. A quick check suggests this is very likely fine — for reasons tied to how the tool already reasons about any declared relation — but no dedicated test proves it, for any of the three proof tiers. Disclosed, not fixed here.
+
+The SpiceDB half stays open, sized as its own follow-up rather than folded into this same PR — real, scoped work, but smaller than earlier framed, since SpiceDB's own schema language already reads a lot like this project's own.
+
+Full account: `docs/DECISIONS.md` D-178.

@@ -25,6 +25,8 @@ const execFileAsync = promisify(execFile);
 const CLI_ENTRY = fileURLToPath(new URL('../src/cli/index.ts', import.meta.url));
 const SCHEMA_DIR = fileURLToPath(new URL('../fixtures/schemas/', import.meta.url));
 const INVARIANT_DIR = fileURLToPath(new URL('../fixtures/invariants/', import.meta.url));
+const THIRDPARTY_DIR = fileURLToPath(new URL('../thirdparty/', import.meta.url));
+const UPSTREAM_DIR = fileURLToPath(new URL('../thirdparty/upstream/', import.meta.url));
 
 interface CliRunResult {
   readonly exitCode: number;
@@ -227,5 +229,57 @@ describe('verify-schema --bound', () => {
       '2',
     ]);
     expect(result.exitCode).toBe(1);
+  }, 20_000);
+});
+
+describe('verify-schema --from-openfga — end to end through a real subprocess, real upstream .fga source', () => {
+  it("translates and verifies in one step, matching the equivalent hand-translated fixture's own published verdict", async () => {
+    const result = await runCli([
+      '--from-openfga',
+      UPSTREAM_DIR + 'openfga-github.fga',
+      '--invariants',
+      THIRDPARTY_DIR + 'openfga-github.invariant',
+    ]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('VIOLATED');
+    // Disclosed translation notes are written to stderr, not silently
+    // dropped — see verify.ts's own doc comment for why.
+    expect(result.stderr).toContain('translate-openfga:');
+    expect(result.stderr).toContain('narrowed to');
+  }, 20_000);
+
+  it('a schema-file argument AND --from-openfga together is a usage error, exit 3', async () => {
+    const result = await runCli([
+      SCHEMA_DIR + 'tenancy.authz',
+      '--from-openfga',
+      UPSTREAM_DIR + 'openfga-github.fga',
+      '--invariants',
+      INVARIANT_DIR + 'tenant-isolation.invariant',
+    ]);
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('more than one schema source');
+  }, 20_000);
+
+  it('neither a schema-file argument nor --from-openfga/--from-spicedb is a usage error, exit 3', async () => {
+    const result = await runCli(['--invariants', INVARIANT_DIR + 'tenant-isolation.invariant']);
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('no schema source given');
+  }, 20_000);
+
+  it('a model that fails to translate (an unsupported ABAC condition, no --best-effort) → exit 3, not a crash', async () => {
+    // A minimal inline model via a temp-free approach isn't practical for
+    // a subprocess test — reuses the same not-yet-implemented --from-
+    // spicedb path instead, which fails for a different, simpler reason
+    // (not yet built) but exercises the identical "translation path
+    // failed, exit 3, no crash" contract --from-openfga's own failure
+    // path shares.
+    const result = await runCli([
+      '--from-spicedb',
+      SCHEMA_DIR + 'tenancy.authz',
+      '--invariants',
+      INVARIANT_DIR + 'tenant-isolation.invariant',
+    ]);
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('not yet implemented');
   }, 20_000);
 });

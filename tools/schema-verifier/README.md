@@ -344,9 +344,47 @@ closed **two** of those nine (`spicedb-entitlements`,
 including six that share the "no negative constraints" shape, are
 unaffected: each has a second, structurally different escape (a
 userset-subject or recursive path) this narrow, bare-principal-only
-primitive was never designed to reach. Current tally: **7 VIOLATED, 5
-HOLDS.** That's a real, still-standing limit on what this language can
-verify for those seven, not a defect in any of the twelve source schemas.
+primitive was never designed to reach. Current tally: **8 VIOLATED, 4
+HOLDS** (`spicedb-userdefined-roles` later moved back from `HOLDS` to
+`VIOLATED` once D-151's SMT tier started deciding this goal exactly
+instead of the earlier, non-exhaustive bounded search — see
+`docs/DECISIONS.md` D-176, and `test/thirdparty-survey.test.ts` for the
+permanent regression guard pinning all twelve verdicts). That's a real,
+still-standing limit on what this language can verify for the remaining
+`VIOLATED` entries, not a defect in any of the twelve source schemas.
+
+## Front ends for other ecosystems
+
+`tools/schema-verifier/src/frontends/` translates a real OpenFGA `.fga`/
+JSON model into this DSL automatically (`docs/DECISIONS.md` D-178) — the
+mechanical version of the by-hand translation `thirdparty/README.md`'s own
+methodology section documents:
+
+```
+npx tsx tools/schema-verifier/src/frontends/openfga/cli.ts <model-file> [--best-effort] [--out <file>]
+```
+
+prints the translated `.authz` text (with a disclosed-notes header
+listing every narrowing/drop actually applied); or skip the intermediate
+file entirely with `verify-schema`'s own sugar:
+
+```
+npx tsx tools/schema-verifier/src/cli/index.ts --from-openfga <model-file> --invariants <file>
+```
+
+`--best-effort` drops an ABAC condition instead of failing outright
+(disclosed, not silent) — the default matches this survey's own
+established policy of excluding condition-heavy models rather than
+best-effort-translating them into something that no longer represents the
+real schema. A SpiceDB front end (`--from-spicedb`) is scoped but not yet
+built — see `docs/CAPABILITY-GAPS.md`'s "Package the schema verifier
+separately" section for why it's realistically smaller than it might look
+(SpiceDB's own grammar already maps onto this DSL's almost one-to-one) and
+`docs/DECISIONS.md` D-178 for the one open question this front end
+surfaced: the verifier's own reachability/bounded/SMT tiers have no code
+anywhere that reads a subject type's `wildcard` flag, and whether that's
+sound in every case (not just this survey's own witness-driven cases) is
+disclosed, not resolved.
 
 ## What's not built yet
 
