@@ -253,7 +253,7 @@ const REBUILD_WATERMARK_QUERY_TEXT = 'select coalesce(max(token), 0) as watermar
  * signal rather than left as a heuristic the CLI would otherwise have to
  * guess at.
  *
- * **D-162 (public/wildcard subjects) — a stored wildcard tuple is inert
+ * **D-171 (public/wildcard subjects) — a stored wildcard tuple is inert
  * here, never a soundness hazard.** A wildcard tuple (`subject_id = '*'`,
  * `subject_relation` null — `src/schema/dsl/types.ts`'s
  * `WILDCARD_SUBJECT_ID`) is swept into `candidate_rows` below like any

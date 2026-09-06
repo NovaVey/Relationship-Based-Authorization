@@ -8,7 +8,7 @@
  * deeper than the check's own depth budget — must never let the exclusion
  * grant.**
  *
- * Two independently-built shapes, one per mechanism this project's
+ * Three independently-built shapes, one per mechanism this project's
  * production resolver actually has (see `src/resolve/production/resolver.ts`'s
  * own top-of-file doc comment):
  *
@@ -24,6 +24,16 @@
  *     subject type (`member: user | <self>#member`), routing instead through
  *     `sqlRelationMembershipWithWitness` — mechanism 2, D-158's own
  *     explicitly disclosed, NOT-fixed-by-that-entry residual risk.
+ *   - `buildMechanism3Fixture` (D-171, public/wildcard subjects) —
+ *     `subtract` is a plain declared RELATION carrying a wildcard tuple
+ *     (`<ns>:*`) — a depth-0, no-recursion match-any leaf, structurally
+ *     distinct from mechanisms 1/2's own cycle/depth-ceiling "cannot prove"
+ *     risk (a match-any leaf is never uncertain — see `src/resolve/
+ *     reference/resolver.ts`'s `resolveRelation` and `src/resolve/
+ *     production/resolver.ts`'s `subjectMatches`). This property's core
+ *     assertion is therefore "does the exclusion correctly DENY a subject
+ *     the wildcard covers," not "does an unprovable cut correctly deny" —
+ *     a genuinely new, third mechanism, not a variant of the first two.
  *
  * **Why this can't reuse `src/schema/dsl/random.ts` or
  * `src/soundness/generators.ts`'s `generateFixture` as-is (checked directly,
@@ -73,6 +83,7 @@
 import { integer, sample } from 'fast-check';
 
 import { SeededRng, hashSeedToInt31 } from '../soundness/generators.js';
+import { WILDCARD_SUBJECT_ID } from '../schema/dsl/types.js';
 
 // ---------------------------------------------------------------------------
 // Shared plumbing
@@ -401,5 +412,148 @@ export function buildMechanism2Fixture(seed: string): Mechanism2Fixture {
     cutoffMaxDepth: chainLength,
     naturalBoundaryMaxDepth: chainLength + 1,
     description: `seed=${seed}: a ${chainLength}-hop-deep real '${groupNs}#member' chain wired into '${docNs}'s own 'blocked' relation, itself 'view = grant - blocked''s subtract branch — subject IS genuinely, really a member of 'blocked' (a real grant exists at the chain's own terminal group), just past a pinned maxDepth=${chainLength} that cannot reach it`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Mechanism 3 (D-171, public/wildcard subjects) — a wildcard subject
+// (`<ns>:*`) inside an exclusion's own `subtract` branch. A genuinely new,
+// third shape, not a variant of mechanism 1 or 2: matching happens at
+// depth 0 (a plain relation-tuple scan, no recursion, no cycle guard, no
+// depth ceiling at all — see `src/resolve/reference/resolver.ts`'s
+// `resolveRelation` and `src/resolve/production/resolver.ts`'s
+// `subjectMatches`), so the risk this mechanism poses to exclusion
+// soundness is structurally different from mechanisms 1/2's own
+// cycle/depth-ceiling "cannot prove" risk — it's "does a match-any leaf
+// correctly deny when it should," not "does an unprovable cut correctly
+// deny when it should."
+// ---------------------------------------------------------------------------
+
+export interface Mechanism3Fixture {
+  seed: string;
+  schemaSource: string;
+  namespace: string;
+  permissionName: string; // 'view'
+  /** Excluded purely via a wildcard tuple on `banned` — must resolve `view` DENIED, certain, on its own dedicated object (`wildcardObjectId`). */
+  wildcardExcludedSubjectId: string;
+  /** Excluded via a real, deep nested-group chain on `banned` (mechanism 2's own shape, reached on a SEPARATE object — `chainObjectId` — whose own `banned` tuples carry no wildcard at all) — proves the pre-existing mechanism-2 uncertain-cut machinery still works correctly on a namespace whose `banned` relation ALSO happens to declare `user:*` as an accepted subject type (D-171 is opt-in per relation, never implicitly changing a relation's existing behavior for tuples that don't use it). */
+  deepChainWitnessSubjectId: string;
+  /** Granted `viewer`, never banned by either branch on its own object (`controlObjectId`) — the non-degeneracy control: this fixture's own `banned` machinery must not deny everyone unconditionally. */
+  controlSubjectId: string;
+  wildcardObjectId: string;
+  chainObjectId: string;
+  controlObjectId: string;
+  tuples: FixtureTuple[];
+  /** The chain length `chainObjectId`'s own nested-group chain exceeds — pinned identically for the deep-chain check, matching this project's own D-071 discipline of pinning one shared ceiling. */
+  pinnedMaxDepth: number;
+  description: string;
+}
+
+const MECHANISM_3_PINNED_MAX_DEPTH_MIN = 3;
+const MECHANISM_3_PINNED_MAX_DEPTH_MAX = 6;
+const MECHANISM_3_CHAIN_BUFFER_MIN = 4; // mirrors CEILING_CHAIN_BUFFER_MIN's own reasoning above — generous, not tuned tight.
+const MECHANISM_3_CHAIN_BUFFER_MAX = 8;
+
+/**
+ * Builds ONE randomly-parameterized mechanism-3 fixture. Deterministic given
+ * `seed` alone, mirroring `buildMechanism1Fixture`/`buildMechanism2Fixture`'s
+ * own seeded-RNG discipline.
+ *
+ * **Why three separate objects, not one shared object mixing the wildcard
+ * and the deep chain on the same `banned` relation.** `banned`'s own
+ * resolved membership is one set, identical for every subject queried
+ * against a given object — a wildcard tuple on `object:X#banned` denies
+ * *every* subject of that namespace for `view` on `X`, unconditionally,
+ * regardless of any other tuple (a deep chain included) also stored on
+ * that same `(object, relation)`. Mixing both on one object would make the
+ * wildcard trivially dominate and permanently mask the deep chain's own
+ * uncertain-cut behavior for every subject — not a meaningful test of
+ * "wildcard doesn't interfere with the pre-existing mechanism," just an
+ * inevitable, correct consequence of both being OR'd into the same
+ * relation. Separating them onto three objects (each with its own
+ * independent `banned` tuple set) is what makes each behavior
+ * independently, meaningfully observable in one fixture.
+ */
+export function buildMechanism3Fixture(seed: string): Mechanism3Fixture {
+  const rng = buildRng(seed);
+  const ns = `mex3_${saltFor(seed)}`;
+  const schemaSource = [
+    `namespace ${ns} {`,
+    '  relation viewer: user | user:*',
+    `  relation banned: user | user:* | ${ns}#chain_member`,
+    `  relation chain_member: user | ${ns}#chain_member`,
+    '',
+    '  permission view = viewer - banned',
+    '}',
+  ].join('\n');
+
+  const wildcardExcludedSubjectId = `mex3_wild_${saltFor(seed)}`;
+  const deepChainWitnessSubjectId = `mex3_witness_${saltFor(seed)}`;
+  const controlSubjectId = `mex3_ctrl_${saltFor(seed)}`;
+  const wildcardObjectId = 'wild';
+  const chainObjectId = 'chain0';
+  const controlObjectId = 'ctrl';
+
+  const pinnedMaxDepth = rng.nextIntBetween(
+    MECHANISM_3_PINNED_MAX_DEPTH_MIN,
+    MECHANISM_3_PINNED_MAX_DEPTH_MAX,
+  );
+  const buffer = rng.nextIntBetween(MECHANISM_3_CHAIN_BUFFER_MIN, MECHANISM_3_CHAIN_BUFFER_MAX);
+  const chainLength = pinnedMaxDepth + buffer; // comfortably past the pinned ceiling.
+  const chainIds = Array.from({ length: chainLength }, (_, i) => `chain_g${i}`);
+
+  const tuples: FixtureTuple[] = [];
+
+  // wildcardObjectId: viewer grants wildcardExcludedSubjectId; banned is
+  // ONLY the wildcard tuple — a plain, depth-0 match-any leaf, no
+  // recursion involved at all.
+  tuples.push(tuple(ns, wildcardObjectId, 'viewer', 'user', wildcardExcludedSubjectId));
+  tuples.push(tuple(ns, wildcardObjectId, 'banned', 'user', WILDCARD_SUBJECT_ID));
+
+  // chainObjectId: viewer grants deepChainWitnessSubjectId; banned points,
+  // via a userset-subject tuple, into a chainLength-hop-deep nested
+  // 'chain_member' chain whose terminal node grants the witness — no
+  // wildcard tuple anywhere on THIS object's own 'banned' relation, so
+  // wildcard support existing in the schema's grammar cannot be what
+  // denies (or fails to deny) this query; only the pre-existing mechanism-2
+  // uncertain-cut machinery can.
+  tuples.push(tuple(ns, chainObjectId, 'viewer', 'user', deepChainWitnessSubjectId));
+  const firstChainGroup = chainIds[0];
+  if (firstChainGroup === undefined) {
+    throw new Error('buildMechanism3Fixture: unreachable — chainLength is always >= 1');
+  }
+  tuples.push(tuple(ns, chainObjectId, 'banned', ns, firstChainGroup, 'chain_member'));
+  for (let i = 0; i < chainLength - 1; i += 1) {
+    const current = chainIds[i];
+    const next = chainIds[i + 1];
+    if (current === undefined || next === undefined) {
+      throw new Error('buildMechanism3Fixture: unreachable chain index out of range');
+    }
+    tuples.push(tuple(ns, current, 'chain_member', ns, next, 'chain_member'));
+  }
+  const lastChainGroup = chainIds[chainLength - 1];
+  if (lastChainGroup === undefined) {
+    throw new Error('buildMechanism3Fixture: unreachable — chainLength is always >= 1');
+  }
+  tuples.push(tuple(ns, lastChainGroup, 'chain_member', 'user', deepChainWitnessSubjectId));
+
+  // controlObjectId: viewer grants controlSubjectId; banned has NO tuples
+  // at all for this object — the non-degeneracy control.
+  tuples.push(tuple(ns, controlObjectId, 'viewer', 'user', controlSubjectId));
+
+  return {
+    seed,
+    schemaSource,
+    namespace: ns,
+    permissionName: 'view',
+    wildcardExcludedSubjectId,
+    deepChainWitnessSubjectId,
+    controlSubjectId,
+    wildcardObjectId,
+    chainObjectId,
+    controlObjectId,
+    tuples,
+    pinnedMaxDepth,
+    description: `seed=${seed}: 'view = viewer - banned' on namespace '${ns}', banned:'user | user:* | ${ns}#chain_member' — wildcardObjectId='${wildcardObjectId}' excludes '${wildcardExcludedSubjectId}' via a bare '${ns}#chain_member'-typed relation's own wildcard tuple (depth-0 match, no recursion); chainObjectId='${chainObjectId}' excludes '${deepChainWitnessSubjectId}' (if genuinely reachable) via a real ${chainLength}-hop nested-group chain queried at pinnedMaxDepth=${pinnedMaxDepth}, no wildcard tuple present on that object at all; controlObjectId='${controlObjectId}' bans nobody`,
   };
 }

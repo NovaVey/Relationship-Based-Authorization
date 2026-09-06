@@ -544,7 +544,7 @@ function listObjectsOperation(): OpenApiOperation {
 }
 
 /**
- * D-162 (public/wildcard subjects) — `SubjectRef`'s own discriminated shape
+ * D-171 (public/wildcard subjects) — `SubjectRef`'s own discriminated shape
  * (`src/audit/list.ts`), reused verbatim rather than reshaped: a `concrete`
  * subject names `ns`/`id` directly; a `wildcard` subject covers every
  * subject of `ns` (no `id` at all — there is no single id to name).
@@ -573,7 +573,7 @@ function listUsersOperation(): OpenApiOperation {
     required: ['object', 'relation'],
     additionalProperties: false,
   };
-  // D-162: two response shapes — the ordinary enumerated subject list, or an
+  // D-171: two response shapes — the ordinary enumerated subject list, or an
   // explicit refusal for the one genuinely co-finite shape a wildcard minus
   // finitely many concrete exceptions produces (see `src/audit/list.ts`'s
   // `ListUsersResult`/`subtractMemberSets`). Both are a normal `200` — see
@@ -607,7 +607,7 @@ function listUsersOperation(): OpenApiOperation {
     summary:
       'Every subject (concrete, or wildcard-covering a namespace) with relation on object (bulk reverse lookup). No atToken support.',
     description:
-      'Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 200 requests/minute per client (gatedReadRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked. Not logged to the checks audit table (see src/audit/list.ts). May return an `unenumerable` refusal instead of `subjects` for one genuinely co-finite shape (D-162) — see src/audit/list.ts.',
+      'Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 200 requests/minute per client (gatedReadRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked. Not logged to the checks audit table (see src/audit/list.ts). May return an `unenumerable` refusal instead of `subjects` for one genuinely co-finite shape (D-171) — see src/audit/list.ts.',
     security: BEARER_SECURITY,
     requestBody: { required: true, content: { 'application/json': { schema: requestSchema } } },
     responses: {

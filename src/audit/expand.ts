@@ -61,7 +61,7 @@ export interface EntityRef {
 }
 
 /**
- * A direct subject of a `relation` leaf (D-162) — either a concrete,
+ * A direct subject of a `relation` leaf (D-171) — either a concrete,
  * individually-named subject, or a wildcard ("public") subject covering
  * every subject of `ns` (a stored `<ns>:*` tuple, `WILDCARD_SUBJECT_ID`).
  * `expandRelation` below is the earliest point wildcard-ness is knowable;
@@ -291,7 +291,7 @@ async function expandRelation(
   );
   for (const row of rows) {
     if (row.subject_relation === null) {
-      // D-162: a stored wildcard tuple (subject_id === '*') is guaranteed,
+      // D-171: a stored wildcard tuple (subject_id === '*') is guaranteed,
       // by `src/store/tuples.ts`'s write-time `validateWildcardStructure`,
       // to never carry a `subject_relation` — this branch is exactly where
       // that guarantee is consumed, no further check needed.

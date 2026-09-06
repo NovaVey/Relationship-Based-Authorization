@@ -137,7 +137,7 @@ function expectSameEntitySet(actual: readonly EntityRef[], expected: readonly En
  * which write any wildcard tuple — fails loudly (never silently empties)
  * if a result comes back `unenumerable` or contains an unexpected wildcard
  * entry, rather than letting either case masquerade as "zero subjects."
- * D-162's own wildcard-specific correctness proof lives in
+ * D-171's own wildcard-specific correctness proof lives in
  * `test/unit/audit/list.test.ts`'s DB-free unit tests instead.
  */
 function expectConcreteSubjects(result: ListUsersResult): EntityRef[] {

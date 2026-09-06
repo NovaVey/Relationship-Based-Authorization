@@ -200,7 +200,7 @@ import { expand, type ExpandNode, type ExpandOptions, type SubjectRef } from './
 /** Re-exported from `src/resolve/production/resolver.ts` rather than redeclared — matching `src/audit/checks.ts`'s own established precedent of reusing the resolver's own `EntityRef` for a thin wrapper file, not `resolver.ts`/`expand.ts`'s own mutual "independently redeclare, never import" discipline (that discipline exists specifically for the reference-vs-production resolver isolation boundary, §6.2 — `list.ts` is neither of those two resolvers, it's a downstream consumer of both, so nothing about that boundary applies here). Structurally identical to `expand.ts`'s own `EntityRef` regardless (both are plain `{ns, id}`), so passing one where the other's declared type is expected (as `listUsers` does, handing this file's `EntityRef` values to `expand()`) type-checks without any conversion. */
 export type { EntityRef };
 
-/** Re-exported from `src/audit/expand.ts` — the single source of truth for "concrete vs. wildcard subject" (D-162), since `expandRelation` is the earliest point that distinction is knowable. */
+/** Re-exported from `src/audit/expand.ts` — the single source of truth for "concrete vs. wildcard subject" (D-171), since `expandRelation` is the earliest point that distinction is knowable. */
 export type { SubjectRef };
 
 // ---------------------------------------------------------------------------
@@ -382,7 +382,7 @@ export interface ListUsersOptions {
 }
 
 /**
- * D-162 (public/wildcard subjects) — `listUsers`'s result is either the
+ * D-171 (public/wildcard subjects) — `listUsers`'s result is either the
  * exact, fully-enumerated subject list (concrete subjects plus, where a
  * relation grants an entire namespace, a `{kind:'wildcard', ns}` entry
  * standing in for "everyone of that namespace" rather than expanding it),
@@ -413,13 +413,13 @@ function subjectKey(ref: EntityRef): string {
 }
 
 // ---------------------------------------------------------------------------
-// listUsers's wildcard-aware set combinators (D-162).
+// listUsers's wildcard-aware set combinators (D-171).
 //
 // A naive fix that only widens the RESULT type to represent a wildcard
 // entry (leaving the union/intersection/exclusion combinators themselves
-// keyed on literal concrete ids, as they were before D-162) is WRONG under
+// keyed on literal concrete ids, as they were before D-171) is WRONG under
 // exclusion: for `view = viewer - banned` with `viewer@user:alice` and
-// `banned@user:*`, `check()` correctly denies alice (D-162's own resolver
+// `banned@user:*`, `check()` correctly denies alice (D-171's own resolver
 // fix, both resolvers' one shared match funnel), but a naive listUsers fix
 // would find no literal key in `banned`'s own evaluated set equal to
 // alice's, and so would falsely still list her — a real, silent
@@ -495,7 +495,7 @@ function partitionDirectSubjects(subjects: readonly SubjectRef[]): MemberSet {
  * node, a `tupleToUserset` node's own children, and a `relation` leaf's own
  * `directSubjects` combined with its `usersets[]` expansions. Propagates
  * `unenumerable` unconditionally: once any operand can't be exactly
- * enumerated, nothing built from it can be either (D-162's own deliberate
+ * enumerated, nothing built from it can be either (D-171's own deliberate
  * "refuse loudly, don't approximate" scope boundary).
  */
 function unionMemberSets(sets: readonly EvaluateExpandResult[]): EvaluateExpandResult {
@@ -524,7 +524,7 @@ function unionMemberSets(sets: readonly EvaluateExpandResult[]): EvaluateExpandR
  * `intersection` node. `sets.length === 0` is handled defensively (returns
  * the empty set rather than throwing or, worse, treating "no branches" as
  * "everyone") but should be unreachable in practice — see this function's
- * own pre-D-162 doc comment history for why (the schema compiler's own
+ * own pre-D-171 doc comment history for why (the schema compiler's own
  * grammar requires an `intersection` rewrite rule to have at least one
  * operand). A namespace covered by a wildcard in EVERY branch is itself
  * wildcard-covered in the intersection (`user:*` intersected with `user:*`
@@ -570,7 +570,7 @@ function intersectMemberSets(sets: readonly EvaluateExpandResult[]): EvaluateExp
  * rather than approximate** (returns `Unenumerable` instead of either
  * silently dropping the wildcard, which would under-report, or silently
  * keeping it, which would over-report subjects `subtract` actually
- * excludes) — this is a deliberate scope boundary (D-162), not an
+ * excludes) — this is a deliberate scope boundary (D-171), not an
  * oversight; see `ListUsersResult`'s own doc comment for why `/check` and
  * `/listObjects` are never affected by it. `unenumerable` on either operand
  * propagates unconditionally, for the identical reason `unionMemberSets`
@@ -609,7 +609,7 @@ function assertNeverExpandNode(node: never): never {
 
 /**
  * Recursively evaluates an `ExpandNode` (`src/audit/expand.ts`) into the
- * `MemberSet` (or `Unenumerable` refusal, D-162) it resolves to — pure,
+ * `MemberSet` (or `Unenumerable` refusal, D-171) it resolves to — pure,
  * synchronous, zero I/O; every fact `expand()` already fetched is right
  * there in the tree it returned, no new `relation_tuples` reads needed.
  *
@@ -634,7 +634,7 @@ function assertNeverExpandNode(node: never): never {
  *    naive flattening would wrongly include every member of `b` that's also
  *    (irrelevantly, from a flattening perspective) present somewhere in
  *    `a`'s own leaves, when they should be excluded. See
- *    `subtractMemberSets`'s own doc comment for the D-162 wildcard-specific
+ *    `subtractMemberSets`'s own doc comment for the D-171 wildcard-specific
  *    version of this same trap.
  *
  * The combinator semantics implemented below, one case per `ExpandNode.kind`:
@@ -700,7 +700,7 @@ export function evaluateExpandNode(node: ExpandNode): EvaluateExpandResult {
 
 /**
  * Every subject — concrete, or wildcard-covering an entire namespace
- * (D-162) — that has `relationOrPermission` on `object`. Built entirely on
+ * (D-171) — that has `relationOrPermission` on `object`. Built entirely on
  * top of `expand()` (`src/audit/expand.ts`): fetches the real subject tree,
  * then evaluates it with `evaluateExpandNode` (pure, no additional I/O) —
  * see this file's own top-of-file doc comment for why this does not, and

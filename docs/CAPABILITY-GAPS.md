@@ -16,7 +16,19 @@ commit `85126e8`.
 
 ## Core capability gaps
 
-### Public/wildcard subjects
+### Public/wildcard subjects — built, `docs/DECISIONS.md` D-171
+
+**Status: built and shipped.** This section records the gap as it stood
+before it was closed — see D-171 for what actually shipped (a per-relation,
+opt-in `<ns>:*` subject type; a reserved `subject_id = '*'` store sentinel
+requiring no migration; a single shared match funnel in each resolver, so
+the exclusion-soundness argument holds by construction, not by empirical
+luck; and `listUsers` widened to a discriminated concrete/wildcard result
+that refuses outright, rather than approximating, the one genuinely
+co-finite shape a wildcard-minus-concrete-exceptions subtraction produces).
+D-114 is not silently edited — it stays standing as the historical marker
+of what v1 meant, exactly per its own "Revisit if" clause — D-171 is the
+dated decision reopening it that clause itself anticipated.
 
 Confirmed absent, and deliberately: grep for wildcard/`user:*` support across
 `src/schema/dsl`, `src/store/tuples.ts` and `src/resolve/*/resolver.ts` turns

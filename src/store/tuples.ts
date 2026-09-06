@@ -93,7 +93,7 @@ const FIELDS: Array<[keyof TupleKey, string]> = [
  * be configured, and should never be masked behind an unrelated
  * infrastructure message (full-repo audit finding #13, LOW, 2026-08-16).
  *
- * D-162: `subjectId === WILDCARD_SUBJECT_ID` ('*') is carved out of the
+ * D-171: `subjectId === WILDCARD_SUBJECT_ID` ('*') is carved out of the
  * generic `FIELDS` loop for `subjectId` specifically — every other field
  * (`objectNs`, `objectId`, `relation`, `subjectNs`, `subjectRelation`) still
  * enforces `IDENTIFIER_PATTERN` unmodified. A wildcard is always typed by a
@@ -132,7 +132,7 @@ export function validateIdentifiers(tuple: TupleKey): TupleError[] {
 }
 
 /**
- * D-162: a wildcard subject (`subjectId === WILDCARD_SUBJECT_ID`) can never
+ * D-171: a wildcard subject (`subjectId === WILDCARD_SUBJECT_ID`) can never
  * carry a `subjectRelation` — a wildcard is always a plain grant, never a
  * userset. Enforced independently of `validateAgainstSchema`'s type check
  * below, because a caller can pass `subjectId: '*'` and a `subjectRelation`
@@ -251,7 +251,7 @@ async function validateAgainstSchema(pool: QueryExecutor, tuple: TupleKey): Prom
     ];
   }
 
-  // D-162: a wildcard write (`subjectId === '*'`) is allowed only if this
+  // D-171: a wildcard write (`subjectId === '*'`) is allowed only if this
   // relation explicitly declared `<subjectNs>:*` as one of its subject
   // types — checked separately from the ordinary exact-match check below,
   // since a wildcard subject type is never compared by `relation`/

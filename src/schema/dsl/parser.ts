@@ -43,7 +43,7 @@ import { makeSchemaError, SchemaParseError, type SchemaError } from './errors.js
 export interface ParsedSubjectType {
   namespace: string;
   relation?: string;
-  /** Present (and `true`) only for a `namespace:*` wildcard subject type (D-162) — mutually exclusive with `relation`. */
+  /** Present (and `true`) only for a `namespace:*` wildcard subject type (D-171) — mutually exclusive with `relation`. */
   wildcard?: boolean;
   line: number;
 }
@@ -340,7 +340,7 @@ function parseSubjectType(state: ParserState): ParsedSubjectType {
   validateIdentifier(nsToken, 'subject type namespace');
   // A relation's own `:` (separating its name from its subject-type list,
   // `parseRelation` above) is already consumed before this function is ever
-  // entered — a second `:` seen here (only ever followed by `*`, D-162's
+  // entered — a second `:` seen here (only ever followed by `*`, D-171's
   // wildcard subject type) is unambiguous, not a grammar collision.
   if (peek(state).type === 'colon') {
     consume(state);

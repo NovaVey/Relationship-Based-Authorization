@@ -216,7 +216,7 @@ function compileRelations(
         }
         subjectTypes.push({ namespace: subjectType.namespace, relation: subjectType.relation });
       } else if (subjectType.wildcard) {
-        // D-162 — a wildcard subject type never references another
+        // D-171 — a wildcard subject type never references another
         // namespace's members, so it needs no cross-namespace lookup at
         // all (unlike the `#relation` branch above's "soft check") —
         // strictly simpler than the branch it sits beside.

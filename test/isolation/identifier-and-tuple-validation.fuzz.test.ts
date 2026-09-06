@@ -927,7 +927,7 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
       }
     }
 
-    it("for 2,000 random generated strings, a subject/object id is accepted if and only if it matches the published identifier grammar — the same property, run against the id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it. D-162 adds one, and only one, carve-out to this property: a subjectId of exactly WILDCARD_SUBJECT_ID ('*') proceeds past identifier validation even though it never matches IDENTIFIER_PATTERN — objectId has no such carve-out, so the two positions genuinely diverge for this one candidate value.", async () => {
+    it("for 2,000 random generated strings, a subject/object id is accepted if and only if it matches the published identifier grammar — the same property, run against the id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it. D-171 adds one, and only one, carve-out to this property: a subjectId of exactly WILDCARD_SUBJECT_ID ('*') proceeds past identifier validation even though it never matches IDENTIFIER_PATTERN — objectId has no such carve-out, so the two positions genuinely diverge for this one candidate value.", async () => {
       await assert(
         asyncProperty(string({ maxLength: 200 }), async (candidate) => {
           const matchesGrammar =
@@ -935,7 +935,7 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
             candidate.length > 0 &&
             candidate.length <= MAX_IDENTIFIER_LENGTH;
 
-          // D-162: subjectId (and only subjectId) also accepts the reserved
+          // D-171: subjectId (and only subjectId) also accepts the reserved
           // wildcard sentinel — src/store/tuples.ts's validateIdentifiers
           // carves subjectId === WILDCARD_SUBJECT_ID out of its own
           // IDENTIFIER_PATTERN check, unconditionally, before any schema

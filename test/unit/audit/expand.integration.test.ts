@@ -132,7 +132,7 @@ async function publishOk(source: string): Promise<void> {
   if (!result.ok) throw new Error(`fixture schema failed to publish: ${result.errors.join('; ')}`);
 }
 
-/** This file writes no wildcard tuple anywhere — every `directSubjects` entry is expected concrete. Fails loudly (never silently drops) if that ever stops being true, so a wildcard-shaped bug here can't hide as "one fewer subject than expected." D-162's own wildcard-specific `expand()`/`expandRelation` coverage lives in the tests added alongside this file's own wildcard describe block below. */
+/** This file writes no wildcard tuple anywhere — every `directSubjects` entry is expected concrete. Fails loudly (never silently drops) if that ever stops being true, so a wildcard-shaped bug here can't hide as "one fewer subject than expected." D-171's own wildcard-specific `expand()`/`expandRelation` coverage lives in the tests added alongside this file's own wildcard describe block below. */
 function concreteId(subject: SubjectRef): string {
   if (subject.kind !== 'concrete') {
     throw new Error(`expected a concrete subject in this fixture, got ${JSON.stringify(subject)}`);

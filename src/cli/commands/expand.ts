@@ -22,7 +22,7 @@ function entityStr(e: { ns: string; id: string }): string {
   return `${e.ns}:${e.id}`;
 }
 
-/** D-162: a wildcard subject renders as `<ns>:*`, matching the DSL's own `<ns>:*` write syntax. */
+/** D-171: a wildcard subject renders as `<ns>:*`, matching the DSL's own `<ns>:*` write syntax. */
 function subjectRefStr(subject: SubjectRef): string {
   return subject.kind === 'wildcard' ? `${subject.ns}:*` : entityStr(subject);
 }

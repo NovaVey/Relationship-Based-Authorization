@@ -138,7 +138,7 @@ export interface DirectGrantStep {
   object: EntityRef;
   relation: string;
   subject: EntityRef;
-  /** Present (and `'wildcard'`) only when this grant matched via a stored `<ns>:*` wildcard tuple (D-162) rather than a tuple naming `subject` directly. */
+  /** Present (and `'wildcard'`) only when this grant matched via a stored `<ns>:*` wildcard tuple (D-171) rather than a tuple naming `subject` directly. */
   via?: 'wildcard';
 }
 
@@ -542,12 +542,12 @@ function resolveRelation(
     if (!isTupleLive(tuple, ctx.now)) continue;
     if (tuple.subjectRelation === undefined) {
       const subject: EntityRef = { ns: tuple.subjectNs, id: tuple.subjectId };
-      // D-162 — a wildcard tuple (`subjectId === '*'`) matches ANY concrete
+      // D-171 — a wildcard tuple (`subjectId === '*'`) matches ANY concrete
       // subject of the same namespace, not just one naming it directly.
       // Both `base` and `subtract` funnel through this exact same
       // comparison (there is no second, unsynced copy of this logic for
       // the two operands of an exclusion's `NOT` to disagree about) — see
-      // `docs/DECISIONS.md` D-162 for why that symmetry is what keeps this
+      // `docs/DECISIONS.md` D-171 for why that symmetry is what keeps this
       // sound inside `evalRewrite`'s `exclusion` case below, with no
       // special-casing needed there at all.
       const isWildcardMatch = subject.ns === ctx.subject.ns && subject.id === WILDCARD_SUBJECT_ID;

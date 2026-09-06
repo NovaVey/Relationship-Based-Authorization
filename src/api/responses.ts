@@ -317,7 +317,7 @@ export function listObjectsResponse(
 }
 
 /**
- * D-162 (public/wildcard subjects): `subjects` entries are discriminated
+ * D-171 (public/wildcard subjects): `subjects` entries are discriminated
  * (`{kind:'concrete', ns, id}` or `{kind:'wildcard', ns}`, `src/audit/
  * list.ts`'s `SubjectRef`, reused verbatim rather than reshaped — the same
  * "don't reshape a real evidence-carrying type for display convenience"

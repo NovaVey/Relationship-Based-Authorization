@@ -52,7 +52,7 @@ import type { PublishResult, PublishedNamespace } from '../../../src/schema/publ
 
 const subject: ApiEntityRef = { ns: 'user', id: 'alice' };
 const object: ApiEntityRef = { ns: 'document', id: 'readme' };
-/** `subject` above, reshaped as a `SubjectRef` (D-162) for use in an `ExpandNode.directSubjects` array, which is discriminated concrete/wildcard rather than a bare `{ns, id}`. */
+/** `subject` above, reshaped as a `SubjectRef` (D-171) for use in an `ExpandNode.directSubjects` array, which is discriminated concrete/wildcard rather than a bare `{ns, id}`. */
 const concreteSubject: SubjectRef = { kind: 'concrete', ns: subject.ns, id: subject.id };
 
 const grantPath: ResolutionStep = {
@@ -374,7 +374,7 @@ describe('listUsersResponse — subjects passes through verbatim, and an empty r
   });
 });
 
-describe('listUsersResponse — D-162 (public/wildcard subjects): a wildcard entry passes through discriminated, and an unenumerable result renders as a distinct, still-200 shape', () => {
+describe('listUsersResponse — D-171 (public/wildcard subjects): a wildcard entry passes through discriminated, and an unenumerable result renders as a distinct, still-200 shape', () => {
   it('listusersresponse-passes-through-a-mix-of-concrete-and-wildcard-subjects-verbatim', () => {
     const subjects: SubjectRef[] = [
       { kind: 'wildcard', ns: 'user' },

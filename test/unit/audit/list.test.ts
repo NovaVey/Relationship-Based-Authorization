@@ -15,7 +15,7 @@
  * demonstrate at the unit level — lives in
  * `test/unit/audit/list.integration.test.ts`.
  *
- * D-162 (public/wildcard subjects) added a second correctness trap this
+ * D-171 (public/wildcard subjects) added a second correctness trap this
  * file now also covers at the unit level: a wildcard subject
  * (`{kind:'wildcard', ns}`) must be tracked as NAMESPACE coverage, not a
  * literal key, so it correctly excludes a concrete subject reached via a
@@ -78,7 +78,7 @@ function relationLeaf(object: EntityRef, relation: string, directSubjectIds: str
   };
 }
 
-/** A `relation` leaf granting an entire namespace by wildcard (`<ns>:*`, D-162) — no concrete subjects, no userset members. */
+/** A `relation` leaf granting an entire namespace by wildcard (`<ns>:*`, D-171) — no concrete subjects, no userset members. */
 function wildcardLeaf(object: EntityRef, relation: string, ns: string): ExpandNode {
   return { kind: 'relation', object, relation, directSubjects: [wildcard(ns)], usersets: [] };
 }
@@ -293,7 +293,7 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
   });
 
   // -------------------------------------------------------------------------
-  // D-162 — wildcard ("public") subjects.
+  // D-171 — wildcard ("public") subjects.
   // -------------------------------------------------------------------------
 
   it('relation: a wildcard directSubjects entry is tracked as namespace coverage, not a literal key', () => {
@@ -364,7 +364,7 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
     expect(sortedWildcardNs(evaluateExpandNode(node))).toEqual([]);
   });
 
-  it("exclusion: wildcard in subtract excludes a concrete base member of the SAME namespace, even though it wasn't named directly — the core D-162 listUsers trap", () => {
+  it("exclusion: wildcard in subtract excludes a concrete base member of the SAME namespace, even though it wasn't named directly — the core D-171 listUsers trap", () => {
     const node: ExpandNode = {
       kind: 'exclusion',
       object: ref('document', 'readme'),
@@ -373,7 +373,7 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
     };
     // alice is a viewer; banned wildcards ALL users, so she is banned too,
     // even though no tuple names her directly on the banned side. A naive
-    // literal-key-only exclusion (the pre-D-162 implementation) would find
+    // literal-key-only exclusion (the pre-D-171 implementation) would find
     // no key in subtract equal to alice's and wrongly still list her —
     // exactly the divergence from check()'s own correct denial this
     // property exists to close.

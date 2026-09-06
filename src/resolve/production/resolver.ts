@@ -221,7 +221,7 @@ export interface DirectGrantStep {
   object: EntityRef;
   relation: string;
   subject: EntityRef;
-  /** Present (and `'wildcard'`) only when this grant matched via a stored `<ns>:*` wildcard tuple (D-162) rather than a tuple naming `subject` directly. */
+  /** Present (and `'wildcard'`) only when this grant matched via a stored `<ns>:*` wildcard tuple (D-171) rather than a tuple naming `subject` directly. */
   via?: 'wildcard';
 }
 
@@ -1359,7 +1359,7 @@ function parseFrontierKeyString(raw: string): RelationClosureKey {
   };
 }
 
-/** Reconstructs a positive proof from a winning frontier row's own `path` — a plain linear walk, not a search. `via` (D-162) tags the terminal `directGrant` step as wildcard-matched when the real matching tuple's subject was the `'*'` sentinel rather than `plainSubject` itself. */
+/** Reconstructs a positive proof from a winning frontier row's own `path` — a plain linear walk, not a search. `via` (D-171) tags the terminal `directGrant` step as wildcard-matched when the real matching tuple's subject was the `'*'` sentinel rather than `plainSubject` itself. */
 function reconstructProof(
   path: readonly string[],
   plainSubject: EntityRef,
@@ -1397,7 +1397,7 @@ function reconstructProof(
 
 /**
  * The single canonical predicate deciding "does this stored tuple's subject
- * satisfy this query's subject?" (D-162) — used at the one match site,
+ * satisfy this query's subject?" (D-171) — used at the one match site,
  * `sqlRelationMembershipWithWitness` below. A tuple whose `subject_id` is
  * the `'*'` wildcard sentinel (`WILDCARD_SUBJECT_ID`) matches ANY subject of
  * the same namespace, in addition to the ordinary exact-id match. Exported

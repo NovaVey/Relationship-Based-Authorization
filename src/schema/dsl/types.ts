@@ -107,7 +107,7 @@ export const MAX_EXPRESSION_NESTING_DEPTH = 100;
  * tuple: either a direct/terminal principal type (`user` — no `relation`
  * field), a userset reference into another namespace's relation
  * (`group#member` — `relation: "member"`), or a wildcard ("public subject")
- * type (`user:*` — `wildcard: true`, D-162, reopening D-114's "no analog
+ * type (`user:*` — `wildcard: true`, D-171, reopening D-114's "no analog
  * anywhere in this grammar" exclusion). `relation` and `wildcard` are
  * mutually exclusive — a subject type is never both a userset reference and
  * a wildcard. This is what a tuple writer (Phase 2) checks a write's
@@ -123,7 +123,7 @@ export interface SubjectTypeRef {
 
 /**
  * The reserved `subject_id` value denoting "every subject of this tuple's
- * `subject_ns`" (D-162) — a public/wildcard grant, e.g. `user:*`. Never a
+ * `subject_ns`" (D-171) — a public/wildcard grant, e.g. `user:*`. Never a
  * real, writable subject id: `IDENTIFIER_PATTERN` (`/^[a-z][a-z0-9_]*$/`)
  * can never produce `'*'`, so this sentinel can never collide with a real
  * identifier — the same non-collision reasoning `relation_tuples_unique_fact`
