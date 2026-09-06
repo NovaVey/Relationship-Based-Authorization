@@ -18,6 +18,15 @@
  * path returns `{ exitCode: 3, ... }` with a message already written to
  * `stderr`, so `index.ts`'s own `.action()` handler never needs its own
  * `catch`.
+ *
+ * `fromOpenfga`/`fromSpicedb` are sugar over "translate, then verify the
+ * translated DSL text" — exactly one of `schemaFile`, `fromOpenfga`, or
+ * `fromSpicedb` must be given (checked first, exit `3` otherwise, the
+ * same "usage problem, not a verifier result" bucket a missing file
+ * lands in). Either translation path's own disclosed notes (each front
+ * end's own translate.ts, under `../frontends/`) are always written to
+ * `stderr` before the verification result itself — a caller piping only
+ * stdout (`--json` or the human report) never silently loses them.
  */
 import { readFileSync } from 'node:fs';
 
@@ -25,11 +34,19 @@ import { compileSchema } from '../../../../src/schema/dsl/compiler.js';
 import { buildSchemaGraph } from '../ir/index.js';
 import { parseInvariants } from '../invariants/index.js';
 import { checkAndValidate } from '../validate/index.js';
+import { translateOpenfgaFile } from '../frontends/openfga/translate-file.js';
 import { combineExitCodes, invariantExitCode, type InvariantExitCode } from './exitCodes.js';
 import { formatHuman, toJsonReport, type InvariantVerification } from './format.js';
 
 export interface RunVerifyOptions {
-  readonly schemaFile: string;
+  /** Exactly one of `schemaFile`, `fromOpenfga`, `fromSpicedb` must be set. */
+  readonly schemaFile?: string;
+  /** Path to an OpenFGA `.fga`/JSON model file — translated in-memory before verification (`../frontends/openfga/`). */
+  readonly fromOpenfga?: string;
+  /** Reserved for the SpiceDB front end — not yet built. */
+  readonly fromSpicedb?: string;
+  /** Only meaningful alongside `fromOpenfga`/`fromSpicedb` — see that front end's own `TranslateOptions.bestEffort` doc comment. */
+  readonly bestEffort?: boolean;
   readonly invariantsFile: string;
   readonly bound?: number;
   readonly json: boolean;
@@ -54,10 +71,48 @@ export async function runVerify(options: RunVerifyOptions): Promise<RunVerifyRes
   const log = options.stdout ?? ((line: string) => console.log(line));
   const err = options.stderr ?? ((line: string) => console.error(line));
 
+  const sourcesGiven = [options.schemaFile, options.fromOpenfga, options.fromSpicedb].filter(
+    (s) => s !== undefined,
+  );
+  if (sourcesGiven.length !== 1) {
+    err(
+      sourcesGiven.length === 0
+        ? 'no schema source given — pass a schema file, or exactly one of --from-openfga/--from-spicedb'
+        : 'more than one schema source given — pass a schema file, or exactly one of --from-openfga/--from-spicedb, never several at once',
+    );
+    return { exitCode: 3 };
+  }
+
   let schemaSource: string;
+  let schemaLabel: string;
+  if (options.fromOpenfga !== undefined) {
+    schemaLabel = options.fromOpenfga;
+    const translated = translateOpenfgaFile(options.fromOpenfga, {
+      bestEffort: options.bestEffort ?? false,
+    });
+    if (!translated.ok) {
+      err(translated.error);
+      return { exitCode: 3 };
+    }
+    for (const note of translated.notes) err(`translate-openfga: ${note.detail}`);
+    schemaSource = translated.dslText;
+  } else if (options.fromSpicedb !== undefined) {
+    // Not yet built — see docs/CAPABILITY-GAPS.md's "Package the schema
+    // verifier separately" section.
+    err(`--from-spicedb is not yet implemented ('${options.fromSpicedb}')`);
+    return { exitCode: 3 };
+  } else {
+    schemaLabel = options.schemaFile!;
+    try {
+      schemaSource = readFileOrThrow(options.schemaFile!, 'schema file');
+    } catch (e) {
+      err((e as Error).message);
+      return { exitCode: 3 };
+    }
+  }
+
   let invariantsSource: string;
   try {
-    schemaSource = readFileOrThrow(options.schemaFile, 'schema file');
     invariantsSource = readFileOrThrow(options.invariantsFile, 'invariants file');
   } catch (e) {
     err((e as Error).message);
@@ -67,7 +122,7 @@ export async function runVerify(options: RunVerifyOptions): Promise<RunVerifyRes
   const compiled = compileSchema(schemaSource);
   if (!compiled.ok) {
     err(
-      `schema '${options.schemaFile}' failed to compile:\n` +
+      `schema '${schemaLabel}' failed to compile:\n` +
         compiled.errors.map((e) => `  line ${e.line}: ${e.message}`).join('\n'),
     );
     return { exitCode: 3 };
@@ -119,9 +174,9 @@ export async function runVerify(options: RunVerifyOptions): Promise<RunVerifyRes
   const exitCode = combineExitCodes(verifications.map((v) => v.exitCode));
 
   if (options.json) {
-    log(JSON.stringify(toJsonReport(options.schemaFile, verifications, exitCode), null, 2));
+    log(JSON.stringify(toJsonReport(schemaLabel, verifications, exitCode), null, 2));
   } else {
-    log(formatHuman(options.schemaFile, verifications));
+    log(formatHuman(schemaLabel, verifications));
   }
 
   return { exitCode };

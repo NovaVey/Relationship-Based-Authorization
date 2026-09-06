@@ -343,52 +343,72 @@ real, load-bearing practice here, not just a slogan.
 
 ## Proof machinery
 
-### Package the schema verifier separately — partially built, `docs/DECISIONS.md` D-173
+### Package the schema verifier separately — two of three pieces built, `docs/DECISIONS.md` D-173, D-178
 
-**Status: partially built.** This section records the gap as it stood
-before D-173 closed the cheapest of the three pieces it named — see D-173
-for what actually shipped (`tools/schema-verifier/action.yml`, a reusable
-composite GitHub Action wrapping `verify-schema`, dogfooded in this repo's
-own `.github/workflows/schema-verifier.yml` via a local
-`uses: ./tools/schema-verifier` reference). The two genuinely harder
-pieces below — an OpenFGA-syntax front end and a from-scratch SpiceDB
-front end — remain unbuilt: "the real blocker is that other repos' models
-aren't in this project's DSL" is still exactly true.
+**Status: two of three pieces built.** D-173 closed the cheapest piece
+(`tools/schema-verifier/action.yml`, a reusable composite GitHub Action
+wrapping `verify-schema`, dogfooded in this repo's own
+`.github/workflows/schema-verifier.yml` via a local
+`uses: ./tools/schema-verifier` reference). D-178 closed the OpenFGA front
+end — see that entry for what shipped
+(`tools/schema-verifier/src/frontends/openfga/`, plus a shared
+`frontends/common/` layer both front ends use). The SpiceDB front end
+remains unbuilt.
 
-The third-party survey — 7 VIOLATED / 5 HOLDS, 0 UNKNOWN
-(`docs/FINDINGS.md:101`, current as of D-131's `notRelationEquals`
-primitive closing two of the original nine) — is the most externally
-interesting result in the repo, and today it's only a markdown table
-(`docs/FINDINGS.md:86-99`). Nothing in the repo packages it further: there
-is no `action.yml` anywhere, and the one existing CI hook
-(`.github/workflows/schema-verifier.yml`) isn't a reusable action — it
-hardcodes `schema/example.authz`/`schema/example.invariant`, this repo's
-own fixtures, with no `workflow_call` trigger. That said, the CLI it wraps
-(`tools/schema-verifier/src/cli/index.ts`, D-122) already takes arbitrary
-`<schema-file> --invariants <file>` paths, so an `action.yml` wrapper is
-comparatively thin work — the real blocker is that other repos' models
-aren't in this project's DSL.
+The third-party survey — **8 VIOLATED / 4 HOLDS, 0 UNKNOWN**
+(`docs/FINDINGS.md:131`, current as of D-151's SMT tier correcting
+`spicedb-userdefined-roles`, pinned by
+`tools/schema-verifier/test/thirdparty-survey.test.ts` since D-176; this
+section itself cited the stale `7/5` figure from before that correction
+until this entry) — is the most externally interesting result in the
+repo. D-173 already closed "nothing packages it further" for the CI-hook
+half of that complaint.
 
-You did hand-translate twelve real schemas for the survey
-(`tools/schema-verifier/thirdparty/`, five genuine OpenFGA `.fga` files
-plus seven SpiceDB-syntax sources — six embedded in `schema-and-data.yaml`
-fixtures, one in an authzed/docs MDX page, not standalone `.zed` files),
-and the translation rules are written down
-(`tools/schema-verifier/thirdparty/README.md`'s methodology section) — but
-that's a documented-by-hand mapping plus twelve worked examples, not code;
-nothing in `src/` or `tools/schema-verifier/src/` parses either syntax. The
-two front ends aren't symmetric work, though: OpenFGA already has an
-official offline parser — `@openfga/syntax-transformer`, vendored right in
-this monorepo for `tools/rebac-benchmark`
-(`tools/rebac-benchmark/src/adapters/openfga-adapter.ts`) — so that side is
-a JSON-to-IR mapper over an existing library, not a parser from scratch.
-SpiceDB has no such shortcut anywhere here: the benchmark's own SpiceDB
-adapter parses `.zed` syntax only by handing it to a live `spicedb serve`
-process via gRPC (`tools/rebac-benchmark/src/adapters/spicedb-adapter.ts:74-77`),
-so a real offline `.zed` parser is still unbuilt work. Net: the Action
-wrapper is cheap, the OpenFGA front end is a mapping exercise over a
-dependency you already have, and the SpiceDB front end is the one
-genuinely new parser this needs.
+**What D-178 actually found, correcting three things this section
+previously got wrong:**
+
+1. **The OpenFGA side was never "just a JSON-to-IR mapper over an
+   existing library."** `@openfga/syntax-transformer` (now a real
+   dependency of this repo's own root `package.json`, not just
+   `tools/rebac-benchmark`'s) does remove all _parsing_ risk — real
+   `.fga` DSL text goes in, a fully-formed `AuthorizationModel` comes out,
+   zero grammar work needed. But OpenFGA's `define` conflates what this
+   DSL keeps separate (a name can be directly writable, computed, or
+   both at once) — turning that into this DSL's own `relation`/
+   `permission` split, precedence-correct DSL text, and the `type#relation`
+   nested-userset narrowing the hand-translated `openfga-github`/
+   `openfga-slack` survey entries already had to do by hand, is real,
+   substantial logic (`tools/schema-verifier/src/frontends/common/ir.ts`'s
+   `splitMember`, `dsl-print.ts`'s precedence-aware printer,
+   `openfga/translate.ts`'s narrowing pass) — comparable in size to the
+   parsing this section credited as the hard part, not incidental
+   glue around it. It's also the _shared_ half: the common layer this
+   logic lives in is written once and reused by whatever SpiceDB front
+   end comes next, unlike OpenFGA's own parsing step.
+2. **D-171's wildcard-subject grammar addition was never connected to
+   this survey** until now. `openfga-gdrive`'s own hand-translated
+   header comment disclosed dropping `user:*` because "this DSL has no
+   wildcard concept" — true when written, stale since D-171 shipped.
+   D-178's translator includes real wildcard subject types; see that
+   entry for the one genuinely open question this surfaced (whether the
+   verifier's own reachability/bounded/SMT tiers reason _soundly_ about a
+   wildcard-declared relation in every case, not just this survey's own
+   witness-driven cases — disclosed there, not resolved).
+3. **The SpiceDB front end is smaller than this section previously
+   framed.** "The one genuinely new parser this needs" made it sound like
+   the harder of the two halves; `thirdparty/README.md`'s own methodology
+   section already documents why it isn't: SpiceDB's own
+   `definition`/`relation`/`permission`/`+`/`&`/`-`/`->` grammar maps onto
+   this DSL's `namespace`/`relation`/`permission`/`|`/`&`/`-`/`->` almost
+   one-to-one — a hand-written lexer/parser for it is realistically a
+   light fork of `src/schema/dsl/parser.ts`'s own tokenizer/recursive-
+   descent shape, not a from-scratch grammar. It reuses the same
+   `frontends/common/` layer D-178 already built (no `splitMember`-style
+   translation needed at all, since SpiceDB already keeps `relation`/
+   `permission` separate — `splitMember` is a documented no-op pass-
+   through for every member SpiceDB's own front end will emit). Still
+   unbuilt, but the remaining work is smaller than "the one genuinely new
+   parser this needs" implied.
 
 ### Close the invariant-language root cause — the stale number is now fixed; a genuinely new primitive stays open
 

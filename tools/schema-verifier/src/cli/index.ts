@@ -55,8 +55,23 @@ program
   .description(
     'Statically verify a namespace DSL schema against an invariant — proves it holds under every possible tuple set, or produces a real counterexample confirmed against the production check engine.',
   )
-  .argument('<schema-file>', 'path to a .authz schema file')
+  .argument(
+    '[schema-file]',
+    'path to a .authz schema file — omit when using --from-openfga/--from-spicedb instead',
+  )
   .requiredOption('--invariants <file>', 'path to a .invariant file (may declare more than one)')
+  .option(
+    '--from-openfga <file>',
+    'translate an OpenFGA .fga/JSON model (tools/schema-verifier/src/frontends/openfga/) and verify the result, instead of a schema-file argument',
+  )
+  .option(
+    '--from-spicedb <file>',
+    'translate a SpiceDB schema and verify the result, instead of a schema-file argument (not yet implemented)',
+  )
+  .option(
+    '--best-effort',
+    'only meaningful with --from-openfga/--from-spicedb: drop unsupported source constructs instead of failing, disclosing each drop',
+  )
   .option(
     '--bound <k>',
     "bound for the non-monotone fragment's bounded search (§7); ignored for the monotone fragment (default: 1 — see docs/DECISIONS.md D-118 for why)",
@@ -64,7 +79,17 @@ program
   .option('--json', 'machine-readable JSON output instead of the human-readable default')
   .exitOverride()
   .action(
-    async (schemaFile: string, options: { invariants: string; bound?: string; json?: boolean }) => {
+    async (
+      schemaFile: string | undefined,
+      options: {
+        invariants: string;
+        fromOpenfga?: string;
+        fromSpicedb?: string;
+        bestEffort?: boolean;
+        bound?: string;
+        json?: boolean;
+      },
+    ) => {
       let bound: number | undefined;
       if (options.bound !== undefined) {
         bound = Number(options.bound);
@@ -76,7 +101,10 @@ program
       }
 
       const { exitCode } = await runVerify({
-        schemaFile,
+        ...(schemaFile !== undefined ? { schemaFile } : {}),
+        ...(options.fromOpenfga !== undefined ? { fromOpenfga: options.fromOpenfga } : {}),
+        ...(options.fromSpicedb !== undefined ? { fromSpicedb: options.fromSpicedb } : {}),
+        ...(options.bestEffort !== undefined ? { bestEffort: options.bestEffort } : {}),
         invariantsFile: options.invariants,
         ...(bound !== undefined ? { bound } : {}),
         json: options.json ?? false,
