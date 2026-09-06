@@ -325,7 +325,17 @@ real, load-bearing practice here, not just a slogan.
 
 ## Proof machinery
 
-### Package the schema verifier separately
+### Package the schema verifier separately — partially built, `docs/DECISIONS.md` D-173
+
+**Status: partially built.** This section records the gap as it stood
+before D-173 closed the cheapest of the three pieces it named — see D-173
+for what actually shipped (`tools/schema-verifier/action.yml`, a reusable
+composite GitHub Action wrapping `verify-schema`, dogfooded in this repo's
+own `.github/workflows/schema-verifier.yml` via a local
+`uses: ./tools/schema-verifier` reference). The two genuinely harder
+pieces below — an OpenFGA-syntax front end and a from-scratch SpiceDB
+front end — remain unbuilt: "the real blocker is that other repos' models
+aren't in this project's DSL" is still exactly true.
 
 The third-party survey — 7 VIOLATED / 5 HOLDS, 0 UNKNOWN
 (`docs/FINDINGS.md:101`, current as of D-131's `notRelationEquals`
