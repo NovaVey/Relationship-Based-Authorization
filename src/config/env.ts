@@ -215,6 +215,35 @@ export const EnvSchema = z.object({
   LEOPARD_INDEX_REFRESH_INTERVAL_MS: optionalNumber(
     z.coerce.number().int().nonnegative().default(0),
   ),
+
+  // `GET /watch` (D-174) — a deliberately simple DB-polling loop, not
+  // Postgres LISTEN/NOTIFY (see that entry's own reasoning). Every field
+  // below is "a deliberately simple, round starting point, not derived
+  // from a load test," the same framing `LIST_OBJECTS_MAX_CANDIDATES`
+  // already uses for an identical kind of judgment call.
+  //
+  // How often each open /watch connection re-polls write_log once it has
+  // caught up to "now." Bounds push latency (an event lands up to this
+  // long after the write that produced it) against per-connection DB
+  // load; does not affect catch-up speed, which always drains as fast as
+  // WATCH_DEFAULT_BATCH_LIMIT-sized batches allow.
+  WATCH_POLL_INTERVAL_MS: optionalNumber(z.coerce.number().int().positive().default(250)),
+  // A global cap on how many /watch connections this process holds open at
+  // once, across every credential — the (N+1)th concurrent attempt gets a
+  // 503, not an unbounded queue of open connections/poll loops. Purely a
+  // per-process resource guard, not a per-credential fairness scheme.
+  WATCH_MAX_CONNECTIONS: optionalNumber(z.coerce.number().int().positive().default(100)),
+  // A `: heartbeat` SSE comment sent on this interval when a connection has
+  // had no real event to deliver — keeps a reverse proxy/load balancer's
+  // own idle-connection timeout from closing a genuinely-still-open watch.
+  WATCH_HEARTBEAT_INTERVAL_MS: optionalNumber(z.coerce.number().int().positive().default(15_000)),
+  // Backpressure cutoff: if a connection's own unflushed write buffer
+  // (Node's `res.writableLength`) ever exceeds this many bytes — a client
+  // that stopped reading, not one that merely lags briefly — the
+  // connection is closed rather than left to buffer without bound.
+  // Reconnecting with `since` set to the last delivered token replays
+  // anything missed, losslessly, from write_log itself; see D-174.
+  WATCH_MAX_BUFFERED_BYTES: optionalNumber(z.coerce.number().int().positive().default(1_000_000)),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

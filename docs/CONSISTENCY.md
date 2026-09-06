@@ -211,3 +211,15 @@ never by immediate invalidation, for exactly that class of write. A pinned
 (`atToken`) result is unaffected by any of this: it's valid for as long as
 it's cached, by construction — see `cache.ts`'s own top-of-file doc comment
 for the full argument.
+
+**A caller who needs to know exactly when a cross-process write actually
+landed no longer has to guess an interval and hope.** `GET /watch`
+(`docs/DECISIONS.md` D-174) streams `write_log` itself — the same
+monotonic token everything in this document reasons about — over
+Server-Sent Events, from any process, to any process. It doesn't change
+anything about the cache staleness gap just described (a caller who wants
+this cache to invalidate the instant a _different_ process writes still
+has no mechanism for that); what it does give a caller is a real,
+push-based alternative to polling on a guessed schedule at all — watch for
+the specific write you care about, then act, rather than picking a
+`CHECK_CACHE_TTL_MS` value and hoping it's short enough.

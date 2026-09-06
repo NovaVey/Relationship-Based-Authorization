@@ -70,6 +70,7 @@ const EXPECTED_ROUTES: ExpectedRoute[] = [
   { path: '/expand', method: 'post', gated: true, scopeChecked: true },
   { path: '/list-objects', method: 'post', gated: true, scopeChecked: true },
   { path: '/list-users', method: 'post', gated: true, scopeChecked: true },
+  { path: '/watch', method: 'get', gated: true, scopeChecked: true },
   { path: '/tuples', method: 'post', gated: true, scopeChecked: true },
   { path: '/tuples', method: 'delete', gated: true, scopeChecked: true },
   { path: '/tuples/batch', method: 'post', gated: true, scopeChecked: true },
@@ -252,7 +253,12 @@ describe('buildOpenApiDocument() vs. the live Fastify route table', () => {
    * someone genuinely adds on purpose in the future would still show up as
    * a real, uncaught mismatch below, exactly as it should.
    */
-  const IGNORED_LIVE_ROUTES = new Set(['HEAD /health', 'HEAD /openapi.json', 'HEAD /metrics']);
+  const IGNORED_LIVE_ROUTES = new Set([
+    'HEAD /health',
+    'HEAD /openapi.json',
+    'HEAD /metrics',
+    'HEAD /watch',
+  ]);
 
   function documentedRouteSet(): Set<string> {
     const doc = buildOpenApiDocument();

@@ -4,13 +4,14 @@
  * today: `POST /check`, `POST /check/batch`, `POST /expand`,
  * `POST /list-objects`, `POST /list-users`, `POST /tuples`,
  * `POST /tuples/batch`, `DELETE /tuples`, `POST /schema/compile`,
- * `POST /schema/publish`, `GET /health`, `GET /metrics`, and this module's
- * own consumer, `GET /openapi.json`. `POST /check/batch` was added to this
- * file after its own initial build — see `checkBatchOperation()`'s own doc
- * comment below for why it reuses `checkOperation()`'s schemas rather than
- * re-transcribing them, and this file's "disclosed, not automatic" note
- * above for why a human had to notice and add it by hand — `GET /metrics`
- * and `POST /tuples/batch` were each added the identical way, later still.
+ * `POST /schema/publish`, `GET /health`, `GET /metrics`, `GET /watch`, and
+ * this module's own consumer, `GET /openapi.json`. `POST /check/batch` was
+ * added to this file after its own initial build — see
+ * `checkBatchOperation()`'s own doc comment below for why it reuses
+ * `checkOperation()`'s schemas rather than re-transcribing them, and this
+ * file's "disclosed, not automatic" note above for why a human had to
+ * notice and add it by hand — `GET /metrics`, `POST /tuples/batch`, and
+ * `GET /watch` were each added the identical way, later still.
  *
  * **No new dependency.** No `zod-to-openapi`, no `@fastify/swagger`, no
  * schema-introspection of any kind — every JSON Schema object below was
@@ -100,7 +101,11 @@ export interface OpenApiResponseObject {
     // route in this document is JSON, so this second content-type variant
     // exists solely for that one route rather than being speculatively
     // built out further.
-    | { 'text/plain': { schema: { type: 'string' } } };
+    | { 'text/plain': { schema: { type: 'string' } } }
+    // `GET /watch`'s own Server-Sent-Events stream (D-174) — the third and,
+    // as of this document, final non-JSON variant; see that route's own
+    // `sseResponse()` builder below.
+    | { 'text/event-stream': { schema: { type: 'string' } } };
 }
 
 export interface OpenApiOperation {
@@ -113,6 +118,21 @@ export interface OpenApiOperation {
     required: true;
     content: { 'application/json': { schema: JsonSchema } };
   };
+  /**
+   * Query-string parameters — `GET /watch` (D-174) is the first, and so
+   * far only, route in this document with any; every other `GET` route
+   * (`/health`, `/openapi.json`, `/metrics`) takes none, and every route
+   * with structured input uses a JSON `requestBody` instead (see this
+   * file's own `checkOperation`, or `server.ts`'s own doc comment on why
+   * `check`/`expand` are `POST` despite being read-only).
+   */
+  parameters?: Array<{
+    name: string;
+    in: 'query';
+    required: boolean;
+    schema: JsonSchema;
+    description: string;
+  }>;
   responses: Record<string, OpenApiResponseObject>;
 }
 
@@ -305,6 +325,11 @@ function jsonResponse(description: string, schema: JsonSchema): OpenApiResponseO
 
 function textResponse(description: string): OpenApiResponseObject {
   return { description, content: { 'text/plain': { schema: { type: 'string' } } } };
+}
+
+/** `GET /watch`'s own Server-Sent-Events response (D-174) — see `watchOperation()` below. */
+function sseResponse(description: string): OpenApiResponseObject {
+  return { description, content: { 'text/event-stream': { schema: { type: 'string' } } } };
 }
 
 const errorResponseRef: JsonSchema = { $ref: '#/components/schemas/ApiError' };
@@ -947,6 +972,44 @@ function metricsOperation(): OpenApiOperation {
   };
 }
 
+function watchOperation(): OpenApiOperation {
+  return {
+    summary:
+      'Live Server-Sent-Events stream of every write_log row from ?since (or "now") forward (D-174).',
+    description:
+      "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). The one GET route among five otherwise-POST gated routes — see server.ts's own doc comment for why. namespace omitted requires an *unscoped* credential (like /metrics); namespace given is scope-checked exactly like /list-objects' objectNs. since omitted means \"future writes only, starting now,\" never an implicit replay from the beginning. Each event frame's id is an opaque encodeToken(token) — reconnect with ?since=<last id received>, or rely on a browser EventSource's own automatic Last-Event-ID resend, to replay anything missed losslessly from write_log itself. DB-polling internally (WATCH_POLL_INTERVAL_MS), not push-instant — see docs/DECISIONS.md D-174. A connection is closed (reconnect-safe) if the caller falls behind WATCH_MAX_BUFFERED_BYTES, or once this server already holds WATCH_MAX_CONNECTIONS such connections open. Rate limit: 200 requests/minute per client (gatedReadRateLimit) on the initial connection only — the limiter counts the CONNECT, not each pushed event.",
+    security: BEARER_SECURITY,
+    parameters: [
+      {
+        name: 'since',
+        in: 'query',
+        required: false,
+        schema: { type: 'string' },
+        description:
+          "An opaque, encoded consistency token (src/store/tokens.ts encodeToken/decodeToken) — the same string a write/delete response, or an earlier event frame's own id, already gave you. Omit to watch only future writes, starting now.",
+      },
+      {
+        name: 'namespace',
+        in: 'query',
+        required: false,
+        schema: identifierSchema,
+        description:
+          'Restrict the stream to one namespace (tuple.objectNs). Required for a namespace-scoped credential; optional (meaning "every namespace") for an unscoped one.',
+      },
+    ],
+    responses: {
+      '200': sseResponse(
+        'text/event-stream. First frame is always event: connected (confirms the effective starting token); every real frame after that is event: write or event: delete, id: <encodeToken(token)>, data: a JSON {token, tuple, writtenAt}. A : heartbeat comment line is sent on WATCH_HEARTBEAT_INTERVAL_MS whenever no real frame was due.',
+      ),
+      '400': RESPONSE_400,
+      '401': RESPONSE_401,
+      '403': RESPONSE_403,
+      '429': RESPONSE_429,
+      '503': RESPONSE_503,
+    },
+  };
+}
+
 function openApiDocumentOperation(): OpenApiOperation {
   return {
     summary: 'This OpenAPI 3.0.3 document, as JSON.',
@@ -1020,6 +1083,7 @@ export function buildOpenApiDocument(): OpenApiDocument {
       '/expand': { post: expandOperation() },
       '/list-objects': { post: listObjectsOperation() },
       '/list-users': { post: listUsersOperation() },
+      '/watch': { get: watchOperation() },
       '/tuples': { post: tupleWriteOperation(), delete: tupleDeleteOperation() },
       '/tuples/batch': { post: tupleBatchWriteOperation() },
       '/schema/compile': { post: schemaCompileOperation() },

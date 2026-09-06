@@ -72,7 +72,14 @@ extend the existing generators for its own two mechanisms (lines 26-45), so
 a wildcard-in-subtract case is genuinely new, not-yet-built work in the same
 spirit — a third mechanism, not a variant these properties already cover.
 
-### A Watch endpoint
+### A Watch endpoint — built, `docs/DECISIONS.md` D-174
+
+**Status: built and shipped.** This section records the gap as it stood
+before it was closed — see D-174 for what actually shipped
+(`GET /watch?since=<token>&namespace=<ns>`, a live SSE stream over
+`write_log`, DB-polling per connection rather than Postgres LISTEN/NOTIFY)
+and for why that choice also gets multi-replica fan-out for free, with no
+Redis and no cross-process signaling at all.
 
 Still a real, wide-open gap, and the foundation for it is unusually solid.
 `write_log` (`src/store/migrations/0001_relation_tuples_and_write_log.sql:45-57`)

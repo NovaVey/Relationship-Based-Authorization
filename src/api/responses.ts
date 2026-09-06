@@ -75,6 +75,7 @@ import type { ResolutionStep } from '../resolve/production/resolver.js';
 import type { ExpandNode } from '../audit/expand.js';
 import type { ListObjectsResult, ListUsersResult, SubjectRef } from '../audit/list.js';
 import type { WriteTupleResult, DeleteTupleResult } from '../store/tuples.js';
+import type { WatchEvent } from '../store/watch.js';
 import { encodeToken } from '../store/tokens.js';
 import type { SchemaCompileResult } from '../schema/dsl/errors.js';
 import type { CompiledSchema } from '../schema/dsl/types.js';
@@ -674,4 +675,57 @@ export function healthResponse(
       namespaces: { ok: true, namespaces: [...namespaceList.namespaces] },
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// `GET /watch` (D-174) wire framing.
+//
+// A deliberate exception to this file's own "every function returns
+// `{ status, body }`" pattern above: `/watch` is one long-lived HTTP
+// response streamed as repeated Server-Sent-Events frames, not a single
+// JSON body with one status code — there is no single `{status, body}` to
+// build. What stays true to this file's own job description regardless:
+// pure, DB-free, no `fastify`/`process.env` — `src/api/server.ts` still
+// owns the connection lifecycle (auth, the poll loop, backpressure,
+// disconnect handling), calling these functions only for the wire text of
+// each frame it decides to send.
+// ---------------------------------------------------------------------------
+
+/**
+ * One real event, as a complete SSE frame (`id`/`event`/`data`, blank-line
+ * terminated). `id` is `encodeToken(event.token)` — the same opaque,
+ * versioned token every other route in this API already hands out
+ * (`src/store/tokens.ts`), never the raw integer — so a browser's native
+ * `EventSource`, which auto-resends whatever `id:` it last saw as a
+ * `Last-Event-ID` request header on reconnect, round-trips a value this
+ * API can decode exactly like any other caller-supplied token, without
+ * `/watch`'s own route handler needing to invent a second reconnect
+ * protocol alongside the already-supported `?since=` query parameter.
+ * `event` is the tuple's own `operation` (`write` or `delete`) — lets a
+ * client attach a distinct `EventSource.addEventListener` per kind instead
+ * of branching on a `data` field.
+ */
+export function watchEventFrame(event: WatchEvent): string {
+  const data = JSON.stringify({
+    token: encodeToken(event.token),
+    tuple: event.tuple,
+    writtenAt: event.writtenAt.toISOString(),
+  });
+  return `id: ${encodeToken(event.token)}\nevent: ${event.operation}\ndata: ${data}\n\n`;
+}
+
+/**
+ * The one synthetic (non-`write_log`) frame `/watch` sends, exactly once,
+ * as the first frame on every connection — confirms the *effective*
+ * starting point a client is now watching from, which matters specifically
+ * when `?since=` was omitted and the server picked "now" on the caller's
+ * behalf (see `docs/DECISIONS.md` D-174 for why omitting `since` means
+ * "future writes only," never an implicit full replay). A client that
+ * already passed an explicit `?since=` still gets this frame, echoing the
+ * same value back, so there is exactly one code path for "what am I
+ * watching from" instead of two.
+ */
+export function watchConnectedFrame(sinceToken: number): string {
+  const data = JSON.stringify({ since: encodeToken(sinceToken) });
+  return `event: connected\ndata: ${data}\n\n`;
 }

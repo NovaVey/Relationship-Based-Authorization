@@ -795,20 +795,25 @@ reverse-lookup operations with no CLI command of their own:
 | `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version                                     |
 | `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                                                     |
 | `GET`    | `/metrics`        | `ADMIN_API_KEY` only, unscoped        | 200/min    | Prometheus text exposition — check counts, cache hit rate, Leopard-index hits, uncertain-check rate (D-169) |
+| `GET`    | `/watch`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min\*  | Live SSE stream of every tuple write/delete from `?since=<token>` (or "now") forward (D-174)                |
 
 `READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
-the four read/list routes above without also granting write access.
-`ADMIN_API_KEY` alone still authorizes every route, exactly as before that
-credential existed. A third, optional credential tier (D-152) mints real,
-DB-backed keys (`authz apikey create/revoke/list`) that can additionally be
-scoped to a fixed set of namespaces and/or given an expiry — every gated
-route above rejects an out-of-scope namespace with `403`, and neither
-static env-var key is affected: a deployment that never mints a DB-backed
-key keeps behaving exactly as it always has. Every rate/flood-guard budget
+the five read/list routes above (including `/watch`) without also granting
+write access. `ADMIN_API_KEY` alone still authorizes every route, exactly
+as before that credential existed. A third, optional credential tier
+(D-152) mints real, DB-backed keys (`authz apikey create/revoke/list`) that
+can additionally be scoped to a fixed set of namespaces and/or given an
+expiry — every gated route above rejects an out-of-scope namespace with
+`403` (`/watch` requires the namespace scope, since a scoped credential has
+no "every namespace" mode to fall back on — see D-174), and neither static
+env-var key is affected: a deployment that never mints a DB-backed key
+keeps behaving exactly as it always has. Every rate/flood-guard budget
 above can be backed by Redis instead of one process's own memory via the
 optional `REDIS_URL` (D-137) — unset by default, a single-instance
-deployment needs nothing new. See `src/api/server.ts`'s own doc comments
-for the exact route shapes.
+deployment needs nothing new. \* `/watch`'s own rate limit gates the
+initial connection only — once open, a stream's own pushed events are
+never individually rate-limited. See `src/api/server.ts`'s own doc
+comments for the exact route shapes.
 
 Static mockups of what a real UI over this would look like —
 Namespaces, Tuple browser, Check playground, Soundness runs, Expand
