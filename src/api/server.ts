@@ -58,6 +58,7 @@ import Fastify, {
 } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import type { Pool } from 'pg';
+import type { Redis } from 'ioredis';
 import { z } from 'zod';
 
 import { env } from '../config/env.js';
@@ -736,6 +737,25 @@ export interface BuildServerOptions {
    * allowlist, not this function's.
    */
   onRouteRegistered?: (route: { method: string; path: string }) => void;
+
+  /**
+   * Overrides the real, `env.REDIS_URL`-constructed `createRedisClient(...)`
+   * call below with an already-constructed `Redis`-shaped client — omitted
+   * (the default, `undefined`) preserves production behavior exactly:
+   * `serve.ts` never passes this, so a real `authz serve` still constructs
+   * its own client from `env.REDIS_URL` exactly as before, and a deployment
+   * that never sets `REDIS_URL` is completely unaffected either way. Exists
+   * purely so a test can hand this function a real `ioredis` client tuned
+   * for fast, deterministic failure (short `maxRetriesPerRequest`, a
+   * disabled `retryStrategy`, pointed at a genuinely unreachable address) —
+   * `createRedisClient` itself sets neither, matching real production's own
+   * "keep retrying, this is meant to survive a transient blip" intent,
+   * which would make a fault-injection test slow and nondeterministic
+   * rather than fast and repeatable. Mirrors this interface's own
+   * `authFloodStateMaxEntries`/`logger` overrides — a test-only escape
+   * hatch, never a second production code path.
+   */
+  redisClient?: Redis;
 }
 
 /**
@@ -846,11 +866,32 @@ export async function buildServer(
   // reasoning). `env.REDIS_URL` unset (the default) means `redisClient` is
   // `undefined` here and every rate/flood mechanism below keeps its exact
   // pre-existing in-process behavior — nothing else in this function
-  // changes shape depending on which branch this took.
-  const redisClient = env.REDIS_URL ? createRedisClient(env.REDIS_URL, app.log) : undefined;
+  // changes shape depending on which branch this took. `options.redisClient`
+  // (test-only, see its own doc comment) takes precedence over constructing
+  // one from `env.REDIS_URL` — `serve.ts` never sets it, so this is a no-op
+  // for every real deployment.
+  const redisClient =
+    options.redisClient ?? (env.REDIS_URL ? createRedisClient(env.REDIS_URL, app.log) : undefined);
   if (redisClient) {
     app.addHook('onClose', async () => {
-      await redisClient.quit();
+      // A graceful `QUIT` still needs a live connection to send it over —
+      // if Redis was already unreachable (the exact scenario this file's
+      // own fault-injection tests construct), `quit()` itself rejects the
+      // same way any other command would, and an uncaught rejection here
+      // would crash Fastify's own shutdown sequence (`onClose` hooks run
+      // through `avvio`'s own boot-closing queue, which does not tolerate
+      // one throwing). `disconnect()` — a synchronous, always-safe teardown
+      // that never talks to the server at all — is the correct fallback:
+      // there is nothing left to gracefully hang up on.
+      try {
+        await redisClient.quit();
+      } catch (err) {
+        app.log.error(
+          { err },
+          'Redis client quit() failed during shutdown (already unreachable) — disconnecting instead',
+        );
+        redisClient.disconnect();
+      }
     });
   }
 
@@ -887,6 +928,38 @@ export async function buildServer(
       // corrected to match what actually happened.
       const resp = invalidRequestError(error.message);
       void reply.code(error.statusCode).send(resp.body);
+      return;
+    }
+    // `@fastify/rate-limit`'s own bundled Redis store (`redis: redisClient`
+    // above) throws the raw, unmodified rejection from its own internal
+    // `EVAL`-backed command straight out of the `onRequest`/`preHandler`
+    // hook it registers — confirmed live: for a genuine connection failure,
+    // `ioredis` throws a plain `Error` (e.g. `"Connection is closed."`),
+    // with no distinguishing subclass, `.code`, or marker of any kind, so
+    // there is no reliable, structural way to recognize this specific
+    // failure the way the two branches above recognize theirs. Unlike
+    // `authFloodGuard` above, this file owns no call site to wrap directly
+    // — the plugin's own `errorResponseBuilder` hook is never invoked for a
+    // store-connectivity failure at all (only for a genuine "limit
+    // exceeded" case), and it exposes no other extension point for this.
+    //
+    // The disclosed, narrow heuristic this uses instead: an error reaching
+    // this exact point, past both recognized branches above, while
+    // `redisClient` is configured for this deployment. Every OTHER expected
+    // failure in this file already produces a `retryAfterSeconds` marker, a
+    // real `statusCode`, or calls `sendApiError` directly inside its own
+    // route handler well before ever reaching this generic fallback — this
+    // is, by this function's own top-of-file framing, "the one place
+    // `internalError` is actually used, exactly the role its own doc
+    // comment reserves for it." So the one thing that can *also* land here
+    // in Redis mode, unrecognized, really is this store failure — and a
+    // genuinely unanticipated bug doing so instead is a real but narrow,
+    // disclosed misclassification (reported 503 instead of 500), not
+    // actively wrong guidance even then: 503's own "retry later" framing
+    // still fits an unexpected failure reasonably well.
+    if (redisClient !== undefined) {
+      const resp = infrastructureUnavailableError(error.message, 'Redis');
+      void reply.code(resp.status).send(resp.body);
       return;
     }
     request.log.error(error);
@@ -1178,8 +1251,36 @@ export async function buildServer(
     ? new RedisFloodStore(redisClient)
     : new InMemoryFloodStore(options.authFloodStateMaxEntries ?? AUTH_FLOOD_STATE_MAX_ENTRIES);
 
+  /**
+   * `floodStore.increment` was, until this fix, awaited with no `try`/
+   * `catch` at all — a real gap `docs/CAPABILITY-GAPS.md` names directly:
+   * when `RedisFloodStore` is in play (`env.REDIS_URL` set) and Redis is
+   * genuinely unreachable, `this.redis.eval(...)` rejects, propagates
+   * straight through this function uncaught, and lands on `setErrorHandler`
+   * below with no `statusCode` and no `retryAfterSeconds` marker — the
+   * generic `internalError()` (bare 500) branch, the same code a genuine
+   * unanticipated bug in this codebase's own logic would produce. A caller
+   * (and any uptime/load-balancer tooling watching status codes) had no way
+   * to tell "Redis is down, retry later" apart from "this service is
+   * broken." Caught here, precisely, at the one call site that can
+   * actually produce this failure — `infrastructureUnavailableError`'s own
+   * 503 `infrastructure_unavailable`, `service: 'Redis'` so the message
+   * never falsely claims Postgres was the thing that failed. Deliberately
+   * still fails CLOSED, not open: this request is rejected, never silently
+   * admitted past the flood guard just because its own counter couldn't be
+   * incremented — see `createRedisClient`'s own doc comment (`src/api/
+   * redis-store.ts`) for why a silent fail-open here would be a real,
+   * disclosed policy change this fix deliberately does not make.
+   */
   async function authFloodGuard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const { count, msUntilReset } = await floodStore.increment(request.ip, AUTH_FLOOD_WINDOW_MS);
+    let result: { count: number; msUntilReset: number };
+    try {
+      result = await floodStore.increment(request.ip, AUTH_FLOOD_WINDOW_MS);
+    } catch (err) {
+      await sendApiError(reply, infrastructureUnavailableError((err as Error).message, 'Redis'));
+      return;
+    }
+    const { count, msUntilReset } = result;
     if (count > AUTH_FLOOD_MAX) {
       const retryAfterSeconds = Math.max(1, Math.ceil(msUntilReset / 1000));
       await sendApiError(reply, rateLimitedError(retryAfterSeconds));

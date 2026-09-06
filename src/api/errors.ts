@@ -351,9 +351,21 @@ export function rateLimitedError(retryAfterSeconds: number): ApiErrorResponse {
  * `"Postgres: <detail>"` phrasing (see every `src/cli/commands/*.ts` file's
  * identical `catch` block) so the same underlying failure reads identically
  * whether a human hit it through `authz check` or through this API.
+ *
+ * `service` defaults to `'Postgres'` so every existing call site (all of
+ * them genuinely Postgres-shaped failures) stays byte-for-byte unchanged —
+ * added only so a genuinely different dependency (Redis, opt-in via
+ * `env.REDIS_URL`, `src/api/redis-store.ts`) can report itself accurately
+ * instead of silently reusing a message that would falsely claim Postgres
+ * was the thing that failed (the rate-limiter/flood-guard fault-injection
+ * gap `docs/CAPABILITY-GAPS.md` names — see `server.ts`'s own
+ * `authFloodGuard` and `setErrorHandler`).
  */
-export function infrastructureUnavailableError(detail: string): ApiErrorResponse {
-  return apiError('infrastructure_unavailable', `Postgres: ${detail}`);
+export function infrastructureUnavailableError(
+  detail: string,
+  service = 'Postgres',
+): ApiErrorResponse {
+  return apiError('infrastructure_unavailable', `${service}: ${detail}`);
 }
 
 /**

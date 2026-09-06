@@ -173,6 +173,23 @@ describe('RedisFloodStore: parses the [count, ttl] shape eval resolves with into
   });
 });
 
+describe('RedisFloodStore: a rejected eval() propagates unmodified — this class never catches its own I/O failure', () => {
+  it('a-rejected-eval-rejects-increment-with-the-exact-same-error-never-swallowed-or-wrapped', async () => {
+    const boom = new Error('Connection is closed.');
+    const redis = { eval: () => Promise.reject(boom) } as unknown as Redis;
+    const store = new RedisFloodStore(redis);
+
+    // Deliberately not caught here — this class's own contract (see its own
+    // doc comment) is a thin, faithful wrapper around one `eval()` call, not
+    // a fault-tolerance layer. Catching a Redis failure and deciding what
+    // to do about it (fail closed, 503) is `authFloodGuard`'s own job
+    // (`src/api/server.ts`), the one call site that actually knows this is
+    // a request it must reject — this test pins that division of
+    // responsibility.
+    await expect(store.increment('k', 5_000)).rejects.toThrow(boom);
+  });
+});
+
 describe("RedisFloodStore: the disclosed PTTL-fallback behavior for a negative TTL (the script's own comment: 'should never actually happen', but defended anyway)", () => {
   it('a-pttl-of-minus-1-key-exists-with-no-expiry-falls-back-to-the-full-windowms-rather-than-a-negative-msuntilreset', async () => {
     const { redis } = fakeRedisClient([1, -1]);
@@ -253,5 +270,14 @@ describe('createRedisClient', () => {
     expect(meta).toHaveProperty('err');
     expect(typeof message).toBe('string');
     expect(message.length).toBeGreaterThan(0);
+    // The message must describe what actually happens (fail closed, 503),
+    // never the earlier, aspirational literal claim docs/CAPABILITY-GAPS.md's
+    // own fault-injection finding named as describing a behavior nothing in
+    // this codebase implements — checked against that exact old phrase
+    // verbatim (a fuzzy "no mention of degrade" check would also flag the
+    // new message's own "never silently degrading" clause, which correctly
+    // negates the old claim rather than repeating it).
+    expect(message).toMatch(/fail closed/i);
+    expect(message).not.toContain('budgets degrade to per-process only while this persists');
   }, 5_000);
 });

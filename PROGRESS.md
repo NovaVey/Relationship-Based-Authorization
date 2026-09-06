@@ -2888,3 +2888,19 @@ Re-confirmed live before touching any docs: ran the real CLI against every fixtu
 The bigger piece bundled in the same original gap — a new schema-level primitive needed to close two more of the remaining violations — was explicitly scoped out of this pass (checked with the user first): comparable in size to an earlier invariant-primitive feature, it gets its own design pass later rather than being folded into what was otherwise a same-day fix.
 
 Full account: `docs/DECISIONS.md` D-176.
+
+## Fault injection above the storage seam: both Redis-backed mechanisms now report 503, a real client-disconnect test, and a related shutdown bug caught along the way
+
+**Owner:** main agent.
+
+Another item from the same broader gap analysis: the rate limiter's behavior on a Redis outage was never actually in doubt — both `@fastify/rate-limit`'s own bundled store and this project's own hand-rolled flood guard already failed closed, not open, contrary to the original brainstorm's fear — but neither path had any test coverage, both produced a bare 500 instead of this codebase's own established 503 convention for an unreachable dependency, and a log line claimed a graceful degrade to per-process limiting that no code actually implemented. Separately, nothing tested what happens if a real client disconnects mid-check.
+
+Checked first whether to build an actual graceful degrade instead of just fixing the reporting — a real availability/abuse policy trade-off, not a same-day call. Kept fail-closed exactly as it already was, and fixed the surrounding code and tests around that choice instead.
+
+One of the two Redis-backed mechanisms could be caught precisely at its own call site; the other — a third-party plugin's own bundled Redis store — turned out to expose no hook this codebase could wrap directly, confirmed by reading its source rather than assumed. Its own thrown error, confirmed live, is a plain, unmarked `Error` indistinguishable from any other unanticipated bug, so the fix there is a disclosed, narrowly-scoped heuristic rather than a precise catch — a real, acknowledged trade-off, not hidden.
+
+Writing the new fault-injection tests caught a genuinely separate, real bug before it shipped: the server's own shutdown hook crashed if it tried to gracefully quit an already-broken Redis connection — every new test failed at teardown, not at the assertion, until that was fixed too.
+
+The client-disconnect question got a real answer, not an assumption: firing many concurrent real HTTP requests against a real listening server and aborting each one immediately, genuinely racing the abort against the server's own in-flight handling, confirms nothing crashes and the same server keeps serving ordinary requests correctly afterward.
+
+Full account: `docs/DECISIONS.md` D-177.
