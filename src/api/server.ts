@@ -72,6 +72,7 @@ import { publishSchema, listLatestNamespaceVersions } from '../schema/publish.js
 import { createCheckCache, type CheckCache } from '../resolve/production/cache.js';
 import { checkAdminAuthDb, checkReadAuthDb } from './auth.js';
 import { buildOpenApiDocument } from './openapi-document.js';
+import { renderPrometheusText } from '../metrics/registry.js';
 import {
   createRedisClient,
   InMemoryFloodStore,
@@ -1649,6 +1650,42 @@ export async function buildServer(
   app.get('/openapi.json', async (_request, reply) => {
     await reply.code(200).send(buildOpenApiDocument());
   });
+
+  /**
+   * `GET /metrics` (new feature, closes `docs/CAPABILITY-GAPS.md`'s
+   * "Metrics" gap) — Prometheus text exposition of the counters
+   * `src/metrics/registry.ts` accumulates from every real check
+   * (`performCheck`). `gatedPreHandlers()` (the `ADMIN_API_KEY`/DB-backed-
+   * admin-key tier), not `gatedReadPreHandlers()` — deliberately: unlike
+   * every other gated route, this one exposes a single, **global**
+   * aggregate across every namespace, with no per-request namespace to
+   * scope-check against (`findOutOfScopeNamespace` needs a real namespace
+   * list, and there isn't one here). A namespace-scoped credential
+   * (`request.authScopes` non-null — D-152's DB-backed scoped API keys)
+   * is therefore rejected outright below, not silently granted access to
+   * counters that could reveal another tenant's own check volume — the
+   * same "never let a scoped credential see past its own scope" principle
+   * D-064 already established for every other route, applied here to data
+   * that has no scope of its own to check against instead of one this
+   * route forgot to check.
+   */
+  app.get(
+    '/metrics',
+    { preHandler: gatedPreHandlers(), ...gatedReadRateLimit },
+    async (request, reply) => {
+      if (request.authScopes !== null && request.authScopes !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            'this credential is scoped to a specific set of namespaces — /metrics is a global, cross-namespace endpoint and requires an unscoped credential',
+          ),
+        );
+        return;
+      }
+      reply.header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+      await reply.code(200).send(renderPrometheusText());
+    },
+  );
 
   return app;
 }

@@ -92,7 +92,13 @@ export interface OpenApiSecurityScheme {
 
 export interface OpenApiResponseObject {
   description: string;
-  content?: { 'application/json': { schema: JsonSchema } };
+  content?:
+    | { 'application/json': { schema: JsonSchema } }
+    // `/metrics`'s own Prometheus text-exposition response — every other
+    // route in this document is JSON, so this second content-type variant
+    // exists solely for that one route rather than being speculatively
+    // built out further.
+    | { 'text/plain': { schema: { type: 'string' } } };
 }
 
 export interface OpenApiOperation {
@@ -293,6 +299,10 @@ const apiErrorSchema: JsonSchema = {
 
 function jsonResponse(description: string, schema: JsonSchema): OpenApiResponseObject {
   return { description, content: { 'application/json': { schema } } };
+}
+
+function textResponse(description: string): OpenApiResponseObject {
+  return { description, content: { 'text/plain': { schema: { type: 'string' } } } };
 }
 
 const errorResponseRef: JsonSchema = { $ref: '#/components/schemas/ApiError' };
@@ -803,6 +813,23 @@ function healthOperation(): OpenApiOperation {
   };
 }
 
+function metricsOperation(): OpenApiOperation {
+  return {
+    summary: 'Prometheus text-exposition metrics (src/metrics/registry.ts).',
+    description:
+      "Gated by requireAdminAuth (ADMIN_API_KEY only), and — unlike every other gated route — additionally rejects a namespace-scoped DB-backed API key outright: this route's own counters are a single global aggregate with no per-request namespace to scope-check against, so a scoped credential gets 403 rather than silently seeing cross-tenant data. Rate limit: 200 requests/minute per client (gatedReadRateLimit), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked.",
+    security: BEARER_SECURITY,
+    responses: {
+      '200': textResponse(
+        'Prometheus text-exposition format (version 0.0.4) — see src/metrics/registry.ts for exactly which counters and their disclosed scope limits.',
+      ),
+      '401': RESPONSE_401,
+      '403': RESPONSE_403,
+      '429': RESPONSE_429,
+    },
+  };
+}
+
 function openApiDocumentOperation(): OpenApiOperation {
   return {
     summary: 'This OpenAPI 3.0.3 document, as JSON.',
@@ -881,6 +908,7 @@ export function buildOpenApiDocument(): OpenApiDocument {
       '/schema/publish': { post: schemaPublishOperation() },
       '/health': { get: healthOperation() },
       '/openapi.json': { get: openApiDocumentOperation() },
+      '/metrics': { get: metricsOperation() },
     },
   };
 }

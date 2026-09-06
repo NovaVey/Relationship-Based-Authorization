@@ -42,6 +42,7 @@ import { performCheck } from '../../../src/audit/checks.js';
 import { CheckCache, buildCacheKey } from '../../../src/resolve/production/cache.js';
 import * as productionModule from '../../../src/resolve/production/resolver.js';
 import type { EntityRef, ProductionCheckResult } from '../../../src/resolve/production/resolver.js';
+import { renderPrometheusText, resetMetricsForTest } from '../../../src/metrics/registry.js';
 
 const ALICE: EntityRef = { ns: 'user', id: 'alice' };
 const README: EntityRef = { ns: 'document', id: 'readme' };
@@ -79,6 +80,7 @@ const DENIED_TOUCHED_EXPIRING: ProductionCheckResult = {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  resetMetricsForTest();
 });
 
 /**
@@ -343,5 +345,48 @@ describe('performCheck with a cache: D-144 cache-safety fix — an allowed resul
     // The second call is a genuine cache hit — productionCheck runs only once.
     expect(productionCheckSpy).toHaveBeenCalledTimes(1);
     expect(insertCalls).toHaveLength(2);
+  });
+});
+
+describe('performCheck: wired into src/metrics/registry.ts (new feature)', () => {
+  it('with no cache at all, records the check but touches neither cache counter', async () => {
+    vi.spyOn(productionModule, 'productionCheck').mockResolvedValue(ALLOWED);
+    const { pool } = fakePool();
+
+    await performCheck(pool, ALICE, README, RELATION);
+
+    const text = renderPrometheusText();
+    expect(text).toContain('authz_checks_total{allowed="true"} 1');
+    expect(text).toContain('authz_check_cache_hits_total 0');
+    expect(text).toContain('authz_check_cache_misses_total 0');
+  });
+
+  it('a cache miss records both the miss and the check, exactly once each', async () => {
+    vi.spyOn(productionModule, 'productionCheck').mockResolvedValue(ALLOWED);
+    const { pool } = fakePool();
+    const cache = new CheckCache(100, 60_000);
+
+    await performCheck(pool, ALICE, README, RELATION, {}, cache);
+
+    const text = renderPrometheusText();
+    expect(text).toContain('authz_check_cache_misses_total 1');
+    expect(text).toContain('authz_check_cache_hits_total 0');
+    expect(text).toContain('authz_checks_total{allowed="true"} 1');
+  });
+
+  it('a cache hit records the hit and the check, and never a second miss', async () => {
+    vi.spyOn(productionModule, 'productionCheck').mockResolvedValue(ALLOWED);
+    const { pool } = fakePool();
+    const cache = new CheckCache(100, 60_000);
+
+    await performCheck(pool, ALICE, README, RELATION, {}, cache); // populates the cache — one miss, one check
+    resetMetricsForTest(); // isolate what the hit alone records below
+
+    await performCheck(pool, ALICE, README, RELATION, {}, cache); // the real hit under test
+
+    const text = renderPrometheusText();
+    expect(text).toContain('authz_check_cache_hits_total 1');
+    expect(text).toContain('authz_check_cache_misses_total 0');
+    expect(text).toContain('authz_checks_total{allowed="true"} 1');
   });
 });

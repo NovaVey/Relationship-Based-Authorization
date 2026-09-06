@@ -2782,3 +2782,13 @@ Started building the backlog, first item: a `Dockerfile` plus a `docker-compose.
 Fixed by moving `fast-check` to `dependencies`. Re-verified the full chain clean afterward: migrations applied, server serving, `/health` reachable, the demo graph seeded, and two real `/check` calls against the running production-only server returning the exact correct verdicts (the two-level nested-group grant, the `banned` exclusion denial). Closed the structural gap, not just this instance: `ci.yml`'s `build` job gained a step that does a genuine production-only install and runs `authz --help` — confirmed live that it reproduces the original crash against the pre-fix `package.json` and passes clean against the fix.
 
 Full account: `docs/DECISIONS.md` D-168.
+
+## Second capability-gap item: `GET /metrics` — and a real counting bug live verification caught before it shipped
+
+**Owner:** main agent.
+
+`src/metrics/registry.ts` (a small, dependency-free Prometheus registry) plus `performCheck`'s own two call sites wire four counters — `authz_checks_total{allowed}`, cache hit/miss, Leopard-index hits, and an `authz_uncertain_checks_total` combining depth-ceiling and cycle-guard hits (the security signal D-158/D-159 made real: this fails closed, so a spike means real users silently losing access). `GET /metrics` is gated like a write route, plus a new-to-this-codebase check: a namespace-scoped DB-backed key gets 403 outright, since the route's counters are a global aggregate with no per-request namespace to scope against. Two things the original ask wanted don't ship, disclosed rather than narrowed silently: a separate Leopard-index fallback counter and a depth-vs-cycle split, both blocked by the same fact once checked directly against the real types — `ProductionCheckResult` doesn't carry the detail either would need, and widening that soundness-critical contract for an observability nice-to-have was ruled out.
+
+Live end-to-end verification (real Postgres, the real built server, exactly D-168's own host-level recipe) caught a real bug before it shipped: after an allowed check, `authz_uncertain_checks_total` read 1 — impossible, since an allowed result is never uncertain. Root cause: `certain` is present if and only if `allowed` is false, so it's always `undefined` on an allowed result, and the first draft's `certain !== true` check counted that `undefined` as uncertain too — which would have made the metric read as "almost everything is uncertain" against real traffic. Fixed by gating on `!result.allowed` first, and rewrote the unit test that had encoded the wrong behavior as correct, not just the implementation.
+
+Full account: `docs/DECISIONS.md` D-169.
