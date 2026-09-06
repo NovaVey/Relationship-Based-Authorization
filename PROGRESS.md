@@ -2876,3 +2876,15 @@ Implementation surfaced two real corrections to the design's own stated test pla
 Verified live end-to-end against real Postgres: nested-group and direct zero-hop grants found in one call, the lowest-sorting-slice truncation guarantee, a real grant written after the rebuild correctly refused acceleration rather than silently omitted, and — the core soundness proof — a genuinely stale accelerated candidate, manufactured directly since the ordinary write/rebuild API makes one structurally unreachable, still correctly excluded by the real per-candidate re-check (fail-checked: disabling that re-check turned this exact test red). A 15-random-seed metamorphic sweep found zero disagreements between accelerated and unaccelerated results across 123 real (subject, relation, namespace) triples, with 28 genuine accelerant engagements confirming the sweep wasn't vacuous. Every gate fail-checked individually (inverted freshness comparison, removed empty-result rule, removed error catch, inverted wildcard check) before being trusted green.
 
 Full account: `docs/DECISIONS.md` D-175.
+
+## A stale published survey number, found and fixed, with a permanent regression guard added
+
+**Owner:** main agent.
+
+Continuing past the capability-gaps backlog into the remaining disclosed gaps that same analysis named but left open. This one turned out to be a real, live-confirmed correction, not just a doc tidy-up: `docs/FINDINGS.md`'s third-party schema survey still published "7 VIOLATED, 5 HOLDS," but running the real verifier against all twelve fixtures today returns 8 VIOLATED, 4 HOLDS — `spicedb-userdefined-roles` had silently flipped from "HOLDS up to k = 1" (an earlier bounded search's own disclosed, limited candidate budget, never a proof) to a confirmed, exact VIOLATED once a later z3-backed exact tier started deciding this particular goal. Nothing had re-run the survey against that tier since it shipped, and no test anywhere pinned any of the twelve verdicts, so nothing would have caught the drift either way.
+
+Re-confirmed live before touching any docs: ran the real CLI against every fixture, matched the flipped entry's exact witness against what the gap analysis had already predicted, and confirmed the other eleven verdicts hadn't moved. Corrected the published table and tally in `docs/FINDINGS.md`, with a full account of why the flip happened and why it isn't a bug in either tier. Added a new permanent regression test covering all twelve published verdicts against the real, committed third-party fixture files — not just the one that moved — so a future change to either tier can't silently drift the published survey again without a test noticing.
+
+The bigger piece bundled in the same original gap — a new schema-level primitive needed to close two more of the remaining violations — was explicitly scoped out of this pass (checked with the user first): comparable in size to an earlier invariant-primitive feature, it gets its own design pass later rather than being folded into what was otherwise a same-day fix.
+
+Full account: `docs/DECISIONS.md` D-176.

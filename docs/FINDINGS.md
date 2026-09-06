@@ -70,16 +70,46 @@ self-referential `manager` loop, which is itself worth a schema's own
 consideration, not just a language limitation. It is not one of the two
 closed by D-131.
 
-The five `HOLDS` entries below are exactly the cases where the "no
+The four `HOLDS` entries below are exactly the cases where the "no
 negative constraints" limitation doesn't apply, or has since been closed
 for it: either the goal permission has **no** direct grant term of the
-tested type anywhere in its closure (`spicedb-ai-agents`, the
-`built_in_role` half of `spicedb-userdefined-roles`), the unreachability
-is a structural type mismatch that no amount of extra tuples can bridge
-(`spicedb-googledocs-typecheck-bug`, now an exact proof rather than a
-bounded check — see that row's own note), or the one escape witness the
-survey recorded has since been explicitly excluded via D-131's new
-primitive (`spicedb-entitlements`, `openfga-entitlements`).
+tested type anywhere in its closure (`spicedb-ai-agents`), the
+unreachability is a structural type mismatch that no amount of extra
+tuples can bridge (`spicedb-googledocs-typecheck-bug`, an exact proof
+rather than a bounded check — see that row's own note), or the one escape
+witness the survey recorded has since been explicitly excluded via D-131's
+new primitive (`spicedb-entitlements`, `openfga-entitlements`).
+
+**Correction (2026-09-06): `spicedb-userdefined-roles` has flipped from
+`HOLDS up to k = 1` to a confirmed, exact `VIOLATED`, moving the published
+tally from 7 VIOLATED/5 HOLDS to 8 VIOLATED/4 HOLDS.** The row below used
+to report only what `boundedSearch` (D-118) could establish within its own
+small candidate budget — "no counterexample found up to k = 1 or k = 2,"
+never a proof of unreachability. D-151 (`docs/DECISIONS.md`) later added a
+z3-backed exact tier ahead of bounded search for the non-recursive
+fragment, but nothing re-ran this survey against it until now — the
+tallies published here had simply gone stale, not been re-verified after
+that tier shipped. Re-run directly against the current `verify-schema` CLI
+(`npx tsx tools/schema-verifier/src/cli/index.ts tools/schema-verifier/thirdparty/spicedb-userdefined-roles.authz
+--invariants tools/schema-verifier/thirdparty/spicedb-userdefined-roles.invariant`):
+the SMT tier now decides this goal exactly and finds a real, self-validated
+counterexample bounded search's own limited candidate budget never
+happened to construct — see the corrected row below for the witness. This
+is a genuinely different escape shape from the eight "directly-grantable
+relation" entries above, and from `openfga-expenses`'s self-referential
+loop: an unconstrained SECOND tuple (`project:obj1#role_manager@role:obj2#member`)
+slipping past the already-pinned `role:r#project@project:p` relation the
+invariant meant to hold fixed, letting the goal reach a _different_ role
+manager's own delegated membership than the one the invariant pinned.
+Closing it would need a schema-level primitive stating "this relation can
+never be satisfied via any object, anywhere" — a materially bigger lift
+than D-131's own narrow, one-hop, already-declared-variable primitive, and
+not attempted here; tracked as its own still-open follow-up in
+`docs/CAPABILITY-GAPS.md`.
+`test/thirdparty-survey.test.ts` (`tools/schema-verifier/test/`, new) now
+pins this exact verdict — and every other entry in this table — as a
+permanent regression guard, so a future change to either tier can't
+silently flip one back without a test noticing.
 
 ## Results
 
@@ -94,14 +124,17 @@ primitive (`spicedb-entitlements`, `openfga-entitlements`).
 | `openfga-gdrive`                   | [openfga/sample-stores: gdrive](https://github.com/openfga/sample-stores/blob/main/stores/gdrive/model.fga)                            | `sibling_folder_viewer_cannot_read_document` — folder-level access to a sibling folder doesn't grant read on a document filed elsewhere                                | **VIOLATED** (monotone, self-validated)                                                                                                                                                                                                                                                                                                                                                                                                                                   | `doc:d#viewer@user:u` — direct viewer grant                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `openfga-slack`                    | [openfga/sample-stores: slack](https://github.com/openfga/sample-stores/blob/main/stores/slack/model.fga)                              | `workspace_guest_never_becomes_channel_writer` — a workspace guest never becomes a channel writer                                                                      | **VIOLATED** (monotone, self-validated)                                                                                                                                                                                                                                                                                                                                                                                                                                   | `channel:c#writer@user:u` — direct writer grant, unrelated to the `guest` relation (which has no rewrite path into `writer`/`commenter` at all)                                                                                                                                                                                                                                                                                                     |
 | `spicedb-github`                   | [authzed/examples: github](https://github.com/authzed/examples/blob/main/schemas/github/schema-and-data.yaml)                          | `org_member_never_gets_repo_admin_without_role` — same question as `openfga-github`, checked against SpiceDB's own independently-authored model of the same domain     | **VIOLATED** (monotone, self-validated)                                                                                                                                                                                                                                                                                                                                                                                                                                   | `repository:r#admin@user:u` — direct admin grant, same shape as the OpenFGA entry above despite a structurally different schema                                                                                                                                                                                                                                                                                                                     |
-| `spicedb-userdefined-roles`        | [authzed/examples: user-defined-roles](https://github.com/authzed/examples/blob/main/schemas/user-defined-roles/schema-and-data.yaml)  | `built_in_role_never_deletable` — a project's built-in role can never be deleted, even by that project's own role manager                                              | **HOLDS up to k = 1** (non-monotone, confirmed again at `--bound 2`)                                                                                                                                                                                                                                                                                                                                                                                                      | —                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `spicedb-userdefined-roles`        | [authzed/examples: user-defined-roles](https://github.com/authzed/examples/blob/main/schemas/user-defined-roles/schema-and-data.yaml)  | `built_in_role_never_deletable` — a project's built-in role can never be deleted, even by that project's own role manager                                              | **VIOLATED** (non-monotone, self-validated — corrected from the earlier, superseded `HOLDS up to k = 1`; see "The recurring finding" section's own correction note above)                                                                                                                                                                                                                                                                                                 | `role:r#project@project:p`, `role:r#built_in_role@project:p`, `role:r#project@project:obj1`, `project:obj1#role_manager@role:obj2#member`, `role:obj2#member@user:m` — an unconstrained second tuple reaching a _different_ role manager's own delegated membership than the one the invariant pinned                                                                                                                                               |
 | `spicedb-ai-agents`                | [authzed/examples: ai-agents](https://github.com/authzed/examples/blob/main/schemas/ai-agents/schema-and-data.yaml)                    | `ai_agent_never_edits_document` — an AI agent (a distinct subject type from `user`) can never edit a document                                                          | **HOLDS** (exact, monotone; empirically confirmed clean across 25 sampled tuple sets)                                                                                                                                                                                                                                                                                                                                                                                     | —                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `spicedb-googledocs-typecheck-bug` | [SpiceDB schema language docs, "typechecking" example](https://github.com/authzed/docs/blob/main/app/spicedb/concepts/schema/page.mdx) | `edit_always_unreachable_for_any_user` — `document#edit = viewer & admin` is unreachable because `viewer: user` and `admin: serviceaccount` are disjoint subject types | **HOLDS** (`fragment: non-monotone`, `proof: exact` — `checkInvariant`'s AND-infeasibility short-circuit proves `viewer & admin` unreachable directly from the disjoint subject types, closing the gap previously disclosed here: this used to route through §7's bounded search and report only `HOLDS up to k = 1`, `proof: bounded`, even though the unreachability is provable by hand via type-disjointness alone; see `docs/DECISIONS.md` for the entry closing it) | —                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
-**7 VIOLATED, 5 HOLDS, 0 UNKNOWN, 0 tool errors.** (Originally 9 VIOLATED,
+**8 VIOLATED, 4 HOLDS, 0 UNKNOWN, 0 tool errors.** (Originally 9 VIOLATED,
 3 HOLDS at first publication — `spicedb-entitlements` and
-`openfga-entitlements` moved to `HOLDS` per `docs/DECISIONS.md` D-131, see
-"The recurring finding" above.) Every `VIOLATED` entry is self-validated
+`openfga-entitlements` moved to `HOLDS` per `docs/DECISIONS.md` D-131,
+bringing it to 7 VIOLATED/5 HOLDS; `spicedb-userdefined-roles` then moved
+back from `HOLDS` to `VIOLATED` once re-checked against D-151's SMT tier,
+bringing it to the current 8 VIOLATED/4 HOLDS — see "The recurring
+finding" above for both corrections.) Every `VIOLATED` entry is self-validated
 per rule 2 above.
 
 ## Not analyzed
