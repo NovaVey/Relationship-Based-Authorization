@@ -644,7 +644,7 @@ describe('with the correct admin key, each gated route calls its domain function
       kind: 'relation',
       object: { ns: 'document', id: 'readme' },
       relation: 'viewer',
-      directSubjects: [{ ns: 'user', id: 'alice' }],
+      directSubjects: [{ kind: 'concrete', ns: 'user', id: 'alice' }],
       usersets: [],
     };
     const spy = vi.spyOn(expandModule, 'expand').mockResolvedValue(canned);

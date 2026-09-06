@@ -400,6 +400,24 @@ that line. This entry was a decision only, with no code — the narrow form
 itself, expiring/time-boxed tuples, shipped separately afterward (see
 below).
 
+**D-171 — wildcard subjects, reopened for the same reason, closed with code
+this time.** D-114 also named wildcard subjects (`user:*`, "any
+authenticated user can view this") out of scope, for the identical reason:
+no analog anywhere in the frozen grammar. A relation now opts in explicitly
+(`relation viewer: user | user:*`) — never implied by declaring the plain
+`user` type alongside it. The soundness argument holds by construction: both
+resolvers already funnel every rewrite mechanism through exactly one
+subject-comparison site each, so the wildcard fix touches only that one site
+in each, and an exclusion's `base`/`subtract` can never disagree about what
+counts as a match — the same symmetry that keeps a D-158-class bug from
+recurring. `listUsers` needed a real fix, not just a type widening: its
+combinators now track wildcard coverage per subject namespace, and refuse
+outright (never approximate) the one genuinely co-finite shape a
+wildcard-minus-concrete-exceptions subtraction produces. Two new permanent
+metamorphic properties, run against the real production and reference
+engines, are the mandatory gate this shipped behind — full account:
+[`docs/DECISIONS.md`](docs/DECISIONS.md) D-171.
+
 Five further items shipped, built in parallel as independent, isolated
 pieces of work:
 

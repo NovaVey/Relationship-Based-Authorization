@@ -33,6 +33,7 @@ import type {
   ApiEntityRef,
   HealthDatabaseStatus,
   HealthNamespaceListStatus,
+  ListUsersResponseBody,
 } from '../../../src/api/responses.js';
 import {
   tupleValidationError,
@@ -42,7 +43,7 @@ import {
 import type { PerformCheckResult } from '../../../src/audit/checks.js';
 import type { ResolutionStep } from '../../../src/resolve/production/resolver.js';
 import type { ExpandNode } from '../../../src/audit/expand.js';
-import type { ListObjectsResult, ListUsersResult } from '../../../src/audit/list.js';
+import type { ListObjectsResult, ListUsersResult, SubjectRef } from '../../../src/audit/list.js';
 import type { WriteTupleResult, DeleteTupleResult, TupleError } from '../../../src/store/tuples.js';
 import type { SchemaCompileResult } from '../../../src/schema/dsl/errors.js';
 import type { SchemaError } from '../../../src/schema/dsl/errors.js';
@@ -51,6 +52,8 @@ import type { PublishResult, PublishedNamespace } from '../../../src/schema/publ
 
 const subject: ApiEntityRef = { ns: 'user', id: 'alice' };
 const object: ApiEntityRef = { ns: 'document', id: 'readme' };
+/** `subject` above, reshaped as a `SubjectRef` (D-171) for use in an `ExpandNode.directSubjects` array, which is discriminated concrete/wildcard rather than a bare `{ns, id}`. */
+const concreteSubject: SubjectRef = { kind: 'concrete', ns: subject.ns, id: subject.id };
 
 const grantPath: ResolutionStep = {
   kind: 'directGrant',
@@ -164,7 +167,7 @@ describe('expandResponse — status is always 200', () => {
       kind: 'relation',
       object,
       relation: 'viewer',
-      directSubjects: [subject],
+      directSubjects: [concreteSubject],
       usersets: [],
     };
     expect(expandResponse(object, 'viewer', tree).status).toBe(200);
@@ -177,7 +180,7 @@ describe('expandResponse — tree is passed through verbatim (deep-equal, not ju
       kind: 'relation',
       object,
       relation: 'viewer',
-      directSubjects: [subject, { ns: 'user', id: 'bob' }],
+      directSubjects: [concreteSubject, { kind: 'concrete', ns: 'user', id: 'bob' }],
       usersets: [
         {
           userset: { ns: 'group', id: 'eng' },
@@ -209,7 +212,7 @@ describe('expandResponse — tree is passed through verbatim (deep-equal, not ju
       kind: 'relation',
       object,
       relation: 'viewer',
-      directSubjects: [subject],
+      directSubjects: [concreteSubject],
       usersets: [],
     };
     const undeclaredLeaf: ExpandNode = { kind: 'undeclared', object, name: 'banned' };
@@ -343,23 +346,60 @@ describe('listUsersResponse — object and relation are echoed verbatim', () => 
   });
 });
 
+/** Narrows `ListUsersResponseBody` to its `subjects`-carrying variant, for tests that never pass an `unenumerable` result — fails loudly rather than letting a type error hide as a runtime `undefined`. */
+function expectSubjects(body: ListUsersResponseBody): SubjectRef[] {
+  if ('unenumerable' in body) {
+    throw new Error(`expected a subjects-carrying body, got unenumerable (ns=${body.ns})`);
+  }
+  return body.subjects;
+}
+
 describe('listUsersResponse — subjects passes through verbatim, and an empty result renders an empty array, never omitted or null', () => {
   it('listusersresponse-subjects-equals-result-subjects-verbatim-for-a-nonempty-result', () => {
-    const subjects: ApiEntityRef[] = [
-      { ns: 'user', id: 'alice' },
-      { ns: 'user', id: 'bob' },
+    const subjects: SubjectRef[] = [
+      { kind: 'concrete', ns: 'user', id: 'alice' },
+      { kind: 'concrete', ns: 'user', id: 'bob' },
     ];
     const result: ListUsersResult = { subjects };
-    expect(listUsersResponse(object, 'view', result).body.subjects).toEqual(subjects);
+    expect(expectSubjects(listUsersResponse(object, 'view', result).body)).toEqual(subjects);
   });
 
   it('listusersresponse-subjects-is-an-empty-array-not-omitted-or-null-when-the-result-has-zero-subjects', () => {
     const result: ListUsersResult = { subjects: [] };
     const response = listUsersResponse(object, 'view', result);
     expect(Object.prototype.hasOwnProperty.call(response.body, 'subjects')).toBe(true);
-    expect(response.body.subjects).not.toBeNull();
-    expect(Array.isArray(response.body.subjects)).toBe(true);
-    expect(response.body.subjects).toEqual([]);
+    expect(expectSubjects(response.body)).not.toBeNull();
+    expect(Array.isArray(expectSubjects(response.body))).toBe(true);
+    expect(expectSubjects(response.body)).toEqual([]);
+  });
+});
+
+describe('listUsersResponse — D-171 (public/wildcard subjects): a wildcard entry passes through discriminated, and an unenumerable result renders as a distinct, still-200 shape', () => {
+  it('listusersresponse-passes-through-a-mix-of-concrete-and-wildcard-subjects-verbatim', () => {
+    const subjects: SubjectRef[] = [
+      { kind: 'wildcard', ns: 'user' },
+      { kind: 'concrete', ns: 'user', id: 'alice' },
+    ];
+    const result: ListUsersResult = { subjects };
+    expect(expectSubjects(listUsersResponse(object, 'view', result).body)).toEqual(subjects);
+  });
+
+  it('listusersresponse-renders-an-unenumerable-result-as-status-200-with-unenumerable-ns-and-reason-fields-never-a-subjects-key', () => {
+    const result: ListUsersResult = {
+      unenumerable: true,
+      ns: 'user',
+      reason: 'wildcardMinusConcreteExceptions',
+    };
+    const response = listUsersResponse(object, 'view', result);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      object,
+      relation: 'view',
+      unenumerable: true,
+      ns: 'user',
+      reason: 'wildcardMinusConcreteExceptions',
+    });
+    expect(Object.prototype.hasOwnProperty.call(response.body, 'subjects')).toBe(false);
   });
 });
 
@@ -367,8 +407,8 @@ describe('listUsersResponse — the response body never has an atToken field at 
   it('listusersresponse-body-has-no-attoken-own-property-under-any-inputs', () => {
     const result: ListUsersResult = {
       subjects: [
-        { ns: 'user', id: 'alice' },
-        { ns: 'user', id: 'bob' },
+        { kind: 'concrete', ns: 'user', id: 'alice' },
+        { kind: 'concrete', ns: 'user', id: 'bob' },
       ],
     };
     const response = listUsersResponse(object, 'view', result);

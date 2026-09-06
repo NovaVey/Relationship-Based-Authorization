@@ -105,15 +105,35 @@ export const MAX_EXPRESSION_NESTING_DEPTH = 100;
 /**
  * A subject type a `relation` is allowed to store as the subject of a
  * tuple: either a direct/terminal principal type (`user` — no `relation`
- * field) or a userset reference into another namespace's relation
- * (`group#member` — `relation: "member"`). This is what a tuple writer
- * (Phase 2) checks a write's `subject_ns` / `subject_relation` against.
+ * field), a userset reference into another namespace's relation
+ * (`group#member` — `relation: "member"`), or a wildcard ("public subject")
+ * type (`user:*` — `wildcard: true`, D-171, reopening D-114's "no analog
+ * anywhere in this grammar" exclusion). `relation` and `wildcard` are
+ * mutually exclusive — a subject type is never both a userset reference and
+ * a wildcard. This is what a tuple writer (Phase 2) checks a write's
+ * `subject_ns` / `subject_id` / `subject_relation` against.
  */
 export interface SubjectTypeRef {
   namespace: string;
   /** Present only for a `namespace#relation` userset subject type. */
   relation?: string;
+  /** Present (and `true`) only for a `namespace:*` wildcard subject type — see `WILDCARD_SUBJECT_ID`. */
+  wildcard?: boolean;
 }
+
+/**
+ * The reserved `subject_id` value denoting "every subject of this tuple's
+ * `subject_ns`" (D-171) — a public/wildcard grant, e.g. `user:*`. Never a
+ * real, writable subject id: `IDENTIFIER_PATTERN` (`/^[a-z][a-z0-9_]*$/`)
+ * can never produce `'*'`, so this sentinel can never collide with a real
+ * identifier — the same non-collision reasoning `relation_tuples_unique_fact`
+ * already relies on for `coalesce(subject_relation, '')`'s own `''` sentinel
+ * (`src/store/migrations/0001_relation_tuples_and_write_log.sql`). A
+ * relation must explicitly declare `namespace:*` as one of its subject
+ * types (`SubjectTypeRef.wildcard`) before a tuple carrying this sentinel is
+ * accepted — see `src/store/tuples.ts`'s `validateAgainstSchema`.
+ */
+export const WILDCARD_SUBJECT_ID = '*';
 
 /**
  * A storable relation — the only kind of name a tuple write may target.

@@ -14,30 +14,73 @@
  * subject" trap this file's own intersection/exclusion tests below already
  * demonstrate at the unit level — lives in
  * `test/unit/audit/list.integration.test.ts`.
+ *
+ * D-171 (public/wildcard subjects) added a second correctness trap this
+ * file now also covers at the unit level: a wildcard subject
+ * (`{kind:'wildcard', ns}`) must be tracked as NAMESPACE coverage, not a
+ * literal key, so it correctly excludes a concrete subject reached via a
+ * DIFFERENT branch of an exclusion's own `subtract` — see the "wildcard in
+ * subtract" tests below, and `src/audit/list.ts`'s own `subtractMemberSets`
+ * doc comment for the one genuinely co-finite shape that refuses instead of
+ * approximating.
  */
 import { describe, expect, it } from 'vitest';
 
-import { evaluateExpandNode, type EntityRef } from '../../../src/audit/list.js';
+import {
+  evaluateExpandNode,
+  isUnenumerable,
+  type EntityRef,
+  type EvaluateExpandResult,
+  type MemberSet,
+  type SubjectRef,
+} from '../../../src/audit/list.js';
 import type { ExpandNode } from '../../../src/audit/expand.js';
 
 function ref(ns: string, id: string): EntityRef {
   return { ns, id };
 }
 
-/** A `relation` leaf with only direct (plain) subjects, no userset members — the simplest possible non-empty node. */
+function concrete(ns: string, id: string): SubjectRef {
+  return { kind: 'concrete', ns, id };
+}
+
+function wildcard(ns: string): SubjectRef {
+  return { kind: 'wildcard', ns };
+}
+
+/** Unwraps an `EvaluateExpandResult`, asserting it's the enumerable `MemberSet` shape (fails the test loudly if it's an `Unenumerable` refusal instead — never silently treated as empty). */
+function asMemberSet(result: EvaluateExpandResult): MemberSet {
+  if (isUnenumerable(result)) {
+    throw new Error(`expected an enumerable MemberSet, got unenumerable (ns=${result.ns})`);
+  }
+  return result;
+}
+
+/** Sorts a `MemberSet`'s concrete values into a stable, comparable array of `"ns:id"` strings — this file's own test-only helper, deliberately not `listUsers`'s own sort (kept separate so a bug in one can't hide behind a bug in the other). */
+function sortedIds(result: EvaluateExpandResult): string[] {
+  const set = asMemberSet(result);
+  return [...set.concrete.values()].map((s) => `${s.ns}:${s.id}`).sort();
+}
+
+/** Sorts a `MemberSet`'s wildcard-covered namespaces into a stable array. */
+function sortedWildcardNs(result: EvaluateExpandResult): string[] {
+  return [...asMemberSet(result).wildcardNs].sort();
+}
+
+/** A `relation` leaf with only direct (concrete) subjects, no userset members, no wildcard — the simplest possible non-empty node. */
 function relationLeaf(object: EntityRef, relation: string, directSubjectIds: string[]): ExpandNode {
   return {
     kind: 'relation',
     object,
     relation,
-    directSubjects: directSubjectIds.map((id) => ref('user', id)),
+    directSubjects: directSubjectIds.map((id) => concrete('user', id)),
     usersets: [],
   };
 }
 
-/** Sorts a `Map<string, EntityRef>`'s values into a stable, comparable array — this file's own test-only helper, deliberately not `listUsers`'s own sort (kept separate so a bug in one can't hide behind a bug in the other). */
-function sortedIds(members: Map<string, EntityRef>): string[] {
-  return [...members.values()].map((s) => `${s.ns}:${s.id}`).sort();
+/** A `relation` leaf granting an entire namespace by wildcard (`<ns>:*`, D-171) — no concrete subjects, no userset members. */
+function wildcardLeaf(object: EntityRef, relation: string, ns: string): ExpandNode {
+  return { kind: 'relation', object, relation, directSubjects: [wildcard(ns)], usersets: [] };
 }
 
 describe('evaluateExpandNode — the pure recursive set-evaluation function listUsers is built on', () => {
@@ -46,7 +89,7 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
       kind: 'relation',
       object: ref('document', 'readme'),
       relation: 'viewer',
-      directSubjects: [ref('user', 'carol')],
+      directSubjects: [concrete('user', 'carol')],
       usersets: [
         {
           userset: ref('group', 'eng'),
@@ -107,7 +150,9 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
       object: ref('document', 'readme'),
       children: [],
     };
-    expect(evaluateExpandNode(node).size).toBe(0);
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(set.concrete.size).toBe(0);
+    expect(set.wildcardNs.size).toBe(0);
   });
 
   it('exclusion: base minus subtract — a subject in BOTH is correctly absent, not just deduped', () => {
@@ -170,9 +215,9 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
       object: ref('document', 'x'),
       name: 'bogus',
     };
-    expect(evaluateExpandNode(cycleGuard).size).toBe(0);
-    expect(evaluateExpandNode(depthLimitReached).size).toBe(0);
-    expect(evaluateExpandNode(undeclared).size).toBe(0);
+    expect(asMemberSet(evaluateExpandNode(cycleGuard)).concrete.size).toBe(0);
+    expect(asMemberSet(evaluateExpandNode(depthLimitReached)).concrete.size).toBe(0);
+    expect(asMemberSet(evaluateExpandNode(undeclared)).concrete.size).toBe(0);
   });
 
   it('a cycleGuard branch inside a union does not poison a real grant reachable through a sibling branch', () => {
@@ -196,9 +241,9 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
         relationLeaf(ref('document', 'readme'), 'editor', ['alice']),
       ],
     };
-    const members = evaluateExpandNode(node);
-    expect(sortedIds(members)).toEqual(['user:alice']);
-    expect(members.size).toBe(1);
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(sortedIds(set)).toEqual(['user:alice']);
+    expect(set.concrete.size).toBe(1);
   });
 
   it('dedup: the same subject reachable via a direct grant AND a nested userset member collapses to one entry', () => {
@@ -206,7 +251,7 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
       kind: 'relation',
       object: ref('document', 'readme'),
       relation: 'viewer',
-      directSubjects: [ref('user', 'alice')],
+      directSubjects: [concrete('user', 'alice')],
       usersets: [
         {
           userset: ref('group', 'eng'),
@@ -215,9 +260,9 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
         },
       ],
     };
-    const members = evaluateExpandNode(node);
-    expect(sortedIds(members)).toEqual(['user:alice', 'user:bob']);
-    expect(members.size).toBe(2);
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(sortedIds(set)).toEqual(['user:alice', 'user:bob']);
+    expect(set.concrete.size).toBe(2);
   });
 
   it('a realistic three-level tree: union of (relation leaf) and (intersection of two relation leaves) and (exclusion) — the combinators compose correctly, not just in isolation', () => {
@@ -245,5 +290,204 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
     // carol (direct viewer), dave (in BOTH intersection branches — erin is
     // not), frank (org member, not banned — gina is banned, so excluded).
     expect(sortedIds(evaluateExpandNode(node))).toEqual(['user:carol', 'user:dave', 'user:frank']);
+  });
+
+  // -------------------------------------------------------------------------
+  // D-171 — wildcard ("public") subjects.
+  // -------------------------------------------------------------------------
+
+  it('relation: a wildcard directSubjects entry is tracked as namespace coverage, not a literal key', () => {
+    const node = wildcardLeaf(ref('document', 'readme'), 'viewer', 'user');
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(set.concrete.size).toBe(0);
+    expect(sortedWildcardNs(evaluateExpandNode(node))).toEqual(['user']);
+  });
+
+  it('relation: a concrete entry made redundant by a wildcard on the SAME leaf is dropped', () => {
+    const node: ExpandNode = {
+      kind: 'relation',
+      object: ref('document', 'readme'),
+      relation: 'viewer',
+      directSubjects: [concrete('user', 'alice'), wildcard('user')],
+      usersets: [],
+    };
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(set.concrete.size).toBe(0);
+    expect([...set.wildcardNs]).toEqual(['user']);
+  });
+
+  it('union: a wildcard branch absorbs a concrete entry from a SIBLING branch of the same namespace', () => {
+    const node: ExpandNode = {
+      kind: 'union',
+      object: ref('document', 'readme'),
+      children: [
+        relationLeaf(ref('document', 'readme'), 'viewer', ['alice']),
+        wildcardLeaf(ref('document', 'readme'), 'editor', 'user'),
+      ],
+    };
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(set.concrete.size).toBe(0);
+    expect([...set.wildcardNs]).toEqual(['user']);
+  });
+
+  it('intersection: a namespace wildcard-covered in EVERY branch stays wildcard-covered in the result', () => {
+    const node: ExpandNode = {
+      kind: 'intersection',
+      object: ref('document', 'readme'),
+      children: [
+        wildcardLeaf(ref('document', 'readme'), 'viewer', 'user'),
+        wildcardLeaf(ref('document', 'readme'), 'editor', 'user'),
+      ],
+    };
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect([...set.wildcardNs]).toEqual(['user']);
+    expect(set.concrete.size).toBe(0);
+  });
+
+  it('intersection: a namespace wildcard-covered in only ONE branch falls back to per-subject coverage against every branch', () => {
+    const node: ExpandNode = {
+      kind: 'intersection',
+      object: ref('document', 'readme'),
+      children: [
+        wildcardLeaf(ref('document', 'readme'), 'viewer', 'user'), // everyone
+        relationLeaf(ref('document', 'readme'), 'owner', ['dave']), // only dave, concretely
+      ],
+    };
+    // dave is covered by BOTH (viewer's wildcard covers him; owner names
+    // him concretely) — the real intersection is exactly {dave}, not the
+    // empty set (which a naive "wildcardNs must appear in every branch, so
+    // there is no namespace-level wildcard, so treat non-wildcard branches
+    // as the whole answer" bug would produce) and not "everyone" (which a
+    // naive "any branch wildcards this namespace, so the result does too"
+    // bug would produce).
+    expect(sortedIds(evaluateExpandNode(node))).toEqual(['user:dave']);
+    expect(sortedWildcardNs(evaluateExpandNode(node))).toEqual([]);
+  });
+
+  it("exclusion: wildcard in subtract excludes a concrete base member of the SAME namespace, even though it wasn't named directly — the core D-171 listUsers trap", () => {
+    const node: ExpandNode = {
+      kind: 'exclusion',
+      object: ref('document', 'readme'),
+      base: relationLeaf(ref('document', 'readme'), 'viewer', ['alice']),
+      subtract: wildcardLeaf(ref('document', 'readme'), 'banned', 'user'),
+    };
+    // alice is a viewer; banned wildcards ALL users, so she is banned too,
+    // even though no tuple names her directly on the banned side. A naive
+    // literal-key-only exclusion (the pre-D-171 implementation) would find
+    // no key in subtract equal to alice's and wrongly still list her —
+    // exactly the divergence from check()'s own correct denial this
+    // property exists to close.
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(set.concrete.size).toBe(0);
+    expect(set.wildcardNs.size).toBe(0);
+  });
+
+  it('exclusion: wildcard base minus a wildcard subtract of the SAME namespace is exactly empty (fully enumerable, not a refusal)', () => {
+    const node: ExpandNode = {
+      kind: 'exclusion',
+      object: ref('document', 'readme'),
+      base: wildcardLeaf(ref('document', 'readme'), 'viewer', 'user'),
+      subtract: wildcardLeaf(ref('document', 'readme'), 'banned', 'user'),
+    };
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect(set.concrete.size).toBe(0);
+    expect(set.wildcardNs.size).toBe(0);
+  });
+
+  it('exclusion: wildcard base minus a DIFFERENT namespace subtract passes the wildcard through unchanged (no overlap to worry about)', () => {
+    const node: ExpandNode = {
+      kind: 'exclusion',
+      object: ref('document', 'readme'),
+      base: wildcardLeaf(ref('document', 'readme'), 'viewer', 'user'),
+      subtract: relationLeaf(ref('document', 'readme'), 'banned', ['zara']),
+    };
+    // 'banned' here names a subject of namespace 'group', not 'user' — a
+    // genuinely disjoint namespace from the one 'viewer' wildcards, so
+    // there is no co-finite ambiguity: the wildcard passes through intact.
+    const disjointNode: ExpandNode = {
+      ...node,
+      subtract: {
+        kind: 'relation',
+        object: ref('document', 'readme'),
+        relation: 'banned',
+        directSubjects: [concrete('group', 'zara')],
+        usersets: [],
+      },
+    };
+    const set = asMemberSet(evaluateExpandNode(disjointNode));
+    expect([...set.wildcardNs]).toEqual(['user']);
+    expect(set.concrete.size).toBe(0);
+  });
+
+  it('exclusion: a wildcard base minus finitely many CONCRETE exceptions of the SAME namespace is genuinely co-finite — refuses rather than approximating', () => {
+    const node: ExpandNode = {
+      kind: 'exclusion',
+      object: ref('document', 'readme'),
+      base: wildcardLeaf(ref('document', 'readme'), 'viewer', 'user'),
+      subtract: relationLeaf(ref('document', 'readme'), 'banned', ['zara']),
+    };
+    const result = evaluateExpandNode(node);
+    expect(isUnenumerable(result)).toBe(true);
+    if (isUnenumerable(result)) {
+      expect(result.ns).toBe('user');
+    }
+  });
+
+  it('unenumerable propagates through a containing union — one unenumerable branch refuses the whole call', () => {
+    const node: ExpandNode = {
+      kind: 'union',
+      object: ref('document', 'readme'),
+      children: [
+        relationLeaf(ref('document', 'readme'), 'viewer', ['carol']),
+        {
+          kind: 'exclusion',
+          object: ref('document', 'readme'),
+          base: wildcardLeaf(ref('document', 'readme'), 'editor', 'user'),
+          subtract: relationLeaf(ref('document', 'readme'), 'banned', ['zara']),
+        },
+      ],
+    };
+    expect(isUnenumerable(evaluateExpandNode(node))).toBe(true);
+  });
+
+  it('unenumerable propagates through a containing intersection', () => {
+    const node: ExpandNode = {
+      kind: 'intersection',
+      object: ref('document', 'readme'),
+      children: [
+        relationLeaf(ref('document', 'readme'), 'viewer', ['carol']),
+        {
+          kind: 'exclusion',
+          object: ref('document', 'readme'),
+          base: wildcardLeaf(ref('document', 'readme'), 'editor', 'user'),
+          subtract: relationLeaf(ref('document', 'readme'), 'banned', ['zara']),
+        },
+      ],
+    };
+    expect(isUnenumerable(evaluateExpandNode(node))).toBe(true);
+  });
+
+  it('tupleToUserset: a wildcard-covered followed object contributes namespace coverage, unioned with a sibling followed object', () => {
+    const node: ExpandNode = {
+      kind: 'tupleToUserset',
+      object: ref('document', 'readme'),
+      relation: 'parent',
+      computedUserset: 'view',
+      children: [
+        {
+          through: ref('folder', 'design'),
+          expansion: wildcardLeaf(ref('folder', 'design'), 'editor', 'user'),
+        },
+        {
+          through: ref('folder', 'specs'),
+          expansion: relationLeaf(ref('folder', 'specs'), 'editor', ['bob']),
+        },
+      ],
+    };
+    const set = asMemberSet(evaluateExpandNode(node));
+    expect([...set.wildcardNs]).toEqual(['user']);
+    // bob is redundant once 'user' is wildcard-covered, dropped by the
+    // same cleanup unionMemberSets already performs.
+    expect(set.concrete.size).toBe(0);
   });
 });

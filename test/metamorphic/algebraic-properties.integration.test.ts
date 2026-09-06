@@ -592,7 +592,7 @@ describe('Property C — sole-grounding-deletion-flip-via-expand', () => {
       throw new Error(`expected kind 'relation', got '${beforeExpand.kind}'`);
     }
     expect(beforeExpand.directSubjects).toHaveLength(1);
-    expect(beforeExpand.directSubjects[0]).toEqual({ ns: 'user', id: 'alice' });
+    expect(beforeExpand.directSubjects[0]).toEqual({ kind: 'concrete', ns: 'user', id: 'alice' });
     expect(beforeExpand.usersets).toEqual([]);
 
     // 4. Delete the identical key.

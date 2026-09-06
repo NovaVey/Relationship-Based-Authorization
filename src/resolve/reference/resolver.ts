@@ -70,7 +70,11 @@
  * independent verifier that does exactly this, written from this file's
  * exported types and doc comments only.
  */
-import type { CompiledSchema, RewriteRule } from '../../schema/dsl/types.js';
+import {
+  WILDCARD_SUBJECT_ID,
+  type CompiledSchema,
+  type RewriteRule,
+} from '../../schema/dsl/types.js';
 
 /** A namespaced entity reference — either the subject or the object of a check. */
 export interface EntityRef {
@@ -134,6 +138,8 @@ export interface DirectGrantStep {
   object: EntityRef;
   relation: string;
   subject: EntityRef;
+  /** Present (and `'wildcard'`) only when this grant matched via a stored `<ns>:*` wildcard tuple (D-171) rather than a tuple naming `subject` directly. */
+  via?: 'wildcard';
 }
 
 /**
@@ -536,11 +542,30 @@ function resolveRelation(
     if (!isTupleLive(tuple, ctx.now)) continue;
     if (tuple.subjectRelation === undefined) {
       const subject: EntityRef = { ns: tuple.subjectNs, id: tuple.subjectId };
-      if (subject.ns === ctx.subject.ns && subject.id === ctx.subject.id) {
+      // D-171 — a wildcard tuple (`subjectId === '*'`) matches ANY concrete
+      // subject of the same namespace, not just one naming it directly.
+      // Both `base` and `subtract` funnel through this exact same
+      // comparison (there is no second, unsynced copy of this logic for
+      // the two operands of an exclusion's `NOT` to disagree about) — see
+      // `docs/DECISIONS.md` D-171 for why that symmetry is what keeps this
+      // sound inside `evalRewrite`'s `exclusion` case below, with no
+      // special-casing needed there at all.
+      const isWildcardMatch = subject.ns === ctx.subject.ns && subject.id === WILDCARD_SUBJECT_ID;
+      const isDirectMatch = subject.ns === ctx.subject.ns && subject.id === ctx.subject.id;
+      if (isDirectMatch || isWildcardMatch) {
         return {
           allowed: true,
           certain: true,
-          proof: { kind: 'directGrant', object, relation: relationName, subject },
+          proof: {
+            kind: 'directGrant',
+            object,
+            relation: relationName,
+            // Always the real queried subject, never the stored '*'
+            // sentinel — a caller-facing proof must name who was actually
+            // asking, not the wildcard tuple's own literal subject_id.
+            subject: ctx.subject,
+            ...(isWildcardMatch && !isDirectMatch ? { via: 'wildcard' as const } : {}),
+          },
         };
       }
       tupleDisproofs.push({ kind: 'subjectMismatch', subject });

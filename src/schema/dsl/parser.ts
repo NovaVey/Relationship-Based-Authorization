@@ -17,7 +17,7 @@
  *   namespace   := "namespace" IDENT "{" member+ "}"
  *   member      := relation | permission
  *   relation    := "relation" IDENT ":" subjectType ("|" subjectType)*
- *   subjectType := IDENT ("#" IDENT)?
+ *   subjectType := IDENT ("#" IDENT | ":" "*")?
  *   permission  := "permission" IDENT "=" expression
  *   expression  := term (("|" | "-") term)*        -- union / exclusion, equal precedence, left-assoc
  *   term        := atom ("&" atom)*                -- intersection, binds tighter than "|"/"-"
@@ -43,6 +43,8 @@ import { makeSchemaError, SchemaParseError, type SchemaError } from './errors.js
 export interface ParsedSubjectType {
   namespace: string;
   relation?: string;
+  /** Present (and `true`) only for a `namespace:*` wildcard subject type (D-171) — mutually exclusive with `relation`. */
+  wildcard?: boolean;
   line: number;
 }
 
@@ -92,6 +94,7 @@ type TokenType =
   | 'minus'
   | 'arrow'
   | 'hash'
+  | 'star'
   | 'eof';
 
 interface Token {
@@ -174,6 +177,9 @@ function tokenize(source: string): Token[] {
         continue;
       case '#':
         single('hash', '#');
+        continue;
+      case '*':
+        single('star', '*');
         continue;
       case '-':
         if (source[i + 1] === '>') {
@@ -332,6 +338,15 @@ function validateIdentifier(token: Token, context: string): void {
 function parseSubjectType(state: ParserState): ParsedSubjectType {
   const nsToken = expectWord(state, 'subject type');
   validateIdentifier(nsToken, 'subject type namespace');
+  // A relation's own `:` (separating its name from its subject-type list,
+  // `parseRelation` above) is already consumed before this function is ever
+  // entered — a second `:` seen here (only ever followed by `*`, D-171's
+  // wildcard subject type) is unambiguous, not a grammar collision.
+  if (peek(state).type === 'colon') {
+    consume(state);
+    expectPunct(state, 'star', '*');
+    return { namespace: nsToken.value, wildcard: true, line: nsToken.line };
+  }
   if (peek(state).type === 'hash') {
     consume(state);
     const relToken = expectWord(state, "subject type relation (after '#')");

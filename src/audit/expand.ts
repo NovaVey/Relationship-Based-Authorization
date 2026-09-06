@@ -46,7 +46,11 @@
  * (D-024/D-027/D-029).
  */
 import { env } from '../config/env.js';
-import type { NamespaceConfig, RewriteRule } from '../schema/dsl/types.js';
+import {
+  WILDCARD_SUBJECT_ID,
+  type NamespaceConfig,
+  type RewriteRule,
+} from '../schema/dsl/types.js';
 import { getLatestNamespaceConfig } from '../schema/publish.js';
 import type { ConnectionSource, QueryExecutor } from '../store/query-executor.js';
 
@@ -55,6 +59,16 @@ export interface EntityRef {
   ns: string;
   id: string;
 }
+
+/**
+ * A direct subject of a `relation` leaf (D-171) — either a concrete,
+ * individually-named subject, or a wildcard ("public") subject covering
+ * every subject of `ns` (a stored `<ns>:*` tuple, `WILDCARD_SUBJECT_ID`).
+ * `expandRelation` below is the earliest point wildcard-ness is knowable;
+ * every downstream type (`src/audit/list.ts`'s `MemberSet`, the API's
+ * `ListUsersResponseBody`) is a widening of what this leaf already knows.
+ */
+export type SubjectRef = ({ kind: 'concrete' } & EntityRef) | { kind: 'wildcard'; ns: string };
 
 export interface ExpandOptions {
   /** Overrides `env.CHECK_MAX_DEPTH` for this call only — the same independent backstop §6.4 requires of a check walk. */
@@ -101,7 +115,7 @@ export type ExpandNode =
       kind: 'relation';
       object: EntityRef;
       relation: string;
-      directSubjects: EntityRef[];
+      directSubjects: SubjectRef[];
       usersets: UsersetMember[];
     }
   | { kind: 'cycleGuard'; object: EntityRef; name: string }
@@ -271,13 +285,21 @@ async function expandRelation(
   depth: number,
 ): Promise<ExpandNode> {
   const rows = await fetchTuplesOn(ctx.client, object, relation);
-  const directSubjects: EntityRef[] = [];
+  const directSubjects: SubjectRef[] = [];
   const usersetRows = rows.filter(
     (row): row is RelationTupleRow & { subject_relation: string } => row.subject_relation !== null,
   );
   for (const row of rows) {
     if (row.subject_relation === null) {
-      directSubjects.push({ ns: row.subject_ns, id: row.subject_id });
+      // D-171: a stored wildcard tuple (subject_id === '*') is guaranteed,
+      // by `src/store/tuples.ts`'s write-time `validateWildcardStructure`,
+      // to never carry a `subject_relation` — this branch is exactly where
+      // that guarantee is consumed, no further check needed.
+      directSubjects.push(
+        row.subject_id === WILDCARD_SUBJECT_ID
+          ? { kind: 'wildcard', ns: row.subject_ns }
+          : { kind: 'concrete', ns: row.subject_ns, id: row.subject_id },
+      );
     }
   }
   const usersets = await mapSequential(usersetRows, async (row) => {

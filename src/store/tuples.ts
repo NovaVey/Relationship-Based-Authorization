@@ -7,7 +7,11 @@
  * exist.
  */
 import { getLatestNamespaceConfig } from '../schema/publish.js';
-import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
+import {
+  IDENTIFIER_PATTERN,
+  MAX_IDENTIFIER_LENGTH,
+  WILDCARD_SUBJECT_ID,
+} from '../schema/dsl/types.js';
 import type { ConnectionSource, QueryExecutor } from './query-executor.js';
 
 export interface TupleKey {
@@ -36,7 +40,8 @@ export interface TupleError {
     | 'subject_type_not_allowed'
     | 'subject_relation_is_a_permission'
     | 'undeclared_subject_relation'
-    | 'expires_at_not_in_future';
+    | 'expires_at_not_in_future'
+    | 'wildcard_subject_relation_conflict';
   message: string;
 }
 
@@ -87,6 +92,15 @@ const FIELDS: Array<[keyof TupleKey, string]> = [
  * deterministic argument error regardless of whether a database happens to
  * be configured, and should never be masked behind an unrelated
  * infrastructure message (full-repo audit finding #13, LOW, 2026-08-16).
+ *
+ * D-171: `subjectId === WILDCARD_SUBJECT_ID` ('*') is carved out of the
+ * generic `FIELDS` loop for `subjectId` specifically — every other field
+ * (`objectNs`, `objectId`, `relation`, `subjectNs`, `subjectRelation`) still
+ * enforces `IDENTIFIER_PATTERN` unmodified. A wildcard is always typed by a
+ * real, ordinary `subjectNs` (`user`, `document`, ...); there is no bare,
+ * untyped `*`. This carve-out is also what makes a previously-written
+ * wildcard tuple revocable: `validateIdentifiers` is the only check
+ * `deleteTuple` runs, so no separate change is needed there.
  */
 export function validateIdentifiers(tuple: TupleKey): TupleError[] {
   const errors: TupleError[] = [];
@@ -109,9 +123,39 @@ export function validateIdentifiers(tuple: TupleKey): TupleError[] {
       });
     }
   };
-  for (const [key, label] of FIELDS) check(tuple[key] as string, label);
+  for (const [key, label] of FIELDS) {
+    if (key === 'subjectId' && tuple.subjectId === WILDCARD_SUBJECT_ID) continue;
+    check(tuple[key] as string, label);
+  }
   if (tuple.subjectRelation !== undefined) check(tuple.subjectRelation, 'subject relation');
   return errors;
+}
+
+/**
+ * D-171: a wildcard subject (`subjectId === WILDCARD_SUBJECT_ID`) can never
+ * carry a `subjectRelation` — a wildcard is always a plain grant, never a
+ * userset. Enforced independently of `validateAgainstSchema`'s type check
+ * below, because a caller can pass `subjectId: '*'` and a `subjectRelation`
+ * together on the wire regardless of what any `SubjectTypeRef` declares
+ * (the write API takes raw fields, not a `SubjectTypeRef` selection) — and
+ * if this reached a resolver unchecked, `subjectRelation !== undefined`
+ * would route it into the userset-subject branch, which would try to
+ * recurse into a literal object named `*` (itself impossible to create,
+ * since `objectId` is validated by the same `IDENTIFIER_PATTERN` — a safe
+ * dead path, but a confusing one worth rejecting explicitly rather than
+ * silently tolerating).
+ */
+export function validateWildcardStructure(tuple: TupleKey): TupleError[] {
+  if (tuple.subjectId === WILDCARD_SUBJECT_ID && tuple.subjectRelation !== undefined) {
+    return [
+      {
+        code: 'wildcard_subject_relation_conflict',
+        message:
+          "wildcard subject '*' cannot carry a subject relation — a wildcard is always a plain grant, never a userset",
+      },
+    ];
+  }
+  return [];
 }
 
 /**
@@ -207,9 +251,21 @@ async function validateAgainstSchema(pool: QueryExecutor, tuple: TupleKey): Prom
     ];
   }
 
-  const subjectTypeAllowed = relation.subjectTypes.some(
-    (st) => st.namespace === tuple.subjectNs && st.relation === tuple.subjectRelation,
-  );
+  // D-171: a wildcard write (`subjectId === '*'`) is allowed only if this
+  // relation explicitly declared `<subjectNs>:*` as one of its subject
+  // types — checked separately from the ordinary exact-match check below,
+  // since a wildcard subject type is never compared by `relation`/
+  // `subjectRelation` at all. `validateWildcardStructure` (called before
+  // this function, in `writeTuple`) already guarantees `subjectRelation`
+  // is `undefined` whenever `subjectId === '*'`, so the ordinary branch's
+  // own `st.relation === tuple.subjectRelation` comparison is never
+  // reached for a wildcard tuple.
+  const subjectTypeAllowed =
+    tuple.subjectId === WILDCARD_SUBJECT_ID
+      ? relation.subjectTypes.some((st) => st.namespace === tuple.subjectNs && st.wildcard === true)
+      : relation.subjectTypes.some(
+          (st) => st.namespace === tuple.subjectNs && st.relation === tuple.subjectRelation,
+        );
   if (!subjectTypeAllowed) {
     const attempted =
       tuple.subjectRelation === undefined
@@ -402,6 +458,11 @@ export async function writeTuple(
   const identifierErrors = validateIdentifiers(tuple);
   if (identifierErrors.length > 0) {
     return { ok: false, errors: identifierErrors };
+  }
+
+  const wildcardStructureErrors = validateWildcardStructure(tuple);
+  if (wildcardStructureErrors.length > 0) {
+    return { ok: false, errors: wildcardStructureErrors };
   }
 
   const expiresAtErrors = validateExpiresAt(tuple);

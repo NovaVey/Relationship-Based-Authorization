@@ -56,6 +56,7 @@ import {
   listUsers,
   LIST_OBJECTS_MAX_CANDIDATES,
   type EntityRef,
+  type ListUsersResult,
 } from '../../../src/audit/list.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
@@ -129,6 +130,30 @@ function sortRefs(refs: readonly EntityRef[]): EntityRef[] {
 
 function expectSameEntitySet(actual: readonly EntityRef[], expected: readonly EntityRef[]): void {
   expect(sortRefs(actual)).toEqual(sortRefs(expected));
+}
+
+/**
+ * Unwraps a `listUsers()` result for this file's own fixtures, none of
+ * which write any wildcard tuple — fails loudly (never silently empties)
+ * if a result comes back `unenumerable` or contains an unexpected wildcard
+ * entry, rather than letting either case masquerade as "zero subjects."
+ * D-171's own wildcard-specific correctness proof lives in
+ * `test/unit/audit/list.test.ts`'s DB-free unit tests instead.
+ */
+function expectConcreteSubjects(result: ListUsersResult): EntityRef[] {
+  if ('unenumerable' in result) {
+    throw new Error(
+      `expected an enumerable listUsers() result, got unenumerable (ns=${result.ns})`,
+    );
+  }
+  return result.subjects.map((s) => {
+    if (s.kind !== 'concrete') {
+      throw new Error(
+        `expected only concrete subjects (this fixture writes no wildcard tuples), got ${JSON.stringify(s)}`,
+      );
+    }
+    return { ns: s.ns, id: s.id };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +313,7 @@ describe('listUsers/listObjects agree with an independent brute-force oracle', (
     ];
     for (const { object, relationOrPermission } of cases) {
       const oracle = await bruteForceUsers(object, relationOrPermission);
-      const { subjects } = await listUsers(pool, object, relationOrPermission);
+      const subjects = expectConcreteSubjects(await listUsers(pool, object, relationOrPermission));
       expectSameEntitySet(subjects, oracle);
     }
   });
@@ -346,7 +371,9 @@ describe('listUsers/listObjects agree with an independent brute-force oracle', (
     // that `view`'s own top node is an `exclusion`) would find bob's real
     // tuple under the `member` branch and wrongly include him. The correct
     // exclusion semantics (base minus subtract) must exclude him.
-    const { subjects: orgViewSubjects } = await listUsers(pool, ref(orgNs, 'acme'), 'view');
+    const orgViewSubjects = expectConcreteSubjects(
+      await listUsers(pool, ref(orgNs, 'acme'), 'view'),
+    );
     const orgViewIds = orgViewSubjects.map((s) => `${s.ns}:${s.id}`).sort();
     expect(orgViewIds).toContain('user:carol');
     expect(orgViewIds).toContain('user:alice');
@@ -359,10 +386,8 @@ describe('listUsers/listObjects agree with an independent brute-force oracle', (
     // reviewer` and wrongly include them. The correct intersection
     // semantics must exclude both — only dave, present in BOTH branches,
     // survives.
-    const { subjects: sensitiveReviewSubjects } = await listUsers(
-      pool,
-      ref(folderNs, 'design'),
-      'sensitive_review',
+    const sensitiveReviewSubjects = expectConcreteSubjects(
+      await listUsers(pool, ref(folderNs, 'design'), 'sensitive_review'),
     );
     const sensitiveReviewIds = sensitiveReviewSubjects.map((s) => `${s.ns}:${s.id}`).sort();
     expect(sensitiveReviewIds).toEqual(['user:dave']);
