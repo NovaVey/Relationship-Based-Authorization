@@ -51,13 +51,28 @@ import type { FastifyBaseLogger } from 'fastify';
  * accuracy. `ioredis`'s own default `retryStrategy` keeps attempting to
  * reconnect on its own; this handler only stops a transient failure from
  * being fatal, it doesn't change that retry behavior.
+ *
+ * **The log message itself used to claim a behavior this codebase never
+ * actually implemented — corrected, not merely reworded.**
+ * `docs/CAPABILITY-GAPS.md`'s own fault-injection finding: the original
+ * text ("budgets degrade to per-process only while this persists") read as
+ * if a Redis outage made both mechanisms silently fall back to
+ * per-process counting, continuing to admit requests under a smaller,
+ * per-replica budget. Neither mechanism has ever done that — both
+ * `authFloodGuard` (`src/api/server.ts`) and `@fastify/rate-limit`'s own
+ * bundled Redis store fail **closed**: a request reaching either one while
+ * Redis is unreachable is now rejected outright (503
+ * `infrastructure_unavailable`, `service: 'Redis'` — see `server.ts`'s own
+ * `authFloodGuard` and `setErrorHandler`), never silently admitted under a
+ * smaller budget. This log line now says that plainly, matching the real,
+ * shipped behavior instead of an aspiration nothing ever built.
  */
 export function createRedisClient(url: string, logger: FastifyBaseLogger): Redis {
   const client = new Redis(url);
   client.on('error', (err: Error) => {
     logger.error(
       { err },
-      'Redis client error (rate-limit/flood-guard budgets degrade to per-process only while this persists)',
+      'Redis client error — rate-limit/flood-guard requests fail closed (503) while this persists, never silently degrading to a per-process budget',
     );
   });
   return client;

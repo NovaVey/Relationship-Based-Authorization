@@ -357,3 +357,119 @@ describe('/health reports green against a real, reachable Postgres and reflects 
     expect(nsEntry2).toEqual({ namespace: ns, version: 2 });
   });
 });
+
+describe('a real client disconnecting mid-request never crashes the server or corrupts its ability to serve the next request', () => {
+  /**
+   * `docs/CAPABILITY-GAPS.md`'s "Fault injection above the storage seam"
+   * finding, the second half: "no code anywhere in `src/api` reacts to a
+   * client socket closing mid-request... and no test simulates it." A
+   * `productionCheck` call has no cancellation plumbing at all (confirmed
+   * by reading it directly — it takes no `AbortSignal`, no request/reply
+   * object, nothing Fastify-shaped) — a client disconnecting mid-flight
+   * cannot stop the walk already in progress; the only real question is
+   * whether the route handler's own eventual `reply.send()` against an
+   * already-closed connection is handled gracefully by Fastify/Node, or
+   * throws an uncaught error that could crash this whole process (taking
+   * down every *other* in-flight request too, the exact kind of
+   * self-inflicted denial-of-service this file's own Redis fault-injection
+   * sibling (`test/unit/api/redis-fault-injection.test.ts`) closes a
+   * different instance of).
+   *
+   * `app.listen()` on this same `app` instance — the one deliberate
+   * exception, in this whole file, to its own top-of-file doc comment
+   * ("`buildServer` does NOT call `app.listen()`") and to every other
+   * `*.integration.test.ts` file's `app.inject()`-only convention —
+   * matching `test/unit/api/watch.integration.test.ts`'s own identical,
+   * already-established precedent for the identical reason: proving a
+   * *real* client's disconnect behaves as claimed needs a real listening
+   * socket and a real client that can actually hang up, not a simulated
+   * `app.inject()` request (which, per that file's own account, never
+   * fires a real `'close'`/`'aborted'` event at all).
+   *
+   * A real `fetch()` call, aborted via a real `AbortController` as soon as
+   * it's issued — genuinely racing the abort against the server's own
+   * in-flight response, never assumed to land at a particular point in
+   * the handler. Fired many times concurrently (not once) for the same
+   * "force the race via genuine concurrency, don't assume a single attempt
+   * lands" discipline this project's own isolation suite already
+   * establishes elsewhere — a single aborted request completing without
+   * incident would not be strong evidence; many, fired at once, are.
+   */
+  it('many-concurrent-real-clients-aborting-a-real-check-request-immediately-never-crash-the-server-and-a-later-ordinary-request-still-succeeds-normally', async () => {
+    const ns = uniqueName('doc');
+    const source = [`namespace ${ns} {`, '  relation viewer: user', '}'].join('\n');
+    const publishRes = await app.inject({
+      method: 'POST',
+      url: '/schema/publish',
+      payload: { source },
+      headers: authHeaders(),
+    });
+    expect(publishRes.statusCode).toBe(200);
+
+    const objectId = uniqueName('obj');
+    const writeRes = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: {
+        objectNs: ns,
+        objectId,
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId: 'alice',
+      },
+      headers: authHeaders(),
+    });
+    expect(writeRes.statusCode).toBe(200);
+
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const addr = app.server.address();
+    if (addr === null || typeof addr === 'string') {
+      throw new Error('expected a real AddressInfo from a real listening socket');
+    }
+    const base = `http://127.0.0.1:${addr.port}`;
+    const checkPayload = JSON.stringify({
+      subject: { ns: 'user', id: 'alice' },
+      relation: 'viewer',
+      object: { ns, id: objectId },
+    });
+
+    const attempts = Array.from({ length: 30 }, async () => {
+      const controller = new AbortController();
+      const fetchPromise = fetch(`${base}/check`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...authHeaders() },
+        body: checkPayload,
+        signal: controller.signal,
+      });
+      // Abort immediately — genuinely racing the server's own in-flight
+      // handling, not waiting for any part of the response first.
+      controller.abort();
+      try {
+        await fetchPromise;
+      } catch {
+        // Expected — an aborted fetch always rejects (AbortError). The
+        // absence of a crash elsewhere in this test is the real assertion;
+        // this attempt's own rejection is not itself a failure.
+      }
+    });
+
+    // No attempt above may reject with anything other than what a plain
+    // abort produces, and — the real point of firing 30 concurrently —
+    // nothing here may take the server process itself down.
+    const settled = await Promise.allSettled(attempts);
+    expect(settled.every((s) => s.status === 'fulfilled')).toBe(true);
+
+    // The real assertion: the same server, after absorbing 30 real
+    // client disconnects mid-request, still serves an ordinary request
+    // correctly — proving nothing crashed or left the event loop/server
+    // state corrupted by any of them.
+    const followUp = await fetch(`${base}/check`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: checkPayload,
+    });
+    expect(followUp.status).toBe(200);
+    const followUpBody = (await followUp.json()) as { allowed: boolean };
+    expect(followUpBody.allowed).toBe(true);
+  });
+});

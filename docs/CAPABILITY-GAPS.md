@@ -450,7 +450,28 @@ own stated preference in an analogous case (`docs/DECISIONS.md:950` rejects
 
 ## Testing
 
-### Fault injection above the storage seam — mischaracterized (the rate limiter already fails closed)
+### Fault injection above the storage seam — built, `docs/DECISIONS.md` D-177
+
+**Status: built and shipped.** This section records the gap as it stood
+before it was closed — see D-177 for what actually shipped: `authFloodGuard`
+now catches a rejected `RedisFloodStore.increment` precisely at its own
+call site and reports `503 infrastructure_unavailable` (`service: 'Redis'`,
+never falsely claiming Postgres); `@fastify/rate-limit`'s own bundled
+Redis-store failure — which exposes no call site this codebase owns to
+wrap directly — is now recognized by a disclosed, narrowly-scoped
+`setErrorHandler` heuristic instead; the misleading "degrades to
+per-process" log line is corrected to describe the real, fail-closed
+behavior; and a `buildServer(pool, { redisClient })` test-only override
+lets a real (but fast-failing) `ioredis` client be injected for
+deterministic fault-injection tests, closing a real, related bug the new
+tests caught along the way: `buildServer`'s own shutdown hook crashed if
+`redisClient.quit()` itself rejected against an already-broken connection.
+The client-disconnect-mid-check gap named below is also closed — a real
+`app.listen()` + real, aborted `fetch()` test (mirroring
+`test/unit/api/watch.integration.test.ts`'s own established real-socket
+precedent) confirms, empirically, that many concurrent real clients
+aborting a real `/check` mid-flight never crashes the server and never
+corrupts its ability to serve the next request.
 
 DST covers the store thoroughly (`test/isolation/README.md:34-41`),
 including, per D-165/D-167, the Leopard index's async rebuild/lookup
@@ -491,10 +512,15 @@ error-handler log line (`createRedisClient`, line 60: "Redis client error
 (rate-limit/flood-guard budgets degrade to per-process only while this
 persists)") seems to assume happens but no code implements; and
 the error surfaces as a generic 500 instead of the codebase's own 503
-convention. Worth a fault-injection suite that breaks Redis mid-request and
-asserts the intended behavior explicitly, whichever way it's meant to go,
-plus, separately, a client-disconnect-mid-check test, since that has no
-coverage or code path at all today. (D-162's rate-limiter finding, for
+convention. **Done, per the "Status" note above** — checked with the user
+first, which of the two ways "it's meant to go" was chosen: keep the
+existing fail-closed behavior exactly as-is (a deliberate, safer default —
+building an actual degrade-to-per-process fallback would be a real
+availability/abuse policy change, not a same-day fix) and correct the log
+line to match it, rather than build the degrade. A fault-injection suite
+that breaks Redis mid-request and asserts that chosen behavior explicitly,
+plus, separately, a client-disconnect-mid-check test, since that had no
+coverage or code path at all before. (D-162's rate-limiter finding, for
 contrast, was a keyGenerator/bucketing fix — multi-IP budget-multiplication
 via one credential — and is unrelated to this Redis-outage question.)
 
