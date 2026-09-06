@@ -26,7 +26,7 @@ import { privescCli } from './commands/privesc.js';
 import { leopardRefresh, leopardStatus } from './commands/leopard.js';
 
 const packageName = 'authz';
-const packageVersion = '0.1.0'; // kept in sync with package.json by hand until a version-injection step exists
+const packageVersion = '1.3.0'; // kept in sync with package.json by hand until a version-injection step exists
 
 const program = new Command();
 
