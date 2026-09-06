@@ -275,6 +275,41 @@ exclusion) and genuinely reports `HOLDS up to k = 1`, never an
 unconditional proof — and why the job still gates on that as a pass, not
 a failure (that file's own "Exit-code gating" section).
 
+Since `docs/DECISIONS.md` D-173, that job runs through
+[`action.yml`](./action.yml) (below) via a local `uses: ./tools/
+schema-verifier` reference, rather than its own inline steps — real
+dogfooding of the packaged form, not a parallel copy of it.
+
+## Use as a reusable GitHub Action
+
+`action.yml` in this directory packages `verify-schema` as a composite
+GitHub Action any workflow — in this repo or any other — can drop into a
+job:
+
+```yaml
+- uses: NovaVey/Relationship-Based-Authorization/tools/schema-verifier@main
+  with:
+    schema-file: path/to/your.authz
+    invariants-file: path/to/your.invariant
+```
+
+(Pin `@main` to a commit SHA in real use, per this repo's own
+pinned-third-party-actions convention — `docs/github-governance.md` Step
+5.) It takes the exact same arguments as the CLI (`schema-file`,
+`invariants-file`, optional `bound` and `json`), exposes `exit-code` and
+`output` as step outputs, posts a job-summary section by default, and
+fails the step itself by default on exit code `1`/`3` — every one of those
+defaults is overridable (see `action.yml`'s own `inputs`/`outputs` for the
+full list). It needs no checkout of _this_ repo and no separate `npm ci`
+in _your_ job — GitHub's own action-resolution mechanism already checks
+out this whole repository into an isolated location when you reference it
+this way, and the action installs its own dependencies from there. See
+`action.yml`'s own top-of-file comment for exactly how that works, and for
+the one real, accepted cost it carries: this tool has no `package.json`
+of its own (D-120), so every invocation installs this repo's entire root
+dependency tree, not just the handful of packages `verify-schema` itself
+needs. `docs/DECISIONS.md` D-173 has the full account.
+
 The nightly differential test (`test/differential.nightly.test.ts`, §8b —
 brute-force agreement at `k = 3`, deliberately excluded from the default
 `vitest run` because it's slow) is fully built, independently verified,

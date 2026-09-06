@@ -1,0 +1,223 @@
+# A reusable GitHub Action wrapper around `verify-schema`
+# (`tools/schema-verifier/src/cli/index.ts`, D-122) — closes
+# `docs/CAPABILITY-GAPS.md`'s "Package the schema verifier separately"
+# item (D-173): "there is no `action.yml` anywhere ... an `action.yml`
+# wrapper is comparatively thin work" — this file is that wrapper.
+#
+# The packaging trick this relies on: when a workflow references this
+# action as `uses: <owner>/<repo>/tools/schema-verifier@<ref>` (or, from
+# inside this very repo, `uses: ./tools/schema-verifier`), GitHub
+# downloads/checks out the *entire* referenced repository into its own
+# isolated location — not just this subdirectory — and sets
+# `github.action_path` to that checkout's `tools/schema-verifier`. That
+# means this tool's existing, deliberate cross-boundary imports into root
+# `src/schema/dsl/` (see this directory's own `tsconfig.json` comment —
+# "import the parser, don't reimplement it") need **no refactor** to
+# become a reusable action: `${{ github.action_path }}/../..` is always
+# this whole repo's root, dependencies and all, regardless of what the
+# *caller's* own checkout contains. `tools/schema-verifier` has no
+# `package.json` of its own (D-120's file-touch discipline) — it runs
+# straight off the root project's `node_modules`/`tsconfig.json`, exactly
+# as every local invocation and the pre-existing per-PR CI job already
+# did — so this action installs and runs from that same root, not from
+# the caller's workspace.
+#
+# Concretely, that means:
+#   - This action does NOT run `actions/checkout` itself — the *caller's*
+#     workflow already checked out (or bring its own repo, if external)
+#     the repo containing the schema/invariant files being checked; an
+#     extra checkout inside this action would target the wrong repo (this
+#     one) and could clobber the caller's own workspace.
+#   - It DOES run its own `actions/setup-node` + `npm ci`, scoped to
+#     `${{ github.action_path }}/../..` (this repo's own isolated
+#     checkout root) — not the caller's `GITHUB_WORKSPACE` — because that
+#     is the only place this tool's `node_modules` (commander, tsx,
+#     TypeScript) and `tsconfig.json` exist. `cache-dependency-path` is
+#     pinned to that same root's `package-lock.json` for the identical
+#     reason: the default (a `package-lock.json` relative to the
+#     *caller's* workspace) would either miss the cache entirely or, worse,
+#     silently key off some unrelated lockfile the caller's own repo
+#     happens to have at that path. That root is resolved through a `cd`
+#     + `pwd` step first, into a clean absolute path with no literal
+#     `.`/`..` segments — confirmed live that passing
+#     `${{ github.action_path }}/../..` to `cache-dependency-path`
+#     directly fails outright ("Relative pathing '.' and '..' is not
+#     allowed"), since that input is matched through `@actions/glob`,
+#     which rejects those segments in a pattern.
+#   - `schema-file`/`invariants-file` are resolved relative to the
+#     *caller's* checkout (steps run with the default working directory,
+#     `GITHUB_WORKSPACE`, unchanged) — exactly the paths a caller would
+#     already be passing to `verify-schema` by hand.
+#
+# Known, accepted cost — not something to silently paper over: because
+# `tools/schema-verifier` has no `package.json` of its own, every
+# invocation of this action (including from an external repo) pays for
+# `npm ci`-installing this repo's *entire* root dependency tree (fast-check,
+# vitest, pg, testcontainers, ... — everything root `package.json` lists),
+# not just the handful `verify-schema` itself needs. Giving this tool its
+# own minimal `package.json` would shrink that install, but would also
+# mean re-litigating D-120's file-touch discipline and un-doing the
+# deliberate "import the parser, don't reimplement it" choice this
+# directory's own `tsconfig.json` documents — out of scope here. See
+# `docs/DECISIONS.md` D-173 for the full reasoning.
+name: 'Schema verifier'
+description: >-
+  Statically verify a namespace DSL schema (.authz) against an invariant
+  (.invariant) using this repository's schema-verifier — proves the
+  invariant holds under every possible tuple set, or produces a real
+  counterexample confirmed against the production check engine.
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
+inputs:
+  schema-file:
+    description: >-
+      Path, relative to your checkout, to a .authz schema file to verify.
+    required: true
+  invariants-file:
+    description: >-
+      Path, relative to your checkout, to a .invariant file (may declare
+      more than one invariant).
+    required: true
+  bound:
+    description: >-
+      Bound for the non-monotone fragment's bounded search (verify-schema's
+      own --bound k). Leave unset for verify-schema's own default (1) —
+      see docs/DECISIONS.md D-118 for why 1 is the default.
+    required: false
+    default: ''
+  json:
+    description: >-
+      Set to 'true' for machine-readable JSON output (verify-schema's own
+      --json) instead of the human-readable default. Note this also
+      changes what the `output` output/job summary contain.
+    required: false
+    default: 'false'
+  summary:
+    description: >-
+      Set to 'false' to skip appending a job-summary section (the schema
+      verifier's own output) to $GITHUB_STEP_SUMMARY. Default 'true'.
+    required: false
+    default: 'true'
+  fail-on-error:
+    description: >-
+      Set to 'false' to never fail this action step itself, regardless of
+      verify-schema's exit code (soft mode) — read the `exit-code` output
+      and decide yourself. Default 'true': fails this step when
+      `exit-code` is 1 (confirmed VIOLATED) or 3 (tool error) — 0 and 2
+      both still pass, matching verify-schema's own exit-code table (see
+      tools/schema-verifier/src/cli/index.ts's doc comment). Either way,
+      the job summary (if `summary` is 'true') is written *before* this
+      check, so it appears regardless of the verdict.
+    required: false
+    default: 'true'
+
+outputs:
+  exit-code:
+    description: >-
+      verify-schema's own exit code, as a string: '0' = unconditional
+      HOLDS, '1' = confirmed VIOLATED, '2' = HOLDS up to the given bound
+      (or UNKNOWN), '3' = tool error (including a usage error). This
+      action's own default (fail-on-error: 'true') already fails the step
+      on '1'/'3' — read this output yourself only if you set
+      fail-on-error to 'false' for custom gating.
+    value: ${{ steps.verify.outputs.exit-code }}
+  output:
+    description: The full stdout+stderr verify-schema produced, verbatim.
+    value: ${{ steps.verify.outputs.output }}
+
+runs:
+  using: composite
+  steps:
+    # actions/setup-node's own `cache-dependency-path` is matched through
+    # @actions/glob, which explicitly rejects a pattern containing a
+    # literal `.`/`..` path segment — `${{ github.action_path }}/../..`
+    # itself trips that rejection outright (confirmed live: "Invalid
+    # pattern ... Relative pathing '.' and '..' is not allowed."). `cd`
+    # + `pwd` resolves those segments away into a clean absolute path
+    # before anything downstream ever sees a `..`, sidestepping the
+    # restriction entirely rather than working around it with a
+    # different, less-general glob shape.
+    - name: Resolve this action's own checkout root (a clean absolute path, no `.`/`..` segments)
+      id: paths
+      shell: bash
+      run: |
+        root="$(cd "${{ github.action_path }}/../.." && pwd)"
+        echo "repo-root=$root" >>"$GITHUB_OUTPUT"
+
+    - name: Setup Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: ${{ steps.paths.outputs.repo-root }}/package-lock.json
+
+    - name: Install this repo's dependencies (schema-verifier has no package.json of its own)
+      shell: bash
+      working-directory: ${{ steps.paths.outputs.repo-root }}
+      run: npm ci
+
+    - name: Run verify-schema
+      id: verify
+      shell: bash
+      env:
+        SCHEMA_FILE: ${{ inputs.schema-file }}
+        INVARIANTS_FILE: ${{ inputs.invariants-file }}
+        BOUND: ${{ inputs.bound }}
+        JSON_FLAG: ${{ inputs.json }}
+        REPO_ROOT: ${{ steps.paths.outputs.repo-root }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set +e
+        args=(
+          "$REPO_ROOT/node_modules/.bin/tsx"
+          "$ACTION_PATH/src/cli/index.ts"
+          "$SCHEMA_FILE"
+          --invariants "$INVARIANTS_FILE"
+        )
+        if [[ -n "$BOUND" ]]; then
+          args+=(--bound "$BOUND")
+        fi
+        if [[ "$JSON_FLAG" == "true" ]]; then
+          args+=(--json)
+        fi
+
+        "${args[@]}" >verify-output.txt 2>&1
+        code=$?
+        echo "exit-code=$code" >>"$GITHUB_OUTPUT"
+
+        # Multiline-safe $GITHUB_OUTPUT form (a plain key=value would
+        # break the first time verify-schema's own output contains a
+        # newline, which is every non-trivial run) — a random delimiter
+        # per GitHub's own documented pattern for multiline step outputs.
+        delim="verify_schema_output_${RANDOM}${RANDOM}"
+        {
+          echo "output<<$delim"
+          cat verify-output.txt
+          echo "$delim"
+        } >>"$GITHUB_OUTPUT"
+
+        exit 0
+
+    - name: Job summary
+      if: inputs.summary == 'true'
+      shell: bash
+      env:
+        SCHEMA_FILE: ${{ inputs.schema-file }}
+        VERIFY_OUTPUT: ${{ steps.verify.outputs.output }}
+      run: |
+        {
+          echo "### Schema verifier — $SCHEMA_FILE"
+          echo
+          echo '```'
+          echo "$VERIFY_OUTPUT"
+          echo '```'
+        } >>"$GITHUB_STEP_SUMMARY"
+
+    - name: Fail on a real violation or tool error (exit 1 or 3) — 0 and 2 both pass
+      if: inputs.fail-on-error == 'true' && (steps.verify.outputs.exit-code == '1' || steps.verify.outputs.exit-code == '3')
+      shell: bash
+      run: |
+        echo "verify-schema exited ${{ steps.verify.outputs.exit-code }} — see the job summary above (if enabled) for the full output."
+        exit 1

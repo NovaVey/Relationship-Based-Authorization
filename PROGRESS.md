@@ -2830,3 +2830,17 @@ A small, satisfying find along the way: `dependabot-auto-merge.yml`'s own commen
 Verified what's actually verifiable without pushing a real tag to a real repo as a side effect of testing: the SBOM tool run locally produces valid CycloneDX output; the tag-verification bash/jq logic unit-tested against all three real branches (lightweight, unsigned, verified) via a mocked `gh` binary; the D-168 production-install guard re-confirmed unaffected by the new devDependency.
 
 Full account: `docs/DECISIONS.md` D-172.
+
+## Sixth item from the broader backlog: package the schema verifier as a reusable GitHub Action
+
+**Owner:** main agent.
+
+`docs/CAPABILITY-GAPS.md`'s "Package the schema verifier separately" section named three pieces and was explicit that one was cheap: the CLI already takes arbitrary schema/invariant paths, so an `action.yml` wrapper is "comparatively thin work" — the real blocker (other repos' models aren't in this project's DSL) applies to the other two, an OpenFGA front end and a SpiceDB front end. This item ships only the cheap one.
+
+The key insight that made it thin, not a refactor: `tools/schema-verifier` has no `package.json` of its own and deliberately imports across the tool boundary into root `src/schema/dsl/` — normally a hazard for packaging it as a portable unit. It isn't one here, because GitHub's own `uses: <owner>/<repo>/<path>@<ref>` resolution downloads the _entire_ referenced repository into an isolated checkout, not just the subdirectory, and `github.action_path` points into that checkout — so `${{ github.action_path }}/../..` is always this whole repo's root, dependencies included, with zero changes needed to the tool's existing cross-boundary imports.
+
+`tools/schema-verifier/action.yml` wraps `verify-schema` as a composite action (schema-file/invariants-file/bound/json inputs, exit-code/output outputs, a job-summary step, and a fail-on-error gate — every one of the last three overridable). `.github/workflows/schema-verifier.yml`'s own per-PR job was rewired to consume it via a local `uses: ./tools/schema-verifier` reference at its packaged defaults — real dogfooding, not a parallel copy, and the strongest available proof the packaged defaults work in a real CI job.
+
+No `src/` changes at all, so the existing test suite doesn't apply; verification here was YAML-parsing both changed files with a real parser, keeping `format:check`/`lint`/`typecheck` clean throughout, and running the composite action's own shell logic standalone against this repo's real demo schema to confirm it reproduces the already-known-correct result (exit code 2, `HOLDS up to k = 1`) with a well-formed `$GITHUB_OUTPUT`. The one thing that can't prove — that GitHub's own action-resolution mechanism really behaves as described inside a real hosted runner — is what the dogfooded step in this change's own PR proves live.
+
+Full account: `docs/DECISIONS.md` D-173.
