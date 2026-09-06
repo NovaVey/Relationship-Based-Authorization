@@ -390,10 +390,24 @@ wrapper is cheap, the OpenFGA front end is a mapping exercise over a
 dependency you already have, and the SpiceDB front end is the one
 genuinely new parser this needs.
 
-### Close the invariant-language root cause — mischaracterized (the published number is stale)
+### Close the invariant-language root cause — the stale number is now fixed; a genuinely new primitive stays open
+
+**Status: partially closed.** The stale-number half of this section is
+now fixed: `docs/FINDINGS.md` publishes the corrected `8 VIOLATED, 4
+HOLDS` count, with `spicedb-userdefined-roles`'s own flip (`HOLDS up to k
+= 1` → a confirmed, exact `VIOLATED`, once D-151's SMT tier was actually
+re-run against it) recorded there in full, plus a new permanent
+regression guard (`tools/schema-verifier/test/thirdparty-survey.test.ts`)
+pinning all twelve published verdicts so a future drift like this one
+can't happen silently again. The section below is otherwise left as it
+stood before that fix, for context — and its own closing recommendation
+(a schema-level "never satisfiable via any object, anywhere" primitive)
+remains genuinely unbuilt, deliberately scoped out of this pass as
+comparable in size to D-131's own primitive work, not attempted here.
 
 This is worth leading with a correction rather than the gap itself:
-`docs/FINDINGS.md:101` still publishes "7 VIOLATED, 5 HOLDS," but running
+`docs/FINDINGS.md:101` used to publish "7 VIOLATED, 5 HOLDS" (now
+corrected, as described above) — running
 the real `verify-schema` CLI against all twelve
 `tools/schema-verifier/thirdparty/*.authz` fixtures today returns **8
 VIOLATED / 4 HOLDS**. `spicedb-userdefined-roles` (published at
@@ -408,8 +422,8 @@ bounded search that produced that old verdict in
 has re-checked the third-party survey against it since D-139's "zero drift"
 audit the day before (`docs/DECISIONS.md:2251-2268`). No test in
 `tools/schema-verifier/test/` pins this fixture's verdict either, so
-nothing would have caught the flip. This needs its own follow-up: a
-documented re-run of the survey against the SMT/CHC tiers, and a
+nothing would have caught the flip. **Done, per the "Status" note above:**
+a documented re-run of the survey against the SMT/CHC tiers, and a
 regression test pinning the new verdict.
 
 That correction doesn't undercut the underlying recommendation — if
