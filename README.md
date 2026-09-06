@@ -589,6 +589,32 @@ until it's completely done — silence that's easy to mistake for a hang.
 Add `--progress <n>` to get a `checked X/Y queries` line on stderr every
 `n` queries: `authz soundness run --dry-run --progress 500`.
 
+### Or, with Docker — no local Node or Postgres install at all
+
+```bash
+git clone https://github.com/NovaVey/Relationship-Based-Authorization
+cd Relationship-Based-Authorization
+cp .env.example .env
+docker compose up -d              # postgres + the built service, migrations applied automatically
+docker compose exec app npm run seed:example   # one-off — see below for why this isn't automatic
+curl -s -H "Authorization: Bearer local-dev-only-admin-key-not-for-production-use" \
+  -X POST http://localhost:3000/check \
+  -d '{"subject":{"ns":"user","id":"dana"},"relation":"edit","object":{"ns":"document","id":"eng_handbook"}}'
+```
+
+Two commands, deliberately, not one: `docker compose up -d` builds the
+image (`Dockerfile`) and starts `postgres` plus `app` — `app`'s own `CMD`
+runs `authz doctor` (applies every migration, exits nonzero on a real
+failure) then `authz serve`, exactly `npm start`'s own definition — but
+seeding the demo graph stays a separate `docker compose exec` step on
+purpose: `publishSchema` always inserts a new `namespace_configs` version
+row, never a no-op on identical content, so running it automatically on
+every container restart would pile up redundant schema versions forever
+instead of a clean, one-time seed. `docker-compose.yml`'s own `app`
+service ships a local-only `ADMIN_API_KEY` placeholder (never reuse it
+anywhere real) so the write routes and `/check` above work with zero
+further setup.
+
 ### Troubleshooting: `authz doctor` says `Postgres: unreachable`
 
 `cp .env.example .env` alone leaves `DATABASE_URL` pointing at the
@@ -597,10 +623,13 @@ database. `doctor` reporting `Postgres: unreachable` means exactly that:
 nothing is listening wherever `DATABASE_URL` currently points. Three ways
 to fix it, in order of least setup required:
 
-1. **`docker compose up -d`** — this repo ships a `docker-compose.yml`
-   with credentials matched to `.env.example`'s own placeholder, so if you
-   haven't edited `DATABASE_URL` yet, this needs no further changes at
-   all. Requires Docker; nothing else.
+1. **`docker compose up -d postgres`** — this repo ships a
+   `docker-compose.yml` with credentials matched to `.env.example`'s own
+   placeholder, so if you haven't edited `DATABASE_URL` yet, this needs no
+   further changes at all. Requires Docker; nothing else. (Naming the
+   service matters here — bare `docker compose up -d` also starts the
+   `app` service below, which is the point if you want the whole stack
+   containerized rather than running from source against a bare Postgres.)
 2. **A free hosted Postgres** — [Railway](https://railway.com),
    [Neon](https://neon.tech), or [Supabase](https://supabase.com) all have
    free tiers. Create a project, copy the connection string it gives you

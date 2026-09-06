@@ -85,6 +85,23 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      # D-168 (docs/DECISIONS.md): `npm ci` above installs devDependencies
+      # too, so this job's own `npm run build` step can't catch a built
+      # command that only works because some devDependency happens to
+      # already be in node_modules — exactly what happened to `fast-check`
+      # (a real runtime need of `src/cli/index.ts`'s eagerly-imported
+      # `soundness` command, misclassified as dev-only) until a genuine
+      # production-only install caught it live. `--help` needs no
+      # DATABASE_URL and no real database — Commander's own module-level
+      # command registration already imports every command file (this
+      # one included) before it ever parses argv, so this exercises the
+      # identical import graph `authz doctor`/`authz serve` would.
+      - name: Confirm the built CLI starts with only production dependencies installed
+        run: |
+          rm -rf node_modules
+          npm ci --omit=dev
+          node dist/cli/index.js --help
+
   # Not in the required status checks list — proves the isolation suite's
   # claims against a real Postgres-backed tuple store, not just against a
   # naive in-memory oracle (a real, non-`.todo()` suite as of Phase 2/4;

@@ -1,14 +1,26 @@
-# Local Postgres 16 for development — the one thing "Try it yourself" in
-# the README can't give you by cloning this repo alone (see .env.example's
-# own comment: "set DATABASE_URL to any reachable Postgres 16+"). This file
-# is that "any reachable Postgres" for anyone who doesn't already have one.
+# Postgres 16 plus the service itself — `docker compose up -d` alone now
+# takes a clean clone from "nothing running" to "authz serve reachable on
+# :3000, migrations applied" in one command (see docs/CAPABILITY-GAPS.md's
+# "A Dockerfile" section for why this didn't exist before: this file used
+# to bring up only Postgres, leaving the service itself as several manual
+# `npx tsx`/`npm run` steps — still true if you'd rather run the service
+# from source against this same Postgres, see README's own "Try it
+# yourself"). Seeding the demo graph is deliberately a separate, one-off
+# command (`docker compose exec app npm run seed:example`), not part of
+# `up` or the image's own CMD — `publishSchema` (`src/schema/publish.ts`)
+# always inserts a new `namespace_configs` version row, never a no-op on
+# identical content, so re-running it on every container restart would
+# pile up redundant versions forever instead of leaving a clean, one-time
+# seed.
 #
-# Credentials here are deliberately identical to .env.example's own
-# DATABASE_URL placeholder (postgres://user:password@localhost:5432/authz_service)
+# `postgres` credentials here are deliberately identical to .env.example's
+# own DATABASE_URL placeholder (postgres://user:password@localhost:5432/authz_service)
 # — `cp .env.example .env && docker compose up -d` needs zero further edits
-# to work. Not meant for anything but local development; never use this
-# password anywhere real (Railway/hosted Postgres for that — see the
-# README's own Troubleshooting section).
+# to work whether you run the service in this compose stack or from source
+# against it. Not meant for anything but local development; never use this
+# password, or `app`'s own placeholder ADMIN_API_KEY below, anywhere real
+# (Railway/hosted Postgres for that — see the README's own Troubleshooting
+# section).
 services:
   postgres:
     image: postgres:16
@@ -26,6 +38,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # `postgres`, the service name above, not `localhost` — the only
+      # difference from .env.example's own placeholder, since this
+      # container and the `postgres` one share a private compose network,
+      # not a host loopback interface.
+      DATABASE_URL: postgres://user:password@postgres:5432/authz_service
+      PORT: 3000
+      NODE_ENV: development
+      # Local-only placeholder, 32+ characters (src/config/env.ts rejects
+      # anything shorter) so the write routes (`POST /tuples`, `POST
+      # /schema/publish`) and, since D-064, every read route too, actually
+      # work out of the box — never reuse this value anywhere real.
+      ADMIN_API_KEY: local-dev-only-admin-key-not-for-production-use
+    ports:
+      - '3000:3000'
 
 volumes:
   authz-postgres-data:
