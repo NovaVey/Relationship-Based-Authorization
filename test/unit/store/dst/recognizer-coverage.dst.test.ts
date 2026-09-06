@@ -52,6 +52,7 @@ import { MIGRATIONS_LOCK_CLASSID, MIGRATIONS_LOCK_OBJID } from '../../../../src/
 import {
   rebuildRelationMembershipIndex,
   lookupRelationMembershipIndex,
+  fetchReverseIndexCandidates,
   RELATION_INDEX_REFRESH_LOCK_CLASSID,
   RELATION_INDEX_REFRESH_LOCK_OBJID,
 } from '../../../../src/store/relation-index.js';
@@ -125,10 +126,15 @@ describe('the SQL-shape registry — an exact-count tripwire (D5, D-102)', () =>
     // which is what `registeredShapeCount()` actually measures) is 7. This
     // was a genuine off-by-one in the design document's own count, found
     // while implementing it and disclosed here rather than silently
-    // adjusted.** If this fails, either a shape was added without extending
+    // adjusted.** 22 as of D-175 (`docs/REVERSE-LOOKUP-PROPOSAL.md`):
+    // `fetchReverseIndexCandidates`'s own subject-first candidate query is
+    // one further new, textually-distinct shape — its other two reads
+    // (the watermark read, `currentToken`'s own max-token read) are both
+    // exact-text reuses of shapes already registered above, not new
+    // entries. If this fails, either a shape was added without extending
     // the manifest below, or one was removed without shrinking it — either
     // way, fix the mismatch, don't just update this number.
-    expect(registeredShapeCount()).toBe(21);
+    expect(registeredShapeCount()).toBe(22);
   });
 });
 
@@ -630,5 +636,43 @@ describe('the manifest — every real production call site this fake claims to m
       { atToken: flip.token, useRelationIndex: true },
     );
     expect(result).toMatchObject({ allowed: true, indexHit: true });
+  });
+
+  it('fetchReverseIndexCandidates — the subject-first candidate read (D-175, the 22nd shape)', async () => {
+    const state = createFakeStoreState();
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'document'));
+    seedNamespaceConfig(state, compileNamespace(USERSET_SCHEMA_SOURCE, 'group'));
+    const source = createFakeConnectionSource(state);
+    await writeTuple(source, {
+      objectNs: 'document',
+      objectId: 'readme',
+      relation: 'viewer',
+      subjectNs: 'group',
+      subjectId: 'eng',
+      subjectRelation: 'member',
+    });
+    const flip = await writeTuple(source, {
+      objectNs: 'group',
+      objectId: 'eng',
+      relation: 'member',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+    expect(flip.ok).toBe(true);
+    if (!flip.ok) return;
+    const rebuild = await rebuildRelationMembershipIndex(source);
+    expect(rebuild.published).toBe(true);
+
+    // A plain connection source, matching this function's own real contract
+    // (no surrounding transaction, no SAVEPOINT — see its own doc comment
+    // for why, unlike lookupRelationMembershipIndex above).
+    const result = await fetchReverseIndexCandidates(
+      source,
+      { ns: 'user', id: 'alice' },
+      'viewer',
+      'document',
+      5,
+    );
+    expect(result).toEqual({ hit: true, objectIds: ['readme'], truncated: false });
   });
 });

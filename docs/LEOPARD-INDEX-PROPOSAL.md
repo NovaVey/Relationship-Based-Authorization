@@ -1574,3 +1574,19 @@ forward rather than silently resolved by omission:
   survive untouched) — genuinely valuable, materially larger than this
   proposal's own must-ship test plan, deferred to whoever owns the
   eventual implementation to decide against real priorities at that time.
+- **Answered: a `listObjects`-accelerating reverse lookup, reusing this
+  table's own data in the other direction, is a real, genuinely new
+  fourth direction** — not "Phase B" (unpinned-check acceleration;
+  DENY-capable root-completeness/Candidate D, both still open, both still
+  unbuilt above), and not any other item already named on this list.
+  Built as its own separate proposal (`docs/REVERSE-LOOKUP-PROPOSAL.md`,
+  `docs/DECISIONS.md` D-175): one new secondary index on this same
+  `relation_membership_index` table (no new table), a five-gate
+  discipline distinct from this table's own forward-lookup gates
+  (Candidates C/F/G above), and its own soundness argument (every
+  candidate it proposes is still independently re-verified by
+  `productionCheck` before `listObjects` ever reports it, so its risk axis
+  is completeness, never soundness — a materially easier bar than this
+  table's own forward direction, where a hit _is_ the final answer). Its
+  own "shadow-table-and-rename" and "SAVEPOINT/DST-recognizer" notes are
+  cross-referenced back to the bullets above, rather than duplicated.

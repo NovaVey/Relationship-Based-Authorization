@@ -931,6 +931,59 @@ const relationMembershipIndexRowReadHandler: ShapeHandler = ({
   return { rows: [{ via_path: row.viaPath, min_expires_at: row.minExpiresAt }], rowCount: 1 };
 };
 
+/**
+ * `fetchReverseIndexCandidates`'s (D-175, `src/store/relation-index.ts`) own
+ * candidate query — the subject-first counterpart to
+ * `relationMembershipIndexRowReadHandler` above, reading the same table in
+ * the other direction. Two deliberate differences from that handler, both
+ * mirroring the real SQL exactly rather than reusing its filtering:
+ *
+ * 1. **No `isTupleLive`/`min_expires_at` filter at all** — the real query
+ *    (`fetchReverseIndexCandidates`'s own literal) doesn't have one either.
+ *    An expired candidate row is harmless here: every candidate this
+ *    function returns still passes through the real, unmodified
+ *    `productionCheck` before `listObjects` ever reports it `allowed`, so a
+ *    stale-but-since-expired candidate is simply filtered out one layer up
+ *    — filtering it here too would just be redundant, not more correct.
+ * 2. **`isVisible` still applies** — this is a genuine MVCC snapshot
+ *    question (Postgres still gives a standalone autocommit statement its
+ *    own consistent snapshot), unrelated to the liveness question above;
+ *    dropping it would let this handler see a row a concurrent, not-yet-
+ *    committed rebuild has inserted, which no real `SELECT` ever could.
+ *
+ * Sorted by `objectId` ascending and capped at the caller's own `limit`
+ * param (`$5`, always `realLimit + 1` — see that function's own doc comment
+ * for the overflow-detection trick this mirrors, not reimplements).
+ */
+const relationMembershipIndexSubjectReadHandler: ShapeHandler = ({
+  state,
+  params,
+  visibleAsOf,
+}) => {
+  const [subjectNs, subjectId, relation, objectNs, limit] = params as [
+    string,
+    string,
+    string,
+    string,
+    number,
+  ];
+  const matches = state.relationMembershipIndex
+    .filter(
+      (r) =>
+        r.subjectNs === subjectNs &&
+        r.subjectId === subjectId &&
+        r.relation === relation &&
+        r.objectNs === objectNs &&
+        isVisible(r.commitSeq, visibleAsOf),
+    )
+    .sort((a, b) => (a.objectId < b.objectId ? -1 : a.objectId > b.objectId ? 1 : 0))
+    .slice(0, Number(limit));
+  return {
+    rows: matches.map((r) => ({ object_id: r.objectId })),
+    rowCount: matches.length,
+  };
+};
+
 // ---------------------------------------------------------------------------
 // The registry itself.
 // ---------------------------------------------------------------------------
@@ -1145,6 +1198,16 @@ const SHAPES = new Map<string, ShapeHandler>([
         and subject_ns = $4 and subject_id = $5
         and (min_expires_at is null or min_expires_at > now())`),
     relationMembershipIndexRowReadHandler,
+  ],
+  [
+    // fetchReverseIndexCandidates's own candidate query (D-175) — must
+    // match that literal exactly.
+    normalizeSql(`select object_id from relation_membership_index
+        where subject_ns = $1 and subject_id = $2
+          and relation = $3 and object_ns = $4
+        order by object_id asc
+        limit $5`),
+    relationMembershipIndexSubjectReadHandler,
   ],
 ]);
 

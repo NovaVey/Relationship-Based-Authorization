@@ -196,6 +196,8 @@ import {
   type ProductionCheckOptions,
 } from '../resolve/production/resolver.js';
 import { expand, type ExpandNode, type ExpandOptions, type SubjectRef } from './expand.js';
+import { fetchReverseIndexCandidates } from '../store/relation-index.js';
+import { getLatestNamespaceConfig } from '../schema/publish.js';
 
 /** Re-exported from `src/resolve/production/resolver.ts` rather than redeclared — matching `src/audit/checks.ts`'s own established precedent of reusing the resolver's own `EntityRef` for a thin wrapper file, not `resolver.ts`/`expand.ts`'s own mutual "independently redeclare, never import" discipline (that discipline exists specifically for the reference-vs-production resolver isolation boundary, §6.2 — `list.ts` is neither of those two resolvers, it's a downstream consumer of both, so nothing about that boundary applies here). Structurally identical to `expand.ts`'s own `EntityRef` regardless (both are plain `{ns, id}`), so passing one where the other's declared type is expected (as `listUsers` does, handing this file's `EntityRef` values to `expand()`) type-checks without any conversion. */
 export type { EntityRef };
@@ -236,6 +238,17 @@ export interface ListObjectsOptions {
   atToken?: number;
   /** Overrides `env.CHECK_MAX_DEPTH` for every per-candidate `productionCheck` call — same option, same meaning as `ProductionCheckOptions.maxDepth`. */
   maxDepth?: number;
+  /**
+   * Overrides `env.LEOPARD_INDEX_ENABLED` for the reverse-lookup candidate
+   * accelerant (`docs/DECISIONS.md` D-175) — mirrors
+   * `ProductionCheckOptions.useRelationIndex` exactly, for the identical
+   * reason: `env` is parsed once at module load
+   * (`src/config/env.ts`), so a test can't toggle the env var per case and
+   * needs a per-call override instead. Not exposed over HTTP or the CLI —
+   * same as `ProductionCheckOptions.useRelationIndex`, the real, in-
+   * production toggle stays `LEOPARD_INDEX_ENABLED` alone.
+   */
+  useRelationIndex?: boolean;
 }
 
 export interface ListObjectsResult {
@@ -334,18 +347,82 @@ async function checkCandidatesConcurrently(
 }
 
 /**
+ * Gates 1, 4, and 5 of `docs/REVERSE-LOOKUP-PROPOSAL.md`'s reverse-lookup
+ * accelerant (D-175) — deliberately kept here, not in
+ * `src/store/relation-index.ts`, because they're schema-shaped
+ * (`getLatestNamespaceConfig`) and env-shaped
+ * (`env.LEOPARD_INDEX_ENABLED`/`options.useRelationIndex`) checks, neither
+ * of which that file can perform without either importing `schema/`
+ * (running the `store/` → `schema/` dependency graph backwards — see
+ * `relation-index.ts`'s own top-of-file comment for the identical reasoning
+ * it already gives for never importing `resolve/`) or duplicating
+ * `resolver.ts`'s own env/override split into a second file. Mirrors that
+ * split exactly: this function decides *whether to try*; gates 2 and 3
+ * (freshness, empty/error-is-a-miss) live in
+ * `fetchReverseIndexCandidates` itself, the same way `resolver.ts` decides
+ * *whether to call* `lookupRelationMembershipIndex` and that function owns
+ * its own freshness/depth gates.
+ *
+ * Returns `null` (never attempted) rather than `{hit: false}` specifically
+ * so `listObjects` below can tell "gates 1/4/5 already ruled this out, skip
+ * straight to the live scan" apart from "gates 1/4/5 passed, gate 2 or 3
+ * didn't" — not a distinction anything currently acts on differently, but
+ * the honest return type for what this function actually decided.
+ */
+async function tryReverseIndexCandidates(
+  pool: ConnectionSource,
+  subject: EntityRef,
+  relationOrPermission: string,
+  objectNs: string,
+  options: ListObjectsOptions,
+): Promise<{ ids: string[]; truncated: boolean } | null> {
+  const enabled = options.useRelationIndex ?? env.LEOPARD_INDEX_ENABLED === 'true';
+  if (!enabled) return null; // gate 1
+
+  const config = await getLatestNamespaceConfig(pool, objectNs);
+  const relation = config?.relations[relationOrPermission];
+  if (!relation) return null; // gate 4 — no published schema, or a computed permission
+
+  if (relation.subjectTypes.some((t) => t.wildcard === true)) return null; // gate 5
+
+  const result = await fetchReverseIndexCandidates(
+    pool,
+    subject,
+    relationOrPermission,
+    objectNs,
+    LIST_OBJECTS_MAX_CANDIDATES,
+  );
+  if (!result.hit) return null; // gates 2/3 — stale, empty, or errored
+  return { ids: result.objectIds, truncated: result.truncated };
+}
+
+/**
  * Every object in `objectNs` that `subject` has `relationOrPermission` on —
  * the reverse of `/check`. See this file's own top-of-file doc comment for
  * the soundness argument, the `LIST_OBJECTS_MAX_CANDIDATES` cap, and the
  * disclosed inefficiency/incompleteness limitations this function accepts
  * rather than hides.
  *
+ * The candidate list is `fetchCandidateObjectIds`'s own unmodified,
+ * always-live, namespace-wide scan **unless** the reverse-lookup
+ * accelerant (`docs/DECISIONS.md` D-175) both applies and actually engages
+ * — see `tryReverseIndexCandidates` above for the gates that decide that.
+ * Either way, every candidate id still passes through the identical
+ * `checkCandidatesConcurrently` real check below: the accelerant only ever
+ * narrows *which* ids get checked, never what a check itself decides, so
+ * this function's own existing soundness argument (an object with zero
+ * tuples naming it as object can never be `allowed: true`) is unaffected
+ * by which candidate source ran.
+ *
  * Never throws for an ordinary "no results" case (an empty `objectNs`, a
  * `subject` with zero access anywhere) — returns `{ objects: [],
  * truncated: false }`. A genuinely unreachable database still throws,
  * unchanged from `productionCheck`'s own fail-closed-on-infrastructure-
  * failure contract; nothing in this function catches or swallows a `pg`
- * connection error.
+ * connection error. (`tryReverseIndexCandidates`'s own accelerant is the
+ * one exception, deliberately: a failed *accelerant* attempt is a miss,
+ * per gate 3, never a thrown error this function would need to catch
+ * itself.)
  */
 export async function listObjects(
   pool: ConnectionSource,
@@ -354,7 +431,14 @@ export async function listObjects(
   objectNs: string,
   options: ListObjectsOptions = {},
 ): Promise<ListObjectsResult> {
-  const { ids, truncated } = await fetchCandidateObjectIds(pool, objectNs);
+  const accelerated = await tryReverseIndexCandidates(
+    pool,
+    subject,
+    relationOrPermission,
+    objectNs,
+    options,
+  );
+  const { ids, truncated } = accelerated ?? (await fetchCandidateObjectIds(pool, objectNs));
 
   const checkOptions: ProductionCheckOptions = {
     ...(options.atToken !== undefined ? { atToken: options.atToken } : {}),

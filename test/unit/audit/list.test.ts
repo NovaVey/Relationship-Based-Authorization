@@ -23,18 +23,44 @@
  * subtract" tests below, and `src/audit/list.ts`'s own `subtractMemberSets`
  * doc comment for the one genuinely co-finite shape that refuses instead of
  * approximating.
+ *
+ * D-175 (reverse-lookup accelerant, `docs/REVERSE-LOOKUP-PROPOSAL.md`) added
+ * a third block, at the bottom of this file: DB-free coverage for
+ * `listObjects`'s own gates 1 (env/per-call override), 4 (schema lookup —
+ * undeclared namespace, or a permission rather than a bare relation), and 5
+ * (a wildcard-capable subject type) — the three gates that own function
+ * `tryReverseIndexCandidates` deliberately keeps in *this* file rather than
+ * `src/store/relation-index.ts` (see that function's own doc comment for
+ * the dependency-direction reasoning). Gates 2 and 3 (freshness,
+ * empty/error-is-a-miss) are `fetchReverseIndexCandidates`'s own concern and
+ * are covered where that function lives —
+ * `test/unit/store/dst/relation-index-reverse-lookup.dst.test.ts`. Follows
+ * `test/unit/audit/checks.test.ts`'s own established `vi.spyOn`-on-module-
+ * namespace pattern: `productionCheck`, `getLatestNamespaceConfig`, and
+ * `fetchReverseIndexCandidates` are each mocked at their own module
+ * boundary, `listObjects` itself is real and unmocked, and a tiny fake
+ * `ConnectionSource` stands in for Postgres only for the one raw query
+ * `listObjects` can still issue directly when the accelerant doesn't engage
+ * (`fetchCandidateObjectIds`'s own namespace-wide scan).
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   evaluateExpandNode,
   isUnenumerable,
+  listObjects,
   type EntityRef,
   type EvaluateExpandResult,
   type MemberSet,
   type SubjectRef,
 } from '../../../src/audit/list.js';
 import type { ExpandNode } from '../../../src/audit/expand.js';
+import * as productionModule from '../../../src/resolve/production/resolver.js';
+import type { ProductionCheckResult } from '../../../src/resolve/production/resolver.js';
+import * as publishModule from '../../../src/schema/publish.js';
+import * as relationIndexModule from '../../../src/store/relation-index.js';
+import type { ConnectionSource, QueryResultLike } from '../../../src/store/query-executor.js';
+import type { NamespaceConfig } from '../../../src/schema/dsl/types.js';
 
 function ref(ns: string, id: string): EntityRef {
   return { ns, id };
@@ -489,5 +515,193 @@ describe('evaluateExpandNode — the pure recursive set-evaluation function list
     // bob is redundant once 'user' is wildcard-covered, dropped by the
     // same cleanup unionMemberSets already performs.
     expect(set.concrete.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listObjects — gates 1, 4, 5 of the reverse-lookup accelerant (D-175).
+// See this file's own top-of-file doc comment for why these three, and not
+// gates 2/3, belong here.
+// ---------------------------------------------------------------------------
+
+const ALICE: EntityRef = { ns: 'user', id: 'alice' };
+const DOCUMENT_NS = 'document';
+const VIEWER = 'viewer';
+
+const ALLOWED = (id: string): ProductionCheckResult => ({
+  allowed: true,
+  path: { kind: 'directGrant', object: { ns: DOCUMENT_NS, id }, relation: VIEWER, subject: ALICE },
+  depth: 1,
+  touchedExpiringTuple: false,
+});
+
+function bareRelationConfig(subjectTypes: NamespaceConfig['relations'][string]['subjectTypes']) {
+  const config: NamespaceConfig = {
+    namespace: DOCUMENT_NS,
+    relations: { [VIEWER]: { kind: 'relation', name: VIEWER, subjectTypes } },
+    permissions: {},
+  };
+  return config;
+}
+
+/**
+ * A fake `ConnectionSource` standing in for Postgres, used only for the one
+ * raw query `listObjects` can still issue directly — `fetchCandidateObjectIds`'s
+ * own namespace-wide scan, exercised whenever a gate below stops the
+ * accelerant from engaging. Every call is counted (`calls`) so a test can
+ * assert this fallback scan did or didn't run, matching this codebase's own
+ * "prove the negative, don't just assume it" discipline (`checks.test.ts`'s
+ * own `fakePool` doc comment). `.connect()` throws — `listObjects` never
+ * needs a dedicated connection, only plain `.query()`.
+ */
+function fakePool(candidateObjectIds: string[]): ConnectionSource & { calls: number } {
+  const pool = {
+    calls: 0,
+    async query<Row = Record<string, unknown>>(): Promise<QueryResultLike<Row>> {
+      pool.calls++;
+      const rows = candidateObjectIds.map((object_id) => ({ object_id }));
+      return { rows: rows as unknown as Row[], rowCount: rows.length };
+    },
+    async connect(): Promise<never> {
+      throw new Error('fakePool.connect() should never be called by listObjects');
+    },
+  };
+  return pool;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('listObjects — gate 1 (env/per-call useRelationIndex override)', () => {
+  it('useRelationIndex:false skips the accelerant entirely — getLatestNamespaceConfig and fetchReverseIndexCandidates are never called', async () => {
+    const getConfigSpy = vi.spyOn(publishModule, 'getLatestNamespaceConfig');
+    const fetchCandidatesSpy = vi.spyOn(relationIndexModule, 'fetchReverseIndexCandidates');
+    vi.spyOn(productionModule, 'productionCheck').mockImplementation(async (_pool, _subj, object) =>
+      ALLOWED(object.id),
+    );
+    const pool = fakePool(['doc1']);
+
+    const result = await listObjects(pool, ALICE, VIEWER, DOCUMENT_NS, { useRelationIndex: false });
+
+    expect(getConfigSpy).not.toHaveBeenCalled();
+    expect(fetchCandidatesSpy).not.toHaveBeenCalled();
+    expect(pool.calls).toBe(1); // the raw fallback scan did run
+    expect(result).toEqual({ objects: [{ ns: DOCUMENT_NS, id: 'doc1' }], truncated: false });
+  });
+});
+
+describe('listObjects — gate 4 (schema lookup: undeclared namespace, or a permission rather than a bare relation)', () => {
+  it('useRelationIndex:true but no published schema for the namespace — a miss, never calls fetchReverseIndexCandidates', async () => {
+    vi.spyOn(publishModule, 'getLatestNamespaceConfig').mockResolvedValue(undefined);
+    const fetchCandidatesSpy = vi.spyOn(relationIndexModule, 'fetchReverseIndexCandidates');
+    vi.spyOn(productionModule, 'productionCheck').mockImplementation(async (_pool, _subj, object) =>
+      ALLOWED(object.id),
+    );
+    const pool = fakePool(['doc1']);
+
+    const result = await listObjects(pool, ALICE, VIEWER, DOCUMENT_NS, { useRelationIndex: true });
+
+    expect(fetchCandidatesSpy).not.toHaveBeenCalled();
+    expect(pool.calls).toBe(1);
+    expect(result).toEqual({ objects: [{ ns: DOCUMENT_NS, id: 'doc1' }], truncated: false });
+  });
+
+  it('useRelationIndex:true, but the name is a permission, not a bare relation (permissions and relations are separate maps — a permission name is never in `relations`) — a miss, never calls fetchReverseIndexCandidates', async () => {
+    const config: NamespaceConfig = {
+      namespace: DOCUMENT_NS,
+      relations: {},
+      permissions: {
+        view: {
+          kind: 'permission',
+          name: 'view',
+          rewrite: { kind: 'computedUserset', name: VIEWER },
+        },
+      },
+    };
+    vi.spyOn(publishModule, 'getLatestNamespaceConfig').mockResolvedValue(config);
+    const fetchCandidatesSpy = vi.spyOn(relationIndexModule, 'fetchReverseIndexCandidates');
+    vi.spyOn(productionModule, 'productionCheck').mockImplementation(async (_pool, _subj, object) =>
+      ALLOWED(object.id),
+    );
+    const pool = fakePool(['doc1']);
+
+    const result = await listObjects(pool, ALICE, 'view', DOCUMENT_NS, { useRelationIndex: true });
+
+    expect(fetchCandidatesSpy).not.toHaveBeenCalled();
+    expect(pool.calls).toBe(1);
+    expect(result).toEqual({ objects: [{ ns: DOCUMENT_NS, id: 'doc1' }], truncated: false });
+  });
+});
+
+describe('listObjects — gate 5 (a wildcard-capable subject type always misses the accelerant)', () => {
+  it('the relation accepts a wildcard subject type — a miss, never calls fetchReverseIndexCandidates', async () => {
+    vi.spyOn(publishModule, 'getLatestNamespaceConfig').mockResolvedValue(
+      bareRelationConfig([{ namespace: 'user', wildcard: true }]),
+    );
+    const fetchCandidatesSpy = vi.spyOn(relationIndexModule, 'fetchReverseIndexCandidates');
+    vi.spyOn(productionModule, 'productionCheck').mockImplementation(async (_pool, _subj, object) =>
+      ALLOWED(object.id),
+    );
+    const pool = fakePool(['doc1']);
+
+    const result = await listObjects(pool, ALICE, VIEWER, DOCUMENT_NS, { useRelationIndex: true });
+
+    expect(fetchCandidatesSpy).not.toHaveBeenCalled();
+    expect(pool.calls).toBe(1);
+    expect(result).toEqual({ objects: [{ ns: DOCUMENT_NS, id: 'doc1' }], truncated: false });
+  });
+
+  it('a relation with only non-wildcard subject types passes gate 5 and does call fetchReverseIndexCandidates', async () => {
+    vi.spyOn(publishModule, 'getLatestNamespaceConfig').mockResolvedValue(
+      bareRelationConfig([{ namespace: 'user' }]),
+    );
+    const fetchCandidatesSpy = vi
+      .spyOn(relationIndexModule, 'fetchReverseIndexCandidates')
+      .mockResolvedValue({ hit: false });
+    vi.spyOn(productionModule, 'productionCheck').mockImplementation(async (_pool, _subj, object) =>
+      ALLOWED(object.id),
+    );
+    const pool = fakePool(['doc1']);
+
+    const result = await listObjects(pool, ALICE, VIEWER, DOCUMENT_NS, { useRelationIndex: true });
+
+    expect(fetchCandidatesSpy).toHaveBeenCalledTimes(1);
+    // Gate 2/3 (fetchReverseIndexCandidates itself) missed here, so
+    // listObjects still falls back to the raw scan — proving gate 5 alone
+    // doesn't block the call, only a *wildcard* subject type does.
+    expect(pool.calls).toBe(1);
+    expect(result).toEqual({ objects: [{ ns: DOCUMENT_NS, id: 'doc1' }], truncated: false });
+  });
+});
+
+describe('listObjects — the accelerant actually engaging (all five gates pass)', () => {
+  it('a fetchReverseIndexCandidates hit replaces the raw candidate scan entirely — the raw scan never runs, and its own truncated flag propagates unchanged', async () => {
+    vi.spyOn(publishModule, 'getLatestNamespaceConfig').mockResolvedValue(
+      bareRelationConfig([{ namespace: 'user' }]),
+    );
+    vi.spyOn(relationIndexModule, 'fetchReverseIndexCandidates').mockResolvedValue({
+      hit: true,
+      objectIds: ['doc1', 'doc2'],
+      truncated: true,
+    });
+    const productionCheckSpy = vi
+      .spyOn(productionModule, 'productionCheck')
+      .mockImplementation(async (_pool, _subj, object) => ALLOWED(object.id));
+    const pool = fakePool(['some-other-doc-the-raw-scan-would-have-found']);
+
+    const result = await listObjects(pool, ALICE, VIEWER, DOCUMENT_NS, { useRelationIndex: true });
+
+    expect(pool.calls).toBe(0); // the raw scan never ran at all
+    expect(productionCheckSpy).toHaveBeenCalledTimes(2);
+    const checkedIds = productionCheckSpy.mock.calls.map(([, , object]) => object.id).sort();
+    expect(checkedIds).toEqual(['doc1', 'doc2']);
+    expect(result).toEqual({
+      objects: [
+        { ns: DOCUMENT_NS, id: 'doc1' },
+        { ns: DOCUMENT_NS, id: 'doc2' },
+      ],
+      truncated: true, // the accelerant's own value, not recomputed
+    });
   });
 });

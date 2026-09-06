@@ -780,22 +780,22 @@ of this project has.
 `authz serve` exposes the same operations over HTTP, plus two bulk
 reverse-lookup operations with no CLI command of their own:
 
-| Method   | Route             | Auth                                  | Rate limit | Does                                                                                                        |
-| -------- | ----------------- | ------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
-| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                                                            |
-| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-152)                                  |
-| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                                                               |
-| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136)                                                          |
-| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                                                        |
-| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                                                        |
-| `POST`   | `/tuples/batch`   | `ADMIN_API_KEY`                       | 20/min     | Up to 50 tuple writes in one call, order-preserving; one bad tuple never sinks the others (D-170)           |
-| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                                                     |
-| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)                                           |
-| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                                                       |
-| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version                                     |
-| `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                                                     |
-| `GET`    | `/metrics`        | `ADMIN_API_KEY` only, unscoped        | 200/min    | Prometheus text exposition — check counts, cache hit rate, Leopard-index hits, uncertain-check rate (D-169) |
-| `GET`    | `/watch`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min\*  | Live SSE stream of every tuple write/delete from `?since=<token>` (or "now") forward (D-174)                |
+| Method   | Route             | Auth                                  | Rate limit | Does                                                                                                                  |
+| -------- | ----------------- | ------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/check`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Is `subject` related to `object` via `relation`?                                                                      |
+| `POST`   | `/check/batch`    | `ADMIN_API_KEY` or `READONLY_API_KEY` | 20/min     | Up to 50 checks in one call, order-preserving, independent results (D-152)                                            |
+| `POST`   | `/expand`         | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Resolved subject tree for `object`#`relation`                                                                         |
+| `POST`   | `/list-objects`   | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every object a subject has a permission on (D-136), reverse-lookup-accelerated when the Leopard index is warm (D-175) |
+| `POST`   | `/list-users`     | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min    | Every subject with a permission on an object (D-136)                                                                  |
+| `POST`   | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Write a relation tuple (`expiresAt` optional, D-150)                                                                  |
+| `POST`   | `/tuples/batch`   | `ADMIN_API_KEY`                       | 20/min     | Up to 50 tuple writes in one call, order-preserving; one bad tuple never sinks the others (D-170)                     |
+| `DELETE` | `/tuples`         | `ADMIN_API_KEY`                       | 20/min     | Delete a relation tuple                                                                                               |
+| `POST`   | `/schema/compile` | none                                  | 100/min    | Parse + compile a namespace DSL source string (no write, no gate)                                                     |
+| `POST`   | `/schema/publish` | `ADMIN_API_KEY`                       | 20/min     | Compile and publish a new `namespace_configs` version                                                                 |
+| `GET`    | `/health`         | none                                  | 300/min    | Database connectivity and every currently-published namespace's version                                               |
+| `GET`    | `/openapi.json`   | none                                  | 100/min    | This table, as a hand-maintained OpenAPI 3.0.3 document                                                               |
+| `GET`    | `/metrics`        | `ADMIN_API_KEY` only, unscoped        | 200/min    | Prometheus text exposition — check counts, cache hit rate, Leopard-index hits, uncertain-check rate (D-169)           |
+| `GET`    | `/watch`          | `ADMIN_API_KEY` or `READONLY_API_KEY` | 200/min\*  | Live SSE stream of every tuple write/delete from `?since=<token>` (or "now") forward (D-174)                          |
 
 `READONLY_API_KEY` (D-138) is a second, narrower credential: it authorizes
 the five read/list routes above (including `/watch`) without also granting
@@ -826,14 +826,14 @@ same real example data.
 src/
   config/      validated environment loading
   schema/      the namespace DSL — publish.ts, diff.ts (schema-diff safety check, D-149), plus dsl/ (parser, compiler, types, errors)
-  store/       migrations/ (the real .sql files), the tuple store, consistency tokens, relation-index.ts (the offline Leopard-index rebuild + lookup, D-163)
+  store/       migrations/ (the real .sql files), the tuple store, consistency tokens, relation-index.ts (the offline Leopard-index rebuild + lookup, D-163; plus the reverse-lookup accelerant reusing the same table, D-175)
     dst/     deterministic simulation testing — the in-memory fake storage seam (docs/DST-PROPOSAL.md), extended to the Leopard index's own async rebuild/lookup pipeline (docs/DST-LEOPARD-EVOLUTION-PROPOSAL.md, D-165)
   resolve/
     reference/   the differential-fuzzing oracle — deliberately naive, no shared code with production/
     production/  the real, SQL-backed check engine, plus the opt-in check-result cache (cache.ts)
   metamorphic/ classifyMonotone()/findFlippableExclusion() — the monotonicity classifier backing test/metamorphic/'s property tests (D-140, D-147)
   soundness/   the differential-fuzz generator, classifier, runner — including expiring tuples in the random tuple graph (D-154)
-  audit/       expand(), listObjects()/listUsers(), privesc.ts (privilege-escalation scanner, D-152), the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148), and anchor.ts (the out-of-band, append-only tip anchor, D-155)
+  audit/       expand(), listObjects()/listUsers() (listObjects reverse-lookup-accelerated, D-175), privesc.ts (privilege-escalation scanner, D-152), the hash-chained checks audit trail every real check is logged to (tamper-evidence, D-148), and anchor.ts (the out-of-band, append-only tip anchor, D-155)
   report/      markdown/JSON soundness reporters, exit codes, PR-comment logic
   api/         the Fastify server, db-api-keys.ts (DB-backed API-key tier, D-152), openapi-document.ts (GET /openapi.json's own document, D-152), plus the opt-in Redis-backed rate-limit store (redis-store.ts)
   cli/         the authz CLI — index.ts, plus commands/ (one file per command group, e.g. schema.ts backs compile/publish/diff/rollback; leopard.ts backs refresh/status, D-163; serve.ts's own optional in-process Leopard-refresh timer, D-167)
