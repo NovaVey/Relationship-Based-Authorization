@@ -66,7 +66,7 @@ program
   )
   .option(
     '--from-spicedb <file>',
-    'translate a SpiceDB schema and verify the result, instead of a schema-file argument (not yet implemented)',
+    'translate a SpiceDB .zed schema (tools/schema-verifier/src/frontends/spicedb/) and verify the result, instead of a schema-file argument',
   )
   .option(
     '--best-effort',

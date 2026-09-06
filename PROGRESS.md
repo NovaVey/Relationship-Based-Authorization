@@ -2924,3 +2924,25 @@ One real, honest question surfaced along the way and deliberately left open rath
 The SpiceDB half stays open, sized as its own follow-up rather than folded into this same PR — real, scoped work, but smaller than earlier framed, since SpiceDB's own schema language already reads a lot like this project's own.
 
 Full account: `docs/DECISIONS.md` D-178.
+
+## A SpiceDB front end for the schema verifier — closing the last piece of the schema-verifier packaging gap
+
+**Owner:** main agent.
+
+Picked up right where the OpenFGA front end left off: the SpiceDB half of the same capability, reusing the shared translation layer that work built rather than duplicating it.
+
+The parser itself came in exactly as small as expected — a light adaptation of this project's own DSL parser, since SpiceDB's schema language already reads a lot like this one. But building it surfaced two genuinely new problems neither this pass nor the OpenFGA work anticipated, both confirmed against real upstream schemas before being fixed rather than assumed:
+
+SpiceDB's own official schema-language reference states, as a disclosed quirk of its own history, that its union operator actually binds _tighter_ than intersection and exclusion — the exact opposite of how this project's own schema language orders those same operators. A naive word-for-word operator swap would have silently gotten every schema mixing those operators wrong. The fix needed no new logic at all: parsing builds the correct tree respecting SpiceDB's own real precedence, and the printer already built for the OpenFGA work — designed around this project's own grammar — already wraps things in parentheses correctly from the shape of that tree alone, with nothing SpiceDB-specific added.
+
+Separately: SpiceDB allows a subject-type declaration to point at any computed permission on another type, not just a genuine relation, and unlike the OpenFGA case, there's no guarantee that permission reduces to a single underlying relation. Handling this properly turned out to need three distinct cases, each verified against a different real fixture: leave alone when the target already is a relation; expand losslessly into multiple direct references when the target is exactly a union of relations; and, when neither applies, restructure the schema with an auxiliary relation and an added traversal term. That restructuring reuses the exact same splitting mechanism the OpenFGA work already built, rather than inventing a second one — and building it caught a real edge case before it could ship: a schema where every one of a relation's subject types needed restructuring, with nothing direct left over, which an early draft would have mishandled.
+
+A third, independent problem showed up in one specific real fixture: a schema traversing a relation whose subject types don't all define the thing being traversed to. SpiceDB itself just treats that branch as silently empty at runtime; this project's own compiler is stricter and would reject it outright. Fixed by splitting the relation by subject type and narrowing the traversal to only the compatible ones — matching SpiceDB's real behavior instead of this project's stricter default.
+
+The strongest proof, same shape as the OpenFGA work before it: translating the real, raw upstream source for every SpiceDB schema this project's own survey already covers, through the complete real pipeline, and checking that each one reproduces the exact verdict already published for it. All seven passed on the first real run, including both the case needing restructuring and the case needing the compatibility-driven split.
+
+A real, unrelated bug found along the way: this project's own formatter had no way to protect the freshly-fetched, must-stay-verbatim third-party schema files from being silently reformatted — most were accidentally safe, but two weren't, caught live rather than assumed fine, and fixed for both this and the earlier OpenFGA work's own fixtures at once.
+
+With this, all three pieces the original schema-verifier packaging gap named are now built.
+
+Full account: `docs/DECISIONS.md` D-179.

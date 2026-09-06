@@ -1,0 +1,39 @@
+/**
+ * an entity that can be granted permissions.
+ * users can be part of groups.
+ */
+definition user {}
+
+/**
+ * we can model groups as having a parent group...
+ */
+definition group_with_parent {
+   relation parent: group_with_parent
+   relation member: user
+
+   permission view = member + parent->member
+}
+
+/**
+ * ...or we can model a group as having children.
+ * in this example, we'll do both.
+ */
+ definition group_with_child {
+  relation child: user | group_with_child#child
+
+  permission view = child
+}
+
+/**
+ * a resource that we are trying to protect
+ */
+definition document {
+    /**
+     * we can give viewer relation to a specific user,
+     * or to a group that has parents,
+     * or to a group that has children.
+     */
+    relation viewer: user | group_with_parent#view | group_with_child#view
+
+    permission view = viewer
+}

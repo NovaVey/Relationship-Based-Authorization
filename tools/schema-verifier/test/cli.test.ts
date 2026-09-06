@@ -266,13 +266,9 @@ describe('verify-schema --from-openfga — end to end through a real subprocess,
     expect(result.stderr).toContain('no schema source given');
   }, 20_000);
 
-  it('a model that fails to translate (an unsupported ABAC condition, no --best-effort) → exit 3, not a crash', async () => {
-    // A minimal inline model via a temp-free approach isn't practical for
-    // a subprocess test — reuses the same not-yet-implemented --from-
-    // spicedb path instead, which fails for a different, simpler reason
-    // (not yet built) but exercises the identical "translation path
-    // failed, exit 3, no crash" contract --from-openfga's own failure
-    // path shares.
+  it('a --from-spicedb model that fails to parse → exit 3, not a crash', async () => {
+    // tenancy.authz is a real file, just the wrong language entirely — a
+    // real SpiceDB parse failure, not a synthetic stand-in.
     const result = await runCli([
       '--from-spicedb',
       SCHEMA_DIR + 'tenancy.authz',
@@ -280,6 +276,21 @@ describe('verify-schema --from-openfga — end to end through a real subprocess,
       INVARIANT_DIR + 'tenant-isolation.invariant',
     ]);
     expect(result.exitCode).toBe(3);
-    expect(result.stderr).toContain('not yet implemented');
+    expect(result.stderr).toContain('failed to parse SpiceDB schema');
+  }, 20_000);
+});
+
+describe('verify-schema --from-spicedb — end to end through a real subprocess, real upstream .zed source', () => {
+  it("translates and verifies in one step, matching the equivalent hand-translated fixture's own published verdict", async () => {
+    const result = await runCli([
+      '--from-spicedb',
+      UPSTREAM_DIR + 'spicedb-github.zed',
+      '--invariants',
+      THIRDPARTY_DIR + 'spicedb-github.invariant',
+    ]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('VIOLATED');
+    expect(result.stderr).toContain('translate-spicedb:');
+    expect(result.stderr).toContain('expanded to');
   }, 20_000);
 });

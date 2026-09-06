@@ -1,0 +1,89 @@
+---
+schema: |-
+  /**
+   * an entity that can be granted permissions.
+   * users can be part of groups.
+   */
+  definition user {}
+
+  /**
+   * we can model groups as having a parent group...
+   */
+  definition group_with_parent {
+     relation parent: group_with_parent
+     relation member: user
+
+     permission view = member + parent->member
+  }
+
+  /**
+   * ...or we can model a group as having children.
+   * in this example, we'll do both.
+   */
+   definition group_with_child {
+    relation child: user | group_with_child#child
+
+    permission view = child
+  }
+
+  /**
+   * a resource that we are trying to protect
+   */
+  definition document {
+      /**
+       * we can give viewer relation to a specific user,
+       * or to a group that has parents,
+       * or to a group that has children.
+       */
+      relation viewer: user | group_with_parent#view | group_with_child#view
+
+      permission view = viewer
+  }
+
+relationships: |-
+  // Add an engineer to group of engineers
+  group_with_parent:engineering#member@user:engineer
+  group_with_child:engineering#child@user:engineer
+  // Add an analyst to group of analysts
+  group_with_parent:analysis#member@user:analyst
+  group_with_child:analysis#child@user:analyst
+
+  // Company is the parent of engineering and analysis
+  // Engineering and analysis are children of company
+  group_with_parent:engineering#parent@group_with_parent:company
+  group_with_child:company#child@group_with_child:engineering#child
+  group_with_parent:analysis#parent@group_with_parent:company
+  group_with_child:company#child@group_with_child:analysis#child
+
+  // Set the permissions on some documents
+  document:shared_with_company#viewer@group_with_child:company#view
+  document:shared_with_company#viewer@group_with_parent:company#view
+  document:shared_with_engineering#viewer@group_with_parent:engineering#view
+  document:shared_with_engineering#viewer@group_with_child:engineering#view
+  document:shared_with_analysis#viewer@group_with_parent:analysis#view
+  document:shared_with_analysis#viewer@group_with_child:analysis#view
+assertions:
+  assertTrue:
+    - "document:shared_with_company#view@user:engineer"
+    - "document:shared_with_company#view@user:analyst"
+    - "document:shared_with_engineering#view@user:engineer"
+    - "document:shared_with_analysis#view@user:analyst"
+  assertFalse:
+    - "document:shared_with_engineering#view@user:analyst"
+    - "document:shared_with_analysis#view@user:engineer"
+validation:
+  document:shared_with_analysis#view:
+    - "[group_with_child:analysis#view] is <document:shared_with_analysis#viewer>"
+    - "[group_with_parent:analysis#view] is <document:shared_with_analysis#viewer>"
+    - "[user:analyst] is <group_with_child:analysis#child>/<group_with_parent:analysis#member>"
+  document:shared_with_company#view:
+    - "[group_with_child:analysis#child] is <group_with_child:company#child>"
+    - "[group_with_child:company#view] is <document:shared_with_company#viewer>"
+    - "[group_with_child:engineering#child] is <group_with_child:company#child>"
+    - "[group_with_parent:company#view] is <document:shared_with_company#viewer>"
+    - "[user:analyst] is <group_with_child:analysis#child>"
+    - "[user:engineer] is <group_with_child:engineering#child>"
+  document:shared_with_engineering#view:
+    - "[group_with_child:engineering#view] is <document:shared_with_engineering#viewer>"
+    - "[group_with_parent:engineering#view] is <document:shared_with_engineering#viewer>"
+    - "[user:engineer] is <group_with_child:engineering#child>/<group_with_parent:engineering#member>"

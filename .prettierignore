@@ -1,0 +1,11 @@
+# Real, third-party schema files fetched verbatim from an external source
+# (`tools/schema-verifier/thirdparty/upstream/`'s own header comments each
+# cite the exact URL) — these must stay byte-identical to what was
+# actually fetched, since their whole evidentiary value is "this is really
+# what the upstream repository publishes," not "this is what our own
+# formatter would have chosen." Most extensions there (`.fga`, `.zed`)
+# have no built-in Prettier parser and were already silently skipped; this
+# entry covers the two that do (`.yaml`, `.mdx`) and would otherwise be
+# silently reformatted by a plain `npm run format` — caught live via
+# `npm run format:check` flagging them, not assumed.
+tools/schema-verifier/thirdparty/upstream/
