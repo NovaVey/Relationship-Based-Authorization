@@ -64,7 +64,7 @@ import { env } from '../config/env.js';
 import { performCheck, type PerformCheckResult } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { listObjects, listUsers } from '../audit/list.js';
-import { writeTuple, deleteTuple, type TupleKey } from '../store/tuples.js';
+import { writeTuple, deleteTuple, type TupleKey, type WriteTupleResult } from '../store/tuples.js';
 import { decodeToken } from '../store/tokens.js';
 import { compileSchema } from '../schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
@@ -86,6 +86,7 @@ import {
   listObjectsResponse,
   listUsersResponse,
   tupleWriteResponse,
+  tupleBatchResponse,
   tupleDeleteResponse,
   schemaCompileResponse,
   schemaPublishResponse,
@@ -284,6 +285,24 @@ const tupleBodySchema = z
   })
   .strict();
 
+// `POST /tuples/batch` (new feature, closes `docs/CAPABILITY-GAPS.md`'s
+// "Bulk writes and import/export" gap) — same size cap as `/check/batch`
+// above, for the same reason (a round, disclosed starting point, not a
+// value derived from load-testing). Reuses `tupleBodySchema` directly as
+// the per-item schema, the same "the question doesn't change, only its
+// count does" reuse `checkBatchBodySchema` already establishes for
+// `checkBodySchema`.
+const TUPLE_BATCH_MAX_SIZE = 50;
+
+const tupleBatchBodySchema = z
+  .object({
+    tuples: z
+      .array(tupleBodySchema)
+      .min(1, 'tuples must contain at least one tuple')
+      .max(TUPLE_BATCH_MAX_SIZE, `a batch may contain at most ${TUPLE_BATCH_MAX_SIZE} tuples`),
+  })
+  .strict();
+
 // `.max(65_536)` (64 KiB — D-067's own "defense in depth" recommendation,
 // docs/DECISIONS.md): a second, tighter ceiling than the server-wide
 // `bodyLimit` (256 KiB, `buildServer` above) specifically on the one field
@@ -327,6 +346,25 @@ function toTupleKey(parsed: z.infer<typeof tupleBodySchema>): TupleKey {
     subjectId,
     ...(subjectRelation !== undefined ? { subjectRelation } : {}),
   };
+}
+
+/**
+ * `tupleBodySchema.expiresAt`'s own opaque string, parsed and range-checked
+ * here (not at the schema layer — see that field's own doc comment) —
+ * shared by `POST /tuples` and `POST /tuples/batch` so both routes apply
+ * the identical ISO-8601 parse, rather than one drifting from the other
+ * over time. `undefined` in, `{ok: true, expiresAt: undefined}` out — a
+ * tuple with no validity window at all, never an error.
+ */
+function parseExpiresAt(
+  rawExpiresAt: string | undefined,
+): { ok: true; expiresAt: Date | undefined } | { ok: false; message: string } {
+  if (rawExpiresAt === undefined) return { ok: true, expiresAt: undefined };
+  const expiresAt = new Date(rawExpiresAt);
+  if (Number.isNaN(expiresAt.getTime())) {
+    return { ok: false, message: 'expiresAt: not a valid ISO-8601 date string' };
+  }
+  return { ok: true, expiresAt };
 }
 
 async function sendApiError(reply: FastifyReply, err: ApiErrorResponse): Promise<void> {
@@ -432,6 +470,39 @@ async function runCheckBatch(
           cache,
         );
         outcomes[start + offset] = { ...item, result };
+      }),
+    );
+  }
+  return outcomes;
+}
+
+/** One `/tuples/batch` item — a fully-formed `TupleKey` (`expiresAt`, if present, already parsed from the request's ISO-8601 string the same way `POST /tuples`'s own single-item handler does) — plus the real `WriteTupleResult` `writeTuple` produced for it. */
+type BatchTupleOutcome = TupleKey & { result: WriteTupleResult };
+
+/**
+ * `runCheckBatch`'s own concurrency-slicing/order-preserving shape, applied
+ * to writes instead of reads — see that function's own doc comment for the
+ * full reasoning (bounded concurrent DB work, `start + offset` index
+ * assignment so result order matches input order regardless of which
+ * promise in a batch settles first). Safe to run this many `writeTuple`
+ * calls concurrently against one shared `pool` for the identical reason
+ * `runCheckBatch` already established for `performCheck`: each call opens
+ * and commits its own independent transaction (`writeTuple`'s own doc
+ * comment, `src/store/tuples.ts`), never sharing a connection or a
+ * transaction across items.
+ */
+async function runTupleBatch(
+  pool: Pool,
+  tuples: readonly TupleKey[],
+): Promise<BatchTupleOutcome[]> {
+  const concurrency = Math.max(1, env.MAX_CONCURRENCY);
+  const outcomes = new Array<BatchTupleOutcome>(tuples.length);
+  for (let start = 0; start < tuples.length; start += concurrency) {
+    const batch = tuples.slice(start, start + concurrency);
+    await Promise.all(
+      batch.map(async (tuple, offset) => {
+        const result = await writeTuple(pool, tuple);
+        outcomes[start + offset] = { ...tuple, result };
       }),
     );
   }
@@ -1236,6 +1307,17 @@ export async function buildServer(
     config: { rateLimit: { max: 20, timeWindow: '1 minute', hook: 'preHandler' as const } },
   };
 
+  // Same request-level number as `writeRateLimit` above, not `checkBatchRateLimit`'s
+  // 5×-of-/check reasoning — a batch write is still a write, and this repo's
+  // own anti-abuse default for writes (`writeRateLimit`, D-056) applies
+  // unchanged; the throughput gain is real precisely because each request now
+  // carries up to `TUPLE_BATCH_MAX_SIZE` (50) tuples instead of one, at the
+  // same per-minute request ceiling — 50× more tuple writes/minute, not a
+  // loosened write budget.
+  const tupleBatchRateLimit = {
+    config: { rateLimit: { max: 20, timeWindow: '1 minute', hook: 'preHandler' as const } },
+  };
+
   /**
    * `POST /check/batch` (new feature) — N `/check` calls folded into one
    * HTTP round trip. Gated and rate-limited exactly like `/check` itself
@@ -1450,20 +1532,13 @@ export async function buildServer(
       // a malformed value gets this route's own `invalidRequestError` shape,
       // not a differently-worded Zod error, and `writeTuple` is never
       // called for it.
-      const { expiresAt: rawExpiresAt } = parsed.data;
-      let expiresAt: Date | undefined;
-      if (rawExpiresAt !== undefined) {
-        expiresAt = new Date(rawExpiresAt);
-        if (Number.isNaN(expiresAt.getTime())) {
-          await sendApiError(
-            reply,
-            invalidRequestError('expiresAt: not a valid ISO-8601 date string'),
-          );
-          return;
-        }
+      const expiresAtResult = parseExpiresAt(parsed.data.expiresAt);
+      if (!expiresAtResult.ok) {
+        await sendApiError(reply, invalidRequestError(expiresAtResult.message));
+        return;
       }
       const tuple = toTupleKey(parsed.data);
-      if (expiresAt !== undefined) tuple.expiresAt = expiresAt;
+      if (expiresAtResult.expiresAt !== undefined) tuple.expiresAt = expiresAtResult.expiresAt;
       const result = await runOrInfrastructureError(reply, () => writeTuple(pool, tuple));
       if (result === undefined) return;
       // Every successful write can change a cached check's answer — see
@@ -1474,6 +1549,77 @@ export async function buildServer(
       // was actually written, so nothing could have gone stale.
       if (result.ok) checkCache?.clear();
       const resp = tupleWriteResponse(result);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
+
+  /**
+   * `POST /tuples/batch` (new feature, closes `docs/CAPABILITY-GAPS.md`'s
+   * "Bulk writes and import/export" gap) — N `/tuples` writes folded into
+   * one HTTP round trip, mirroring `/check/batch`'s own design exactly:
+   * gated and rate-limited like a write (`gatedPreHandlers`,
+   * `tupleBatchRateLimit`), every `expiresAt` in the batch parsed up front
+   * (mirroring `/check/batch`'s own up-front `atToken` decode), scope-
+   * checked against EVERY object namespace present anywhere in the batch
+   * before any write runs, and the whole batch rejected on either failure
+   * — never a partial batch left half-validated.
+   *
+   * **Unlike `/check/batch`, an individual item's own outcome inside the
+   * batch can still be a failure — this is a real, deliberate difference,
+   * not an inconsistency.** A single check can only ever be allowed or
+   * denied; a single tuple write can genuinely fail its own validation
+   * (an undeclared relation, a disallowed subject type, an already-past
+   * `expiresAt`) independent of every other item in the batch. So this
+   * route always answers `200` at the batch level (see
+   * `tupleBatchResponse`'s own doc comment) and reports each item's real
+   * `WriteTupleResult` — including a per-item `error` — in `results`,
+   * exactly the shape a bulk-import caller needs: which rows landed, which
+   * didn't, and why, without the one bad row in a 50-tuple import sinking
+   * the other 49.
+   *
+   * `checkCache?.clear()` fires once per request, only if at least one
+   * item in the batch actually wrote successfully — the same coarse,
+   * whole-cache invalidation `POST /tuples` already applies, not a
+   * per-item clear for every item that also validated cleanly did nothing.
+   */
+  app.post(
+    '/tuples/batch',
+    { preHandler: gatedPreHandlers(), ...tupleBatchRateLimit },
+    async (request, reply) => {
+      const parsed = tupleBatchBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+
+      const tuples: TupleKey[] = [];
+      for (const item of parsed.data.tuples) {
+        const expiresAtResult = parseExpiresAt(item.expiresAt);
+        if (!expiresAtResult.ok) {
+          await sendApiError(reply, invalidRequestError(expiresAtResult.message));
+          return;
+        }
+        const tuple = toTupleKey(item);
+        if (expiresAtResult.expiresAt !== undefined) tuple.expiresAt = expiresAtResult.expiresAt;
+        tuples.push(tuple);
+      }
+
+      const namespaces = [...new Set(tuples.map((tuple) => tuple.objectNs))];
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, namespaces);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
+        return;
+      }
+
+      const outcomes = await runOrInfrastructureError(reply, () => runTupleBatch(pool, tuples));
+      if (outcomes === undefined) return;
+      if (outcomes.some((outcome) => outcome.result.ok)) checkCache?.clear();
+      const resp = tupleBatchResponse(outcomes);
       await reply.code(resp.status).send(resp.body);
     },
   );

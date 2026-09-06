@@ -620,6 +620,54 @@ export async function listTuplesBySubject(
   return rows.map(rowToTuple);
 }
 
+export interface ListAllTuplesFilter {
+  /** Narrows to one object namespace — omit to walk every namespace in the store. */
+  objectNs?: string;
+  /** Pagination cursor: every row with `id` strictly greater than this. Omit (or `0`) to start from the beginning. */
+  afterId?: number;
+  limit: number;
+}
+
+/**
+ * Every stored tuple across the whole store (or one namespace), paginated
+ * by the row's own internal `id` — the backing query for `authz tuple
+ * export`'s NDJSON stream (D-170, closing `docs/CAPABILITY-GAPS.md`'s
+ * "Bulk writes and import/export" gap). Ordered by `id` ascending, the
+ * same stable, monotonic cursor `write_log.token` already establishes for
+ * the change log: a page boundary can never skip or repeat a row even if
+ * new tuples are written concurrently between two calls, since a newly
+ * inserted row always gets a strictly larger `id` than every row a caller
+ * has already paginated past (Postgres's own identity-sequence
+ * monotonicity — the same guarantee `relation_tuples_unique_fact`'s own
+ * neighbor, `write_log.token`, relies on for the identical reason).
+ * Deliberately not `atToken`-pinned like `/check`'s own consistency
+ * snapshot — a bulk export naturally spans many separate queries over
+ * whatever real time it takes to page through a large table, so "exactly
+ * as of one instant" isn't a promise this function makes or needs to;
+ * "every row eventually seen exactly once, none skipped or duplicated
+ * across pages" is the actual, weaker, honest guarantee it keeps.
+ */
+export async function listAllTuples(
+  pool: QueryExecutor,
+  filter: ListAllTuplesFilter,
+): Promise<TupleRow[]> {
+  const conditions = ['id > $1'];
+  const params: (string | number)[] = [filter.afterId ?? 0];
+  if (filter.objectNs !== undefined) {
+    conditions.push(`object_ns = $${params.length + 1}`);
+    params.push(filter.objectNs);
+  }
+  params.push(filter.limit);
+  const { rows } = await pool.query<RawTupleRow>(
+    `select id, object_ns, object_id, relation, subject_ns, subject_id, subject_relation, created_at, expires_at
+     from relation_tuples where ${conditions.join(' and ')}
+     order by id
+     limit $${params.length}`,
+    params,
+  );
+  return rows.map(rowToTuple);
+}
+
 function rowToTuple(row: RawTupleRow): TupleRow {
   return {
     id: Number(row.id),

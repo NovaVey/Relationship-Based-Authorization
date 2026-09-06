@@ -2,13 +2,15 @@
  * `buildOpenApiDocument()` — a hand-written, hand-maintained OpenAPI 3.0.3
  * document describing every real HTTP route `src/api/server.ts` registers
  * today: `POST /check`, `POST /check/batch`, `POST /expand`,
- * `POST /list-objects`, `POST /list-users`, `POST /tuples`, `DELETE /tuples`,
- * `POST /schema/compile`, `POST /schema/publish`, `GET /health`, and this
- * module's own consumer, `GET /openapi.json`. `POST /check/batch` was added
- * to this file after its own initial build — see `checkBatchOperation()`'s
- * own doc comment below for why it reuses `checkOperation()`'s schemas
- * rather than re-transcribing them, and this file's "disclosed, not
- * automatic" note above for why a human had to notice and add it by hand.
+ * `POST /list-objects`, `POST /list-users`, `POST /tuples`,
+ * `POST /tuples/batch`, `DELETE /tuples`, `POST /schema/compile`,
+ * `POST /schema/publish`, `GET /health`, `GET /metrics`, and this module's
+ * own consumer, `GET /openapi.json`. `POST /check/batch` was added to this
+ * file after its own initial build — see `checkBatchOperation()`'s own doc
+ * comment below for why it reuses `checkOperation()`'s schemas rather than
+ * re-transcribing them, and this file's "disclosed, not automatic" note
+ * above for why a human had to notice and add it by hand — `GET /metrics`
+ * and `POST /tuples/batch` were each added the identical way, later still.
  *
  * **No new dependency.** No `zod-to-openapi`, no `@fastify/swagger`, no
  * schema-introspection of any kind — every JSON Schema object below was
@@ -639,6 +641,77 @@ function tupleWriteOperation(): OpenApiOperation {
   };
 }
 
+function tupleBatchWriteOperation(): OpenApiOperation {
+  const requestSchema: JsonSchema = {
+    type: 'object',
+    properties: {
+      tuples: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 50,
+        items: tupleRequestSchema(),
+        description: 'Up to 50 tuples in one call, order-preserving — mirrors POST /check/batch.',
+      },
+    },
+    required: ['tuples'],
+    additionalProperties: false,
+  };
+  const itemSchema: JsonSchema = {
+    type: 'object',
+    description:
+      'The echoed tuple key plus either a successful POST /tuples-shaped body (token/created/existingExpiresAt) or a per-item ApiError — unlike /check/batch, one tuple can genuinely fail its own validation independent of every other item in the batch.',
+    properties: {
+      objectNs: tupleFieldSchema,
+      objectId: tupleFieldSchema,
+      relation: tupleFieldSchema,
+      subjectNs: tupleFieldSchema,
+      subjectId: tupleFieldSchema,
+      subjectRelation: tupleFieldSchema,
+      token: { type: 'string' },
+      created: { type: 'boolean' },
+      existingExpiresAt: { type: ['string', 'null'], format: 'date-time' },
+      // The INNER error object (`{code, message, details?}`), not the full
+      // `ApiError` envelope `errorResponseRef` points at — this item's own
+      // `error` field IS that inner object (see `tupleBatchResponse`'s own
+      // doc comment, `src/api/responses.ts`: it spreads `tupleWriteResponse`'s
+      // body directly, and that body's failure shape is already `{error:
+      // {...}}` at the top level of the per-item body), so referencing the
+      // full envelope here would double-wrap it.
+      error: {
+        type: 'object',
+        properties: {
+          code: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
+    required: ['objectNs', 'objectId', 'relation', 'subjectNs', 'subjectId'],
+  };
+  const responseSchema: JsonSchema = {
+    type: 'object',
+    properties: { results: { type: 'array', items: itemSchema } },
+    required: ['results'],
+  };
+  return {
+    summary: 'Write up to 50 relation tuples in one call, order-preserving (new feature).',
+    description:
+      "Gated by requireAdminAuth (ADMIN_API_KEY only). Rate limit: 20 requests/minute per client (tupleBatchRateLimit — the same per-minute request ceiling as POST /tuples itself, not loosened; the throughput gain is from up to 50 tuples per request), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked. Always 200 at the batch level, even when every item failed its own validation — see src/api/responses.ts's tupleBatchResponse for why.",
+    security: BEARER_SECURITY,
+    requestBody: {
+      required: true,
+      content: { 'application/json': { schema: requestSchema } },
+    },
+    responses: {
+      '200': jsonResponse('One entry per input tuple, in the same order supplied.', responseSchema),
+      '400': RESPONSE_400,
+      '401': RESPONSE_401,
+      '403': RESPONSE_403,
+      '429': RESPONSE_429,
+      '503': RESPONSE_503,
+    },
+  };
+}
+
 function tupleDeleteOperation(): OpenApiOperation {
   const responseSchema: JsonSchema = {
     type: 'object',
@@ -904,6 +977,7 @@ export function buildOpenApiDocument(): OpenApiDocument {
       '/list-objects': { post: listObjectsOperation() },
       '/list-users': { post: listUsersOperation() },
       '/tuples': { post: tupleWriteOperation(), delete: tupleDeleteOperation() },
+      '/tuples/batch': { post: tupleBatchWriteOperation() },
       '/schema/compile': { post: schemaCompileOperation() },
       '/schema/publish': { post: schemaPublishOperation() },
       '/health': { get: healthOperation() },

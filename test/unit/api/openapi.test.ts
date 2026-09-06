@@ -72,6 +72,7 @@ const EXPECTED_ROUTES: ExpectedRoute[] = [
   { path: '/list-users', method: 'post', gated: true, scopeChecked: true },
   { path: '/tuples', method: 'post', gated: true, scopeChecked: true },
   { path: '/tuples', method: 'delete', gated: true, scopeChecked: true },
+  { path: '/tuples/batch', method: 'post', gated: true, scopeChecked: true },
   { path: '/schema/compile', method: 'post', gated: false, scopeChecked: false },
   { path: '/schema/publish', method: 'post', gated: true, scopeChecked: true },
   { path: '/health', method: 'get', gated: false, scopeChecked: false },

@@ -84,6 +84,7 @@ import {
   schemaCompileError,
   schemaPublishError,
   type ApiErrorResponse,
+  type ApiErrorBody,
 } from './errors.js';
 
 /** `{ ns, id }` — the same shape every resolver/`expand()` module in this codebase already declares field-for-field independently for the same concept. Used here only for shallow query-echo fields; see this file's own top-of-file doc comment for why deep evidence trees import the real type instead. */
@@ -388,6 +389,76 @@ export function tupleWriteResponse(result: WriteTupleResult): TupleWriteApiRespo
       token: encodeToken(result.token),
       created: false,
       existingExpiresAt: result.existingExpiresAt?.toISOString() ?? null,
+    },
+  };
+}
+
+/**
+ * One batch item's own echoed tuple key plus `tupleWriteResponse`'s own
+ * body for it, spread together — reusing that function's exact success/
+ * failure shape (`{token, created, existingExpiresAt?}` or `{error:{...}}`)
+ * per item, the same "embed the single-operation response body, don't
+ * invent a second shape" reuse `checkBatchResponse` (§1b) already
+ * establishes with `checkResponse`. Unlike `/check/batch`, where an
+ * individual check can never itself fail (only the whole request can, at
+ * the pre-validation stage), an individual tuple write genuinely can —
+ * `writeTuple`'s own per-tuple identifier/schema/expiry validation — so
+ * this item type is a real union, not a single shape repeated N times.
+ */
+export type TupleBatchItemBody = {
+  objectNs: string;
+  objectId: string;
+  relation: string;
+  subjectNs: string;
+  subjectId: string;
+  subjectRelation?: string;
+} & (TupleWriteResponseBody | ApiErrorBody);
+
+export interface TupleBatchResponseBody {
+  results: TupleBatchItemBody[];
+}
+
+export type TupleBatchApiResponse =
+  { status: 200; body: TupleBatchResponseBody } | ApiErrorResponse;
+
+/**
+ * `POST /tuples/batch`'s own response — always `200` at the batch level
+ * (mirroring `checkBatchResponse`'s identical reasoning): a batch where
+ * every single item failed its own validation is still a request this API
+ * completed successfully, in the exact same sense a `/check` returning
+ * `allowed: false` is a successful answer, not an error. Only a
+ * request-level problem (malformed body shape, an out-of-scope namespace
+ * anywhere in the batch) — checked before any item runs, in
+ * `src/api/server.ts`'s own route handler — produces a non-200 response
+ * for this route at all.
+ */
+export function tupleBatchResponse(
+  outcomes: readonly {
+    objectNs: string;
+    objectId: string;
+    relation: string;
+    subjectNs: string;
+    subjectId: string;
+    subjectRelation?: string;
+    result: WriteTupleResult;
+  }[],
+): TupleBatchApiResponse {
+  return {
+    status: 200,
+    body: {
+      results: outcomes.map((item) => {
+        const { objectNs, objectId, relation, subjectNs, subjectId, subjectRelation, result } =
+          item;
+        const echo = {
+          objectNs,
+          objectId,
+          relation,
+          subjectNs,
+          subjectId,
+          ...(subjectRelation !== undefined ? { subjectRelation } : {}),
+        };
+        return { ...echo, ...tupleWriteResponse(result).body };
+      }),
     },
   };
 }
