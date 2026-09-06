@@ -130,6 +130,17 @@ governance tier:
   maintainer account — and a rerun would silently execute different code
   with whatever permissions that job already has; a SHA can't be
   repointed.
+- ~~Generate an SBOM and require signed release tags.~~ **Done** —
+  `.github/workflows/release.yml` (D-172) fires on a pushed `vX.Y.Z` git
+  tag, rejects it outright if it isn't a real, GitHub-verified signed
+  annotated tag (`git tag -s`, a key registered to your GitHub account —
+  never a local GPG keyring managed by the workflow itself), and attaches
+  a CycloneDX SBOM to the resulting GitHub Release. Signing the tag itself
+  is still on you, per release — this closes the "no mechanism exists at
+  all" gap, not "every release is now automatically signed." Deliberately
+  never touches npm publishing or `package.json`'s `"private": true` (see
+  D-002); npm provenance stays a real, out-of-scope gap until/unless that
+  changes.
 - Require **2** approving reviews instead of 1. **Not done** — left for a
   solo maintainer to opt into if/when there's a second regular reviewer;
   forcing it now would just mean self-approving or bypassing the rule.
