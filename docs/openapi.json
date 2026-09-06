@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Relationship-Based Authorization API",
-    "version": "0.1.0",
+    "version": "1.3.0",
     "description": "Fine-grained, relationship-based authorization service (Zanzibar-style) exposed over HTTP — the same check/expand/write/schema operations `authz` (the CLI) already exposes, plus two bulk reverse-lookup operations with no CLI command of their own. This document is hand-written and hand-maintained (src/api/openapi-document.ts) — not derived by introspecting the real Zod schemas at build time — so it can drift from the live server if a route changes without a matching update here; GET /openapi.json always serves whatever this document currently says, straight from the same buildOpenApiDocument() function scripts/generate-openapi.ts uses to write docs/openapi.json."
   },
   "components": {

@@ -1030,12 +1030,12 @@ function openApiDocumentOperation(): OpenApiOperation {
 // ---------------------------------------------------------------------------
 
 /**
- * `0.1.0` — kept in sync with `package.json`'s own `version` field by hand,
+ * `1.3.0` — kept in sync with `package.json`'s own `version` field by hand,
  * matching `src/cli/index.ts`'s own identical `packageVersion` constant and
  * its identical doc comment ("kept in sync with package.json by hand until
  * a version-injection step exists"). Update both together.
  */
-const API_VERSION = '0.1.0';
+const API_VERSION = '1.3.0';
 
 /**
  * Builds the complete OpenAPI 3.0.3 document for this API's real HTTP
