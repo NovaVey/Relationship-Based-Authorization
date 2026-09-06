@@ -37,7 +37,13 @@
 #     reason: the default (a `package-lock.json` relative to the
 #     *caller's* workspace) would either miss the cache entirely or, worse,
 #     silently key off some unrelated lockfile the caller's own repo
-#     happens to have at that path.
+#     happens to have at that path. That root is resolved through a `cd`
+#     + `pwd` step first, into a clean absolute path with no literal
+#     `.`/`..` segments — confirmed live that passing
+#     `${{ github.action_path }}/../..` to `cache-dependency-path`
+#     directly fails outright ("Relative pathing '.' and '..' is not
+#     allowed"), since that input is matched through `@actions/glob`,
+#     which rejects those segments in a pattern.
 #   - `schema-file`/`invariants-file` are resolved relative to the
 #     *caller's* checkout (steps run with the default working directory,
 #     `GITHUB_WORKSPACE`, unchanged) — exactly the paths a caller would
@@ -124,16 +130,32 @@ outputs:
 runs:
   using: composite
   steps:
+    # actions/setup-node's own `cache-dependency-path` is matched through
+    # @actions/glob, which explicitly rejects a pattern containing a
+    # literal `.`/`..` path segment — `${{ github.action_path }}/../..`
+    # itself trips that rejection outright (confirmed live: "Invalid
+    # pattern ... Relative pathing '.' and '..' is not allowed."). `cd`
+    # + `pwd` resolves those segments away into a clean absolute path
+    # before anything downstream ever sees a `..`, sidestepping the
+    # restriction entirely rather than working around it with a
+    # different, less-general glob shape.
+    - name: Resolve this action's own checkout root (a clean absolute path, no `.`/`..` segments)
+      id: paths
+      shell: bash
+      run: |
+        root="$(cd "${{ github.action_path }}/../.." && pwd)"
+        echo "repo-root=$root" >>"$GITHUB_OUTPUT"
+
     - name: Setup Node
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
       with:
         node-version: '22'
         cache: 'npm'
-        cache-dependency-path: ${{ github.action_path }}/../../package-lock.json
+        cache-dependency-path: ${{ steps.paths.outputs.repo-root }}/package-lock.json
 
     - name: Install this repo's dependencies (schema-verifier has no package.json of its own)
       shell: bash
-      working-directory: ${{ github.action_path }}/../..
+      working-directory: ${{ steps.paths.outputs.repo-root }}
       run: npm ci
 
     - name: Run verify-schema
@@ -144,11 +166,12 @@ runs:
         INVARIANTS_FILE: ${{ inputs.invariants-file }}
         BOUND: ${{ inputs.bound }}
         JSON_FLAG: ${{ inputs.json }}
+        REPO_ROOT: ${{ steps.paths.outputs.repo-root }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set +e
         args=(
-          "$ACTION_PATH/../../node_modules/.bin/tsx"
+          "$REPO_ROOT/node_modules/.bin/tsx"
           "$ACTION_PATH/src/cli/index.ts"
           "$SCHEMA_FILE"
           --invariants "$INVARIANTS_FILE"
