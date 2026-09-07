@@ -3004,3 +3004,15 @@ Gave the first condition its own name — a distinct, documented error a caller 
 Two small, unrelated stale-documentation spots found while surveying for this work got fixed along the way, since they were already identified and cost nothing extra to include: one file's own comment was still citing an already-superseded decision as if a real feature were still just a placeholder, and this project's own capability-gap notes were still saying a feature doesn't exist that shipped two decisions ago.
 
 Full account: `docs/DECISIONS.md` D-184.
+
+## The rest of the broker-readiness list: a latency budget, a caching story, a real batch-endpoint limitation, a fail-open/fail-closed contract, the identity seam, and a README rebuilt around capability instead of chronology
+
+**Owner:** main agent.
+
+Finished the list a real, online, latency-sensitive caller needed answered. A new document exists for exactly that reader — a real latency budget (both the in-process numbers this repository already measured and the real HTTP-plus-Postgres numbers a separate benchmarking effort already produced, put in one place for the first time), the actual caching recommendation for that caller's own traffic shape, and confirmation that the existing batch-check endpoint fits a caller gating several decisions per call well — reading its real implementation directly turned up one genuine, previously-undocumented sharp edge: a single item's runtime failure fails the whole batch and discards every other item's result, now stated plainly instead of assumed away, with the two real workarounds available today.
+
+Two things this project had never stated explicitly, stated now: what a caller should do when it simply cannot reach this service at all — fail closed, treating an unreachable check the same as a denied one, the same posture this service already takes toward its own dependency, with the real availability tradeoff named rather than hidden — and exactly what a real integration has to get right to turn "the user this request is authenticated as" into the subject id this service checks against, since nothing here verifies a credential of any kind.
+
+Then restructured the README itself around what was asked: capability, model, and the soundness claim, not a chronological list of every proof that shipped along the way. Ten sections that had grown into a narrated build history moved, verbatim, into their own new document — not summarized, not condensed, exactly as written — leaving the front page a much shorter, clearer path from "why this exists" to "try it yourself" to "how it works." Every cross-reference the move could have broken was checked directly rather than assumed safe: a few genuinely did break, all found and fixed, and every link in every touched document was confirmed to resolve against the real filesystem before calling this done.
+
+Full account: `docs/DECISIONS.md` D-185.
