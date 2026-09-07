@@ -304,17 +304,37 @@ to the onboarding problem rather than also credited with fixing `npx authz`.
 `README.md:13` links a live Railway deployment — so this is an
 onboarding/reproducibility gap, not a deployability blocker.)
 
-### Release integrity — mostly built, `docs/DECISIONS.md` D-172
+### Release integrity — built, `docs/DECISIONS.md` D-172, D-180
 
-**Status: mostly built and shipped.** This section records the gap as it
-stood before D-172 closed most of it — a new `.github/workflows/release.yml`,
-triggered only on a pushed `vX.Y.Z` git tag, rejects a lightweight or
-unsigned tag (verified through the GitHub REST API, the same mechanism
-behind the "Verified" badge), builds, generates a CycloneDX SBOM, and
-attaches it to a GitHub Release. Deliberately never touches npm
-publishing — `package.json` stays `"private": true`, per D-002's own still-
-standing decision — so the npm-provenance piece named below remains
-correctly out of scope, not silently dropped.
+**Status: built and shipped.** This section records the gap as it stood
+before D-172 built the tooling and D-180 (a real, live-confirmed
+correction — this section itself still said "mostly built," blocked on
+cutting an actual tag, until this entry) confirmed the tag itself landed:
+`.github/workflows/release.yml`, triggered only on a pushed `vX.Y.Z` git
+tag, rejects a lightweight or unsigned tag (verified through the GitHub
+REST API, the same mechanism behind the "Verified" badge), builds,
+generates a CycloneDX SBOM, and attaches it to a GitHub Release.
+Deliberately never touches npm publishing — `package.json` stays
+`"private": true`, per D-002's own still-standing decision — so the
+npm-provenance piece named below remains correctly out of scope, not
+silently dropped.
+
+**`v1.3.0` is a real, GitHub-verified signed tag, and the workflow ran
+clean against it, confirmed directly against the live repository, not
+assumed from this section's own stale prose:** `list_tags` shows `v1.3.0`
+on the real remote; the `Release` workflow's own run against it
+(`head_sha` matching the version-bump commit) completed with
+`conclusion: success` — meaning its own first step (reject a lightweight
+or unsigned tag) passed, so the tag really is a signed, annotated,
+GitHub-verified one, not merely present. Every later step ran too: `npm
+run build`, `npx cyclonedx-npm` (the real SBOM, `sbom.cdx.json`), and
+`softprops/action-gh-release` publishing the GitHub Release itself (with
+the SBOM attached as a release asset and `generate_release_notes: true`
+producing the changelog body) — [the live release](https://github.com/NovaVey/Relationship-Based-Authorization/releases/tag/v1.3.0)
+confirms all three. `docs/DECISIONS.md` D-172 itself is left exactly as it
+stood when written (a historical marker, per this project's own D-114/
+D-171 precedent for not silently editing a settled entry) — it's this
+section, the live-status tracker, that was stale.
 
 CodeQL (`.github/workflows/codeql.yml`, security-extended queries, weekly +
 every push/PR to main), OpenSSF Scorecard
@@ -323,23 +343,14 @@ to scorecard.dev), and Dependabot (`.github/dependabot.yml` plus the
 low-risk auto-merge in `.github/workflows/dependabot-auto-merge.yml`) are
 all real and running today.
 
-What's missing: no SBOM generation (CycloneDX/SPDX — confirmed absent
-repo-wide), no signed git tags (`git tag -l` returns zero tags in this repo
-at all, and no release workflow to hang signing off of), and no npm
-provenance attestation. That last one needs a caveat the brainstorm skips:
-`package.json` sets `"private": true`, so there's no `npm publish` step
-today for provenance to attach to — this is a gap that would matter if/when
-the project starts publishing to npm, not a hole in a live pipeline right
-now. `docs/github-governance.md`'s own Step 5 upgrade-path checklist
-already tracks two adjacent, deliberately-deferred items — signed commits
-and a second required reviewer (lines 133-138) — but never mentions signed
-tags or SBOM/provenance at all, so this is a genuine blind spot in that
-checklist, not a restatement of something already considered and
-consciously postponed. Scorecard already scores exactly these axes (SBOM,
-Signed-Releases, Pinned-Dependencies) on scorecard.dev, so the gap is
-externally visible today — fitting, given this project's own
-`file:line`-citation discipline makes "prove it rather than assert it" a
-real, load-bearing practice here, not just a slogan.
+The one piece still genuinely out of scope, not missing: npm provenance
+attestation. `package.json` sets `"private": true`, so there's no `npm
+publish` step for provenance to attach to — a gap that would matter
+if/when the project starts publishing to npm, not a hole in the live
+pipeline. `docs/github-governance.md`'s own Step 5 upgrade-path checklist
+never mentions signed tags or SBOM/provenance at all, so updating that
+checklist to reflect this section's own now-closed status is the one
+remaining loose end (a doc-sync task, not a capability gap).
 
 ## Proof machinery
 
