@@ -302,6 +302,7 @@ const apiErrorSchema: JsonSchema = {
             'forbidden',
             'not_found',
             'rate_limited',
+            'token_not_yet_observed',
             'infrastructure_unavailable',
             'internal_error',
           ],
@@ -351,7 +352,10 @@ const RESPONSE_429 = jsonResponse(
   errorResponseRef,
 );
 const RESPONSE_503 = jsonResponse(
-  '503 — infrastructure_unavailable (Postgres unreachable).',
+  '503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed ' +
+    "(a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's " +
+    'consistency-token discipline: retry immediately, never with backoff, distinct from ' +
+    'a genuine infrastructure_unavailable outage).',
   errorResponseRef,
 );
 

@@ -2992,3 +2992,15 @@ The commit merging the previous item's work turned `main`'s own CI red immediate
 Fixed with a per-test timeout increase sized to match this project's own already-established number for its other genuinely slow setup, rather than either shrinking the fixture (which would risk quietly defeating the very race the test exists to force) or touching any production code. Re-ran the exact file against a real local Postgres to confirm both tests pass comfortably inside the new budget before pushing.
 
 Full account: `docs/DECISIONS.md` D-183.
+
+## A distinguishable error for "this token hasn't been observed yet" — the first piece of hardening `/check` for an online caller
+
+**Owner:** main agent.
+
+Given a list of things worth doing before an online, latency-sensitive caller could lean on this service inside its own request path, started with the one that turned out to need a real code change, not just a documentation pass: a pinned check whose consistency token this database hadn't observed yet was indistinguishable from Postgres simply being down. Both real conditions produced the exact same generic error, which matters more than it sounds — a caller sophisticated enough to actually track consistency tokens needs to react to the two completely differently: retry the same request again right away for the first, or back off and treat the dependency as unhealthy for the second.
+
+Gave the first condition its own name — a distinct, documented error a caller can check for directly, without resorting to fragile message-text matching, wired through the one shared place every guarded route already funnels errors through, so every route this affects gets the fix from a single change rather than four separate ones. Wrote up the actual discipline this makes possible: retry immediately, never with backoff, and only treat it as a real problem after several immediate retries in a row still fail against the same token.
+
+Two small, unrelated stale-documentation spots found while surveying for this work got fixed along the way, since they were already identified and cost nothing extra to include: one file's own comment was still citing an already-superseded decision as if a real feature were still just a placeholder, and this project's own capability-gap notes were still saying a feature doesn't exist that shipped two decisions ago.
+
+Full account: `docs/DECISIONS.md` D-184.

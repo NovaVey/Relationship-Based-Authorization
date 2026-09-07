@@ -619,9 +619,11 @@ story than most agent-tooling stacks have today, as long as the anchor is
 actually shipped somewhere the database's own privileged user can't reach.
 
 Wildcard subjects would genuinely help with "any agent may read public
-docs," and genuinely don't exist: D-114 named them explicitly out of scope
-for v1 ("no analog anywhere in this grammar"), never reopened since — a
-real, open, but already-documented gap, and the one item on this whole list
-I'd pick up first if this integration became real, precisely because the
-other two pieces (the exclusion operator, the hash chain) are already
+docs" — and, since this was first written, they've shipped: D-114 named
+them explicitly out of scope for v1, but D-171 built them (a per-relation,
+opt-in `<ns>:*` grammar — see this file's own "Public/wildcard subjects"
+section above for exactly what shipped and what it deliberately doesn't
+cover), and D-181 later closed a real soundness question D-178 had left
+open about them. All three pieces this section originally named — the
+exclusion operator, the hash chain, and wildcard subjects — are now
 sitting there, shipped and hardened, waiting for a caller.

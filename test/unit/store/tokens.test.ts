@@ -31,6 +31,7 @@ import {
   currentToken,
   encodeToken,
   decodeToken,
+  TokenNotObservedError,
 } from '../../../src/store/tokens.js';
 
 /**
@@ -103,6 +104,16 @@ describe('assertTokenObserved rejects a malformed token before ever querying the
         `must be a non-negative integer returned by an earlier write or delete`,
     );
   });
+
+  it('a-malformed-token-throws-a-plain-error-never-tokennotobservederror-a-request-shape-bug-is-not-a-consistency-condition', async () => {
+    // D-183's broker-readiness follow-on: TokenNotObservedError exists so a
+    // caller can distinguish "retry immediately" from "Postgres is down" —
+    // a malformed token is neither of those, it's a caller bug this API's
+    // own Zod schema already catches earlier in practice (see tokens.ts's
+    // own doc comment), so this branch stays a plain Error on purpose.
+    const { pool } = poolThatMustNeverBeQueried();
+    await expect(assertTokenObserved(pool, NaN)).rejects.not.toBeInstanceOf(TokenNotObservedError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -135,6 +146,16 @@ describe('assertTokenObserved — a valid token reaches the real, unchanged obse
     await expect(assertTokenObserved(pool, 0)).rejects.toThrow(
       'consistency token 0 has not been observed by this database (highest known token: none — no writes yet)',
     );
+  });
+
+  it('a-not-yet-observed-token-throws-tokennotobservederror-specifically-not-a-plain-error-D-183', async () => {
+    // The one behavior change D-183 makes to this function: this branch now
+    // throws a distinguishable class, not merely an Error with the same
+    // message — src/api/server.ts's runOrInfrastructureError relies on
+    // exactly this via `instanceof` to route a 503 token_not_yet_observed
+    // response instead of the generic infrastructure_unavailable one.
+    const { pool } = poolWithMaxToken('10');
+    await expect(assertTokenObserved(pool, 11)).rejects.toBeInstanceOf(TokenNotObservedError);
   });
 });
 

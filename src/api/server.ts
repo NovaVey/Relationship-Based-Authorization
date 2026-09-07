@@ -66,7 +66,7 @@ import { performCheck, type PerformCheckResult } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { listObjects, listUsers } from '../audit/list.js';
 import { writeTuple, deleteTuple, type TupleKey, type WriteTupleResult } from '../store/tuples.js';
-import { decodeToken, currentToken } from '../store/tokens.js';
+import { decodeToken, currentToken, TokenNotObservedError } from '../store/tokens.js';
 import { fetchWatchEvents, WATCH_DEFAULT_BATCH_LIMIT } from '../store/watch.js';
 import { compileSchema } from '../schema/dsl/compiler.js';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
@@ -101,6 +101,7 @@ import {
   forbiddenError,
   invalidRequestError,
   infrastructureUnavailableError,
+  tokenNotYetObservedError,
   internalError,
   rateLimitedError,
   notFoundError,
@@ -436,6 +437,15 @@ function findOutOfScopeNamespace(
  * infrastructure failure — see each function's own doc comment) — so a
  * given DB outage reports identically whether reached through the CLI or
  * this API: exit code 3 there, `503 infrastructure_unavailable` here.
+ *
+ * One case is distinguished before falling back to that generic path: a
+ * `TokenNotObservedError` (`src/store/tokens.ts`) — thrown by either of
+ * `productionCheck`'s two real token-freshness checks, reachable from
+ * every route this wrapper guards that accepts `atToken` (`/check`,
+ * `/check/batch`, `/list-objects`, `/list-users`) — gets its own
+ * `tokenNotYetObservedError` response instead of the generic
+ * infrastructure one. See that function's own doc comment for why this
+ * distinction is worth making rather than folding it into the same 503.
  */
 async function runOrInfrastructureError<T>(
   reply: FastifyReply,
@@ -444,7 +454,11 @@ async function runOrInfrastructureError<T>(
   try {
     return await fn();
   } catch (err) {
-    await sendApiError(reply, infrastructureUnavailableError((err as Error).message));
+    const resp =
+      err instanceof TokenNotObservedError
+        ? tokenNotYetObservedError(err.message)
+        : infrastructureUnavailableError((err as Error).message);
+    await sendApiError(reply, resp);
     return undefined;
   }
 }

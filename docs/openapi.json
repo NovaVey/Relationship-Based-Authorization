@@ -59,6 +59,7 @@
                   "forbidden",
                   "not_found",
                   "rate_limited",
+                  "token_not_yet_observed",
                   "infrastructure_unavailable",
                   "internal_error"
                 ]
@@ -201,7 +202,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -365,7 +366,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -466,7 +467,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -590,7 +591,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -732,7 +733,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -796,7 +797,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -885,7 +886,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -967,7 +968,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -1085,7 +1086,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }
@@ -1226,7 +1227,7 @@
             }
           },
           "503": {
-            "description": "503 — infrastructure_unavailable (Postgres unreachable).",
+            "description": "503 — infrastructure_unavailable (Postgres unreachable), or token_not_yet_observed (a pinned atToken this database has not observed yet — see docs/CONSISTENCY.md's consistency-token discipline: retry immediately, never with backoff, distinct from a genuine infrastructure_unavailable outage).",
             "content": {
               "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
             }

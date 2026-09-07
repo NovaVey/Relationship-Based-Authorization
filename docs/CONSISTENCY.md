@@ -70,8 +70,12 @@ has actually advanced to at least that token, before it reads a single
 `relation_tuples` row. If it hasn't yet — a genuinely impossible situation
 on a single Postgres instance with synchronous commits, but the check
 exists as a real, testable assertion rather than an assumption — the check
-fails loudly (an infrastructure error) rather than silently reading stale
-data and returning a wrong answer.
+fails loudly rather than silently reading stale data and returning a wrong
+answer. The API surfaces this as its own distinguishable `503
+token_not_yet_observed` (`src/api/errors.ts`), not the generic `503
+infrastructure_unavailable` a real Postgres outage produces — see
+"Consistency-token discipline for an online caller" below for exactly what
+that distinction is for and how to react to it.
 
 "Everything before it" holds for _any_ observed token, not only one the
 same caller minted themselves — including a token that names a write some
@@ -113,6 +117,62 @@ is exercised again, directly against the production resolver, in
 and its delete-side counterpart), plus the fail-closed case a token scheme
 also has to get right — a token higher than any write this database has
 actually seen yet is rejected, not silently resolved as if it were valid.
+
+## Consistency-token discipline for an online caller
+
+The guidance above is written for anyone reading this document once. A
+caller that pins `atToken` on every request as a matter of course — the
+shape an online, latency-sensitive policy-decision point takes, checking
+permissions inline on a real request path rather than occasionally from a
+script — needs a stated reaction to the one pinned-check outcome that
+isn't a plain allow/deny: the token it just minted (from its own prior
+write, or handed to it by an upstream caller) hasn't been observed yet.
+
+**What actually happens, mechanically.** Two independent real call sites
+enforce the exact same floor (`src/store/tokens.ts`'s `assertTokenObserved`,
+`src/resolve/production/resolver.ts`'s private
+`assertTokenObservedOnSnapshot` — see `ProductionCheckOptions.atToken`'s own
+doc comment for why both exist and run in that order). Either one throws a
+`TokenNotObservedError` the moment `token` exceeds what it can currently
+see; the API surface (`src/api/server.ts`'s `runOrInfrastructureError`)
+recognizes that specific class and reports it as its own `503
+token_not_yet_observed` — never the generic `503 infrastructure_unavailable`
+a real Postgres outage produces, and never a silent, wrong `allowed: false`.
+
+**The discipline: retry immediately, not with backoff, and only escalate
+after several immediate retries keep failing.** This is the single
+sentence a caller who wires this into an online decision path needs, and
+it follows directly from what the condition actually is on this project's
+single-Postgres design (see "What this project deliberately does not
+claim," directly below): a token this database really did issue becomes
+observable the moment the write that minted it commits, which on one
+Postgres instance with synchronous commits is not a window worth backing
+off for — a fresh call opens a fresh transaction/snapshot, and that alone
+resolves the ordinary case. Treat `token_not_yet_observed` the way a
+database client treats a serialization-failure retry, not the way it
+treats a connection-refused backoff: retry the same request again right
+away, a handful of times, before concluding something is actually wrong.
+
+**When to stop retrying and treat it as a real problem instead.** If
+`token_not_yet_observed` keeps recurring past several immediate retries for
+the same token, the token itself is almost certainly not one this database
+will ever observe — a token from a different deployment or environment
+(the opaque encoding carries no deployment identity by design; see this
+document's own account of what `encodeToken`/`decodeToken` do and don't
+promise), or a caller holding a stale value far longer than it should have.
+That is a caller-side bug to fix, not a condition to keep retrying against
+this database, and not the same remediation as a genuine `503
+infrastructure_unavailable` (back off, check whether Postgres itself is
+reachable) — the whole reason this project gives the two conditions
+different `code`s is so a caller doesn't have to guess which one it's
+looking at from `message` text alone.
+
+**Applies identically to every route this floor gates, not just `/check`.**
+`/check/batch`, `/list-objects`, and `/list-users` all accept `atToken` and
+route through the same `runOrInfrastructureError`, so the same distinction
+and the same retry discipline hold for all of them — see each route's own
+`docs/openapi.json`/`GET /openapi.json` entry for the shared `503` response
+description.
 
 ## What this project deliberately does not claim
 
