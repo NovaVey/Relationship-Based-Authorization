@@ -231,6 +231,22 @@ async function runCandidateCall(checkPool: Pool): Promise<CandidateOutcome> {
 
 describe('a real second rebuild against unchanged data races many real listObjects/fetchReverseIndexCandidates calls through gate 2 while relation_membership_index may be mid-TRUNCATE, and every one still returns the complete, correct set with zero throws', () => {
   it('every-call-fired-throughout-the-seconds-rebuilds-transaction-lifetime-returns-exactly-the-five-real-marker-docs-truncated-false-with-zero-throws', async () => {
+    // (fail-check log, D-183): a real CI run (main, post-D-182 merge) timed
+    // out this file's OTHER test at the shared 60s testTimeout — confirmed,
+    // not assumed, against this file's own very first CI run the day D-175
+    // merged it: the file's own two tests already summed to 61555ms THEN,
+    // meaning at least one of them was already living within a hair of this
+    // ceiling from day one, not a regression either D-181 or D-182
+    // introduced. Neither test's own real work (a schema publish, a
+    // 3000-wide bulk fixture, a real rebuild, 25-30 concurrent real
+    // Postgres calls) is a bug to fix — it's exactly what this file's own
+    // top-of-file doc comment says the race needs to force real contention.
+    // A per-test override, not a smaller fixture: shrinking WIDE_FIXTURE_SIZE
+    // risks the opposite, worse failure — the forced-lock-timeout test no
+    // longer reliably reaching real contention at all (silently passing for
+    // the wrong reason) — so both tests get the same explicit headroom this
+    // repo's own vitest.integration.config.ts already grants container
+    // startup (hookTimeout: 120_000), rather than a new, untested number.
     await publishFixtureSchema();
     await bulkInsertWideFixture(1, WIDE_FIXTURE_SIZE);
     await writeMarkerGrants();
@@ -302,7 +318,7 @@ describe('a real second rebuild against unchanged data races many real listObjec
         `listObjects calls: ${listOutcomes.length}, 0 throws | ` +
         `candidate calls: ${candidateOutcomes.length} (${hits.length} genuine hits, ${candidateOutcomes.length - hits.length} misses/blocked-then-fresh)`,
     );
-  });
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -374,5 +390,5 @@ describe('a real Postgres error inside the candidate query itself (forced via a 
       `[reverse-lookup forced lock-timeout race] listObjects calls: ${listOutcomes.length}, 0 throws | ` +
         `candidate calls: ${candidateOutcomes.length} (${hits.length} genuine hits, ${misses.length} misses, 0 throws)`,
     );
-  });
+  }, 120_000);
 });
