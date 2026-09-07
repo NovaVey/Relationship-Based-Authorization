@@ -240,8 +240,11 @@ describe('verify-schema --from-openfga — end to end through a real subprocess,
       '--invariants',
       THIRDPARTY_DIR + 'openfga-github.invariant',
     ]);
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain('VIOLATED');
+    // openfga-github.invariant now closes via NeverRelationConstraint
+    // (docs/DECISIONS.md) — HOLDS, exit 0, matching thirdparty-survey.
+    // test.ts's own updated corpus.
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('HOLDS');
     // Disclosed translation notes are written to stderr, not silently
     // dropped — see verify.ts's own doc comment for why.
     expect(result.stderr).toContain('translate-openfga:');
@@ -288,8 +291,11 @@ describe('verify-schema --from-spicedb — end to end through a real subprocess,
       '--invariants',
       THIRDPARTY_DIR + 'spicedb-github.invariant',
     ]);
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain('VIOLATED');
+    // spicedb-github.invariant now closes via NeverRelationConstraint
+    // (docs/DECISIONS.md) — HOLDS, exit 0, matching thirdparty-survey.
+    // test.ts's own updated corpus.
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('HOLDS');
     expect(result.stderr).toContain('translate-spicedb:');
     expect(result.stderr).toContain('expanded to');
   }, 20_000);

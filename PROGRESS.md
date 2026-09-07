@@ -2968,3 +2968,17 @@ That process found two real things, not one, and they turned out to be connected
 Every other direction the investigation checked came back genuinely sound, and that was proven rather than assumed too: real schemas run through the real tool, cross-checked by more than one person independently reproducing the same result. Both bugs are now fixed, each with its own new permanent regression test proving the fix and pinning the exact failure mode the investigation found.
 
 Full account: `docs/DECISIONS.md` D-181.
+
+## Closing the invariant language's own disclosed root cause — a new primitive closes 6 more of the survey's still-open violations
+
+**Owner:** main agent.
+
+The larger of the two remaining open items, picked up after the wildcard-soundness question closed: the third-party survey's own "recurring finding" had named the real fix needed to close six still-`VIOLATED` entries — a way for an invariant to say a relation can never be satisfied at all, by anyone, through any route, not just rule out one already-known fact. Built exactly that, and it closes all six: the published tally moves from 8 VIOLATED/4 HOLDS to 2 VIOLATED/10 HOLDS.
+
+Investigated and designed before writing any implementation, the same way earlier work in this session did: several independent readers traced exactly how the verifier's own search engine, candidate generator, and SMT/CHC solvers would each need to change, then re-ran the real, current witness for all six target schemas live rather than trusting the published table. A proposed design was then checked against all six real fixtures directly — adding the proposed constraint lines to real copies and confirming each one actually converges to a safe verdict — and, separately, a reviewer whose only job was to try to break the proposal found a genuine flaw before any of it shipped: two unrelated relations in this project's own real fixture corpus happen to share a bare name, and the first version of the design would have silently treated them as the same thing, hiding a real violation through the one nobody meant to touch. Fixed by requiring the new constraint to name its target precisely enough that this collision can't happen — the unsafe, ambiguous form doesn't just get discouraged, it doesn't parse at all.
+
+Building it also surfaced something the earlier, narrower version of this same idea never got a chance to see: blocking one relation's own escape route can just push the search onto a second, completely independent one nobody had looked for yet, since the earlier fix could never close the first escape fully enough to make the second visible. Two of the six real fixtures needed more than one new line for exactly this reason, caught by insisting on a genuinely safe verdict rather than stopping at the first improvement.
+
+The two tiers that reason with an actual solver rather than plain graph search — the ones built to handle recursion and interactions this simpler search can't decide on its own — both decline outright rather than try to encode the new constraint: one of them has a real, confirmed structural reason a partial attempt would go quietly wrong under exactly the circumstance these invariants create on purpose. Declining just means the invariant is decided by a different, already-trustworthy path instead, never a silently wrong answer.
+
+Full account: `docs/DECISIONS.md` D-182.

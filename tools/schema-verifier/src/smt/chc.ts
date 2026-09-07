@@ -85,6 +85,20 @@ export async function tryChcTier(
     return undefined;
   }
 
+  if (invariant.constraints.some((c) => c.kind === 'neverRelation')) {
+    // `never <namespace>#<relation>(<var>)` (docs/DECISIONS.md, the entry
+    // adding `NeverRelationConstraint`) is unsound to encode as a Horn-clause
+    // guarded rule: Datalog/Horn least-fixpoint semantics is monotone — a
+    // guarded "this atom is false unless excepted" rule is silently
+    // bypassed the moment any OTHER rule (e.g. a `relationEquals` given's
+    // own ground fact) independently derives the same atom, since rules
+    // can only ever add derivations, never retract one another's.
+    // Confirmed empirically before this decision shipped, not assumed.
+    // Declined upfront, same as `notRelationEquals` above and for the
+    // same reason: a property of the invariant, not of the schema graph.
+    return undefined;
+  }
+
   const { Context } = await getZ3();
   const ctx = new Context('main');
   const encoded = encodeChc(ctx, graph, invariant);

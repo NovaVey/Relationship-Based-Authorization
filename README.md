@@ -252,13 +252,20 @@ new `notRelationEquals` primitive, D-131) moved the count to
 **7 `VIOLATED`, 5 `HOLDS`** for a time — one of those five later moved
 back to `VIOLATED` once a newer exact SMT tier (D-151) started deciding
 its goal instead of an earlier, non-exhaustive bounded search (D-176),
-the real, current, and now permanently regression-tested count is **8
-`VIOLATED`, 4 `HOLDS`**. Six of the eight violations still share the
-original root cause; the other two (`openfga-expenses`,
-`spicedb-userdefined-roles`) are each a distinct escape shape of their
-own. The survey's own biggest result was never any one schema — it's this
-finding about the invariant language itself, and the fact that closing
-part of it is now a real, tracked, in-progress story rather than a static
+moving it to **8 `VIOLATED`, 4 `HOLDS`**. A second, stronger primitive
+closed the remaining six violations sharing that same root cause —
+`never <namespace>#<relation>(<var>)`, "this relation can never be
+satisfied via any object, anywhere" (not just one already-known fact),
+namespace-qualified by design after an adversarially-found unsoundness
+(two unrelated namespaces can share a relation name; a bare-name match
+would silently conflate them) made that qualifier a correctness
+requirement, not a style choice — bringing the real, current, and now
+permanently regression-tested count to **2 `VIOLATED`, 10 `HOLDS`**. The
+remaining two (`openfga-expenses`, `spicedb-userdefined-roles`) are each a
+distinct escape shape neither primitive was designed to reach. The
+survey's own biggest result was never any one schema — it's this finding
+about the invariant language itself, and the fact that closing it was a
+real, tracked story with two purpose-built primitives, not a static
 snapshot. Full table and reasoning: [`docs/FINDINGS.md`](docs/FINDINGS.md).
 An OpenFGA front end (D-178) and a SpiceDB front end (D-179) now both
 translate a real model into this project's own DSL automatically, each
@@ -269,14 +276,15 @@ this DSL's own grammar) handled correctly with no special-casing at all,
 since the same printer built for OpenFGA already parenthesizes from tree
 shape alone.
 
-`docs/DECISIONS.md` D-114 through D-131 has the complete build history —
-the small-model property and exactly where it stops applying, the SMT
-encoding sketch for the general case, why the verifier imports this
-repo's own parser and engine rather than reimplementing either, the
-ten-item definition-of-done checklist confirmed against the real, shipped
-result rather than assumed (D-114–D-126), and three further real fixes
-that landed after that checklist first closed: a confirmed false `HOLDS`
-in the monotone-fragment exact prover (D-129), exact decisions for some
+`docs/DECISIONS.md` D-114 through D-131 (and, for the second closing
+primitive above, D-182) has the complete build history — the small-model
+property and exactly where it stops applying, the SMT encoding sketch for
+the general case, why the verifier imports this repo's own parser and
+engine rather than reimplementing either, the ten-item
+definition-of-done checklist confirmed against the real, shipped result
+rather than assumed (D-114–D-126), and three further real fixes that
+landed after that checklist first closed: a confirmed false `HOLDS` in
+the monotone-fragment exact prover (D-129), exact decisions for some
 intersection/exclusion cases (D-130), and the `notRelationEquals`
 primitive above (D-131). Tag `schema-verifier-v1-complete` marks the
 commit where the original ten-item checklist closed; the verifier's own

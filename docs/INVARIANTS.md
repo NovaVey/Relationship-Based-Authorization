@@ -41,10 +41,12 @@ organization`. Each names a role a witness (a concrete object, once the
    resolved against a real compiled schema only when an invariant and a
    schema graph are walked together (build spec §5) — parsing an
    invariant on its own never requires a schema to exist yet.
-2. **Constraints** between those variables. Three kinds exist today:
+2. **Constraints** between those variables. Four kinds exist today:
    the first two are the minimum needed to state the two worked
-   properties below; the third (`docs/DECISIONS.md` D-131) is a later,
-   deliberately narrow addition — see its own subsection further down.
+   properties below; the third (`docs/DECISIONS.md` D-131) and fourth
+   (`docs/DECISIONS.md`, the entry adding `NeverRelationConstraint`) are
+   later, purpose-built additions — see their own subsections further
+   down.
    - `distinct(orgA, orgB)` — every listed variable must bind to a
      different object. This is the entire reason the invariant language
      is a constraint problem and not plain reachability: "cross-tenant"
@@ -59,6 +61,10 @@ organization`. Each names a role a witness (a concrete object, once the
    - `not tenant(s) = orgA` — the negation of the line above: no witness
      may ever assume a tuple where applying `tenant` to `s` equals
      `orgA`. Deliberately narrow — see "Negative constraints" below.
+   - `never org#admin(s)` — a stronger negative: `s` can never resolve as
+     `org#admin`'s subject at all, via any of that relation's own
+     declared branches, at any object. See "The schema-level negative"
+     below.
 3. A **goal** — `goal: view(s, o)` — the permission call the verifier
    searches for a witness to. The verifier's answer is three-valued:
    `HOLDS` (no such witness exists, within whatever fragment/bound the
@@ -76,6 +82,7 @@ invariant <name> {
   distinct(<var>, <var>, ...)
   <relation>(<var>) = <var>
   not <relation>(<var>) = <var>
+  never <namespace>#<relation>(<var>)
   ...
   goal: <permission>(<var>, <var>)
 }
@@ -84,8 +91,9 @@ invariant <name> {
 One statement per line; `//` starts a line or trailing comment; blank
 lines are ignored. Variables must all be declared before any constraint
 or the goal line. Exactly one `goal:` line per invariant, and it must
-come last. `invariant`, `distinct`, `goal`, and `not` are reserved words.
-A file may declare more than one `invariant { ... }` block.
+come last. `invariant`, `distinct`, `goal`, `not`, and `never` are
+reserved words. A file may declare more than one `invariant { ... }`
+block.
 
 Two identifier vocabularies, deliberately not one: an invariant's own
 name and every relation/permission/type name (anything meant to resolve
@@ -243,10 +251,81 @@ constraints" shape. This primitive closes exactly **two** of them
 tupleToUserset chain with no alternate escape route. The other six each
 have a second, structurally different escape (a userset-subject or
 recursive path) this narrow primitive was never designed to reach, and
-stay `VIOLATED`. See `docs/DECISIONS.md` D-131 for the full account,
-including the empirical, entry-by-entry check that replaced an original,
-more optimistic "closes most of them" estimate with this narrower,
-verified one.
+stayed `VIOLATED` under it alone. See `docs/DECISIONS.md` D-131 for the
+full account, including the empirical, entry-by-entry check that
+replaced an original, more optimistic "closes most of them" estimate with
+this narrower, verified one. Those six were later closed by a different,
+purpose-built primitive — see immediately below.
+
+### The schema-level negative — `never <namespace>#<relation>(<var>)`
+
+`never repo#admin_direct(s)` — exactly the primitive `notRelationEquals`'s
+own doc comment named as deliberately out of scope: "this relation can
+never be satisfied via any object, anywhere." Where `not` rules out one
+already-known triple, `never` excludes the _entire_ declared relation
+from ever resolving the invariant's own goal subject — via its
+bare-principal branch, a wildcard-declared branch, or any userset-subject
+branch it declares — at any object, named or freshly introduced
+mid-search, at any recursion depth.
+
+**Namespace-qualified by design, not just convention.** The grammar is
+`never <namespace>#<relation>(<var>)`, reusing the schema DSL's own
+`type#relation` userset-subject notation — never a bare relation name.
+This closes a real, adversarially-found unsoundness caught before this
+primitive shipped: two unrelated namespaces routinely declare a
+same-named relation (this project's own third-party fixture corpus has
+`team.member` and `group.member`, genuinely unrelated). A bare-name match
+would silently block both whenever they collide, discarding a real
+violation through the unrelated one while believing it had closed the
+intended escape. Requiring the namespace makes that shape structurally
+unparseable, not merely discouraged.
+
+**A `relationEquals` given is exempted, not treated as a contradiction.**
+If the invariant's own givens already establish `<relation>(x) = <var>`
+for some object `x` — the ordinary way these invariants pin their own
+legitimate premise — that fact is exempted from the block; every _other_
+object (named or fresh) stays blocked. Without this, an invariant needing
+both a `relationEquals` given and a `never` naming the same relation/value
+would be self-contradictory for no useful reason: the given already
+represents the one route the invariant means to hold fixed, and `never`'s
+job is to rule out an _additional_, adversarial instance of the same
+relation resolving the same value, not to retract the invariant's own
+premise.
+
+Enforced at the exact search's `direct`-edge dispatch (checked once per
+dispatch, before either subject-type branch is tried — a match means the
+whole node can never grant the fixed goal subject, via any of its own
+declared branches) and at `boundedSearch`'s own candidate generation
+(bare-principal candidates matching the constraint's own subject are
+dropped; userset-subject and wildcard candidates for the blocked relation
+are dropped unconditionally, since whatever object they'd otherwise cover
+already has its own bare grant written as a _given_, always included).
+**Both the SMT and CHC tiers decline outright** whenever a `never`
+constraint is present — a disclosed scope boundary, not a mis-encoding:
+the CHC tier's Horn-clause/Datalog semantics is monotone (a guarded "this
+atom is false unless excepted" rule is silently bypassed the moment any
+other rule, e.g. a `relationEquals` given's own ground fact, independently
+derives the same atom — confirmed empirically, not assumed), and the
+regular SMT tier's own predicate-per-subject-type-branch encoding would
+need a materially bigger construction (negating a relation's whole
+recursively-compiled reachability sub-formula, not one atom) to close the
+userset-subject branch soundly — real, tractable future work, not
+attempted here. Declining routes the invariant on to bounded search
+instead, which does enforce this constraint in full — never a silently
+wrong verdict.
+
+**Real-world value, honestly stated:** this closes 6 of the 8 remaining
+`VIOLATED` entries `notRelationEquals` disclosed but couldn't reach —
+`openfga-github`, `spicedb-superuser`, `spicedb-docs-style-sharing`,
+`openfga-gdrive`, `openfga-slack`, `spicedb-github` — bringing the
+third-party survey's own tally to **2 VIOLATED, 10 HOLDS**. The remaining
+two (`openfga-expenses`'s self-referential manager loop,
+`spicedb-userdefined-roles`'s own distinct unconstrained-second-tuple
+escape) are structurally different shapes this primitive was never
+designed to reach either. See `docs/DECISIONS.md` (the entry adding
+`NeverRelationConstraint`) for the full account, including the
+adversarially-found collision defect and how the given-exemption
+refinement was empirically validated against every closing entry.
 
 ### Self-validation (§6) — no verdict is trusted on the search's word alone
 

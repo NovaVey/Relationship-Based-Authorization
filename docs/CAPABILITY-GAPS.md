@@ -436,20 +436,27 @@ previously got wrong:**
    parenthesization logic (built for OpenFGA) turned out to already handle
    the precedence inversion correctly with zero SpiceDB-specific code.
 
-### Close the invariant-language root cause — the stale number is now fixed; a genuinely new primitive stays open
+### Close the invariant-language root cause — built, `docs/DECISIONS.md` D-131, D-182
 
-**Status: partially closed.** The stale-number half of this section is
-now fixed: `docs/FINDINGS.md` publishes the corrected `8 VIOLATED, 4
+**Status: built and shipped.** The stale-number half of this section was
+fixed first: `docs/FINDINGS.md` published the corrected `8 VIOLATED, 4
 HOLDS` count, with `spicedb-userdefined-roles`'s own flip (`HOLDS up to k
 = 1` → a confirmed, exact `VIOLATED`, once D-151's SMT tier was actually
 re-run against it) recorded there in full, plus a new permanent
 regression guard (`tools/schema-verifier/test/thirdparty-survey.test.ts`)
 pinning all twelve published verdicts so a future drift like this one
-can't happen silently again. The section below is otherwise left as it
-stood before that fix, for context — and its own closing recommendation
-(a schema-level "never satisfiable via any object, anywhere" primitive)
-remains genuinely unbuilt, deliberately scoped out of this pass as
-comparable in size to D-131's own primitive work, not attempted here.
+can't happen silently again. D-182 then built the section's own closing
+recommendation — the schema-level "this relation can never be satisfied
+via any object, anywhere" primitive (`NeverRelationConstraint`) — and
+closed 6 of the remaining 8 `VIOLATED` entries with it:
+`openfga-github`, `spicedb-superuser`, `spicedb-docs-style-sharing`,
+`openfga-gdrive`, `openfga-slack`, `spicedb-github`. `docs/FINDINGS.md`
+now publishes **2 VIOLATED, 10 HOLDS** — the remaining two
+(`openfga-expenses`'s self-referential manager loop,
+`spicedb-userdefined-roles`'s own distinct escape) are structurally
+different shapes neither primitive was ever designed to reach. The
+section below is otherwise left as it stood before either fix, for
+context.
 
 This is worth leading with a correction rather than the gap itself:
 `docs/FINDINGS.md:101` used to publish "7 VIOLATED, 5 HOLDS" (now
