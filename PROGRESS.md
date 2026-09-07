@@ -2982,3 +2982,13 @@ Building it also surfaced something the earlier, narrower version of this same i
 The two tiers that reason with an actual solver rather than plain graph search — the ones built to handle recursion and interactions this simpler search can't decide on its own — both decline outright rather than try to encode the new constraint: one of them has a real, confirmed structural reason a partial attempt would go quietly wrong under exactly the circumstance these invariants create on purpose. Declining just means the invariant is decided by a different, already-trustworthy path instead, never a silently wrong answer.
 
 Full account: `docs/DECISIONS.md` D-182.
+
+## A real CI timeout, fixed before resuming the broker-readiness work it interrupted
+
+**Owner:** main agent.
+
+The commit merging the previous item's work turned `main`'s own CI red immediately afterward — one test in the reverse-lookup concurrent-rebuild isolation file timed out at the shared 60-second ceiling. Checked whether either just-merged change could plausibly be the cause first (neither touches any file this test exercises), then went back to this test file's own very first CI run, months of history ago, and confirmed directly: it was already living within a hair of that same ceiling the day it was first introduced, never a regression from anything recent. This test's own real cost — a wide bulk fixture, a real concurrent rebuild, dozens of real concurrent Postgres calls — is exactly what its own design intentionally forces to prove a real race survives, not a bug to chase out of the code.
+
+Fixed with a per-test timeout increase sized to match this project's own already-established number for its other genuinely slow setup, rather than either shrinking the fixture (which would risk quietly defeating the very race the test exists to force) or touching any production code. Re-ran the exact file against a real local Postgres to confirm both tests pass comfortably inside the new budget before pushing.
+
+Full account: `docs/DECISIONS.md` D-183.
