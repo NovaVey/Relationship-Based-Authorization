@@ -8,7 +8,11 @@
  * both already follow.
  */
 import { WILDCARD_SUBJECT_ID, type CompiledSchema } from '../../../../src/schema/dsl/types.js';
-import type { Invariant, NotRelationEqualsConstraint } from '../invariants/types.js';
+import type {
+  Invariant,
+  NeverRelationConstraint,
+  NotRelationEqualsConstraint,
+} from '../invariants/types.js';
 import type { NodeId } from '../ir/types.js';
 import type { WitnessTuple } from '../reachability/types.js';
 
@@ -128,12 +132,41 @@ export function generateCandidateTuples(
     (c): c is NotRelationEqualsConstraint => c.kind === 'notRelationEquals',
   );
 
+  // `never <namespace>#<relation>(<var>)`'s bounded-search-side
+  // enforcement (docs/DECISIONS.md, the entry adding
+  // `NeverRelationConstraint`) — a generalization of the
+  // `notRelationEquals` filter just above, closing exactly the escape
+  // that filter's own guard comment says it must never touch: a
+  // userset-subject (or wildcard) candidate. Unlike
+  // `../reachability/search.ts`'s own exact-search enforcement, this
+  // needs no separate "exempt the object a relationEquals given already
+  // pins" carve-out: `generateGivenTuples` (above) already writes that
+  // given fact into *every* trial unconditionally, before any candidate
+  // subset is even chosen — so dropping the redundant candidate that
+  // would otherwise also represent the exact same fact changes no
+  // trial's outcome, exempt object included. Every candidate this drops
+  // is therefore either genuinely forbidden by the constraint, or
+  // redundant with a given already present regardless — never a real
+  // escape route silently lost.
+  const neverRelation: NeverRelationConstraint[] = invariant.constraints.filter(
+    (c): c is NeverRelationConstraint => c.kind === 'neverRelation',
+  );
+  function isNeverBlockedRelation(namespace: string, name: string): boolean {
+    return neverRelation.some((nc) => nc.namespace === namespace && nc.relation === name);
+  }
+
   for (const relationNodeId of reachableRelations) {
     const { namespace, name } = splitNodeId(relationNodeId);
     const relation = schema.namespaces[namespace]?.relations[name];
     if (!relation) continue; // unreachable for a real CompiledSchema — defensive only
+    const neverBlocked = isNeverBlockedRelation(namespace, name);
     for (const objectId of pools.get(namespace) ?? []) {
       for (const st of relation.subjectTypes) {
+        // A userset-subject entry for a `never`-blocked (namespace,
+        // relation) is dropped unconditionally, regardless of object —
+        // see this function's own doc comment above for why no
+        // per-object exemption is needed here.
+        if (neverBlocked && st.relation !== undefined) continue;
         // A wildcard-declared subject type (`<ns>:*`) has exactly one
         // legal grant shape: the literal WILDCARD_SUBJECT_ID sentinel,
         // covering every subject of `st.namespace` at once — never a
@@ -151,6 +184,11 @@ export function generateCandidateTuples(
         // object is enough — unlike a bare-principal entry, there is no
         // pool of individuals to enumerate for a wildcard grant.
         if (st.wildcard === true) {
+          // Dropped unconditionally for the same reason the
+          // userset-subject branch above is (a `never`-blocked
+          // relation's wildcard grant is either forbidden outright, or
+          // redundant with a given already covering the exempt object).
+          if (neverBlocked) continue;
           const tuple: WitnessTuple = {
             objectType: namespace,
             object: objectId,
@@ -175,6 +213,21 @@ export function generateCandidateTuples(
             st.relation === undefined &&
             notRelationEquals.some(
               (c) => c.relation === name && c.subject === objectId && c.value === subjectId,
+            )
+          ) {
+            continue;
+          }
+          // `neverRelation`'s bare-principal clause — see this function's
+          // own doc comment above. `st.relation === undefined` is always
+          // true here whenever `neverBlocked`, since a userset-subject
+          // entry for a blocked relation never reaches this loop at all
+          // (already `continue`d above); the check is kept explicit
+          // anyway to match `notRelationEquals`'s own defensive style.
+          if (
+            st.relation === undefined &&
+            neverRelation.some(
+              (nc) =>
+                nc.namespace === namespace && nc.relation === name && nc.subject === subjectId,
             )
           ) {
             continue;

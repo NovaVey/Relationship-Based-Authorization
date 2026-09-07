@@ -2,6 +2,17 @@
 // into member/writer/commenter anywhere in the schema) should never
 // become a writer on one of that workspace's channels just by being a
 // guest.
+//
+// Before `docs/DECISIONS.md`'s entry adding `NeverRelationConstraint`,
+// this invariant's own real verdict was VIOLATED: nothing stopped the
+// search from adding one more, wholly unconstrained direct grant of
+// `channel.writer` (bare principal) to `u` — the exact "recurring
+// finding" `docs/FINDINGS.md` disclosed, unrelated to the guest relation
+// itself. `channel.writer` is declared as a bare relation (`user |
+// workspace#member_direct`), not a permission wrapping alternatives, so
+// this is its only escape route — `never channel#writer(u)` closes both
+// of its own branches at once (bare and userset-subject). See
+// `docs/FINDINGS.md` for the full account.
 invariant workspace_guest_never_becomes_channel_writer {
   u: user
   w: workspace
@@ -9,6 +20,8 @@ invariant workspace_guest_never_becomes_channel_writer {
 
   guest(w) = u
   parent_workspace(c) = w
+
+  never channel#writer(u)
 
   goal: writer(u, c)
 }

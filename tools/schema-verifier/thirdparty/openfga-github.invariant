@@ -5,9 +5,26 @@
 // repositories owned by that organization") — never from mere
 // organization membership on its own. repo#admin's rewrite closure
 // (admin_direct | owner->repo_admin) never references organization
-// member_direct at all, so this is expected to be a genuine, exact
-// monotone HOLDS — type-level unreachability, the same shape as this
-// tool's own no-public-path-to-private-document fixture.
+// member_direct at all, so this is semantically a genuine
+// unreachability claim — type-level, the same shape as this tool's own
+// no-public-path-to-private-document fixture.
+//
+// Before `docs/DECISIONS.md`'s entry adding `NeverRelationConstraint`,
+// this invariant's own real verdict was VIOLATED, not the HOLDS its
+// intent describes above: nothing stopped the search from adding one
+// more, wholly unconstrained direct grant of `admin_direct` (bare
+// principal) — the exact "recurring finding" `docs/FINDINGS.md`
+// disclosed — and even after excluding that one specific grant (D-131's
+// `not admin_direct(r) = s`), a second, structurally different escape
+// through `admin_direct`'s own `team#member` userset-subject branch
+// remained, and a completely separate third escape through
+// `organization.repo_admin`'s own bare grant. `never repo#admin_direct(s)`
+// closes both of `admin_direct`'s own branches at once (bare and
+// userset-subject — see `NeverRelationConstraint`'s own doc comment for
+// why blocking the whole relation, not one candidate tuple, is what's
+// needed); `never organization#repo_admin(s)` closes the third,
+// independent escape the same way. See `docs/FINDINGS.md` for the full
+// account.
 invariant plain_org_member_never_gets_repo_admin {
   s: user
   o: organization
@@ -15,6 +32,9 @@ invariant plain_org_member_never_gets_repo_admin {
 
   member_direct(o) = s
   owner(r) = o
+
+  never repo#admin_direct(s)
+  never organization#repo_admin(s)
 
   goal: admin(s, r)
 }

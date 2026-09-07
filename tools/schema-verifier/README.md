@@ -167,7 +167,7 @@ Three parts, always in this order:
 ```
 invariant <name> {
   <typed variables, one per line, e.g. `s: user`>
-  <optional constraints, e.g. `distinct(orgA, orgB)`, `tenant(s) = orgA`, or `not tenant(s) = orgA`>
+  <optional constraints, e.g. `distinct(orgA, orgB)`, `tenant(s) = orgA`, `not tenant(s) = orgA`, or `never org#admin(s)`>
   goal: <permission>(<subject var>, <object var>)
 }
 ```
@@ -178,17 +178,34 @@ constraint can and can't prove (short version: it can prove a leak is
 real; it essentially never proves one is impossible — see
 `docs/DECISIONS.md` D-116 for why).
 
-`not tenant(s) = orgA` (`docs/DECISIONS.md` D-131) is the one narrow
-exception to that: ruling out one already-known, already-declared
-`(relation, subject, value)` triple — `subject` and `value` must both
-already be declared variables, and `value` is always a bare principal,
-never a userset-subject. Not "this relation can never be satisfied via
-any object, anywhere" (that would need a different, schema-level
-primitive this doesn't attempt) — just "assume this one specific fact is
-false, does the goal still hold." See `docs/INVARIANTS.md`'s own
-"Negative constraints" section for the full scope statement, and the
-"Third-party schema survey" section below for exactly what it did and
-didn't close.
+`not tenant(s) = orgA` (`docs/DECISIONS.md` D-131) rules out one
+already-known, already-declared `(relation, subject, value)` triple —
+`subject` and `value` must both already be declared variables, and
+`value` is always a bare principal, never a userset-subject. Deliberately
+narrow: not "this relation can never be satisfied via any object,
+anywhere" — that needed a different, schema-level primitive, built
+later.
+
+`never org#admin(s)` (`docs/DECISIONS.md`, the entry adding
+`NeverRelationConstraint`) is that primitive: `s` can never resolve as
+`org#admin`'s subject, at all — via a bare-principal grant, a
+wildcard-declared grant, or any userset-subject branch the relation
+declares — at any object, named or freshly introduced mid-search, at any
+recursion depth. Namespace-qualified by design (`<namespace>#<relation>`,
+reusing the schema DSL's own `type#relation` notation), not a bare
+relation name — a real, adversarially-found unsoundness this primitive's
+own design process caught: two unrelated namespaces routinely declare a
+same-named relation, and a bare-name match would silently block both. A
+`relationEquals` given naming the exact same `(relation, value)` pair is
+exempted, not treated as a contradiction — the given is the invariant's
+own legitimate premise, not an adversarial extra grant. The SMT and CHC
+tiers both decline outright whenever this constraint is present (a
+disclosed scope boundary — the exact search enforces it in full; a
+`never`-carrying invariant those two tiers would otherwise decide just
+falls through to bounded search instead, never a silently wrong verdict).
+See `docs/INVARIANTS.md`'s own "Negative constraints" section for the
+full scope statement of both primitives, and the "Third-party schema
+survey" section below for exactly what each did and didn't close.
 
 ## Fragments and guarantees
 
@@ -341,17 +358,27 @@ was trivially escapable regardless of what the invariant meant to probe.
 `notRelationEquals` primitive (see "The invariant language," above) — and
 closed **two** of those nine (`spicedb-entitlements`,
 `openfga-entitlements`), now `HOLDS`. The other seven `VIOLATED` entries,
-including six that share the "no negative constraints" shape, are
-unaffected: each has a second, structurally different escape (a
-userset-subject or recursive path) this narrow, bare-principal-only
-primitive was never designed to reach. Current tally: **8 VIOLATED, 4
-HOLDS** (`spicedb-userdefined-roles` later moved back from `HOLDS` to
-`VIOLATED` once D-151's SMT tier started deciding this goal exactly
-instead of the earlier, non-exhaustive bounded search — see
-`docs/DECISIONS.md` D-176, and `test/thirdparty-survey.test.ts` for the
-permanent regression guard pinning all twelve verdicts). That's a real,
-still-standing limit on what this language can verify for the remaining
-`VIOLATED` entries, not a defect in any of the twelve source schemas.
+including six that share the "no negative constraints" shape, stayed
+unaffected by that narrow primitive: each has a second, structurally
+different escape (a userset-subject or recursive path) that primitive
+was never designed to reach. `spicedb-userdefined-roles` later moved back
+from `HOLDS` to `VIOLATED` once D-151's SMT tier started deciding this
+goal exactly instead of the earlier, non-exhaustive bounded search (see
+`docs/DECISIONS.md` D-176), bringing the tally to 8 VIOLATED / 4 HOLDS.
+
+A later entry (`docs/DECISIONS.md`, adding `NeverRelationConstraint`)
+built exactly the schema-level "this relation can never be satisfied via
+any object, anywhere" primitive the six-entry gap above needed, and
+closes all six: `openfga-github`, `spicedb-superuser`,
+`spicedb-docs-style-sharing`, `openfga-gdrive`, `openfga-slack`,
+`spicedb-github`. **Current tally: 2 VIOLATED, 10 HOLDS** — the
+remaining two (`openfga-expenses`'s self-referential manager loop,
+`spicedb-userdefined-roles`'s own distinct unconstrained-second-tuple
+escape) are both structurally different shapes neither primitive was
+ever designed to reach — see `test/thirdparty-survey.test.ts` for the
+permanent regression guard pinning all twelve verdicts. That's a real,
+still-standing limit on what this language can verify for those two
+remaining `VIOLATED` entries, not a defect in either source schema.
 
 ## Front ends for other ecosystems
 

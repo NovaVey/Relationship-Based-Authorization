@@ -414,6 +414,24 @@ export function encode(ctx: Ctx, graph: SchemaGraph, invariant: Invariant): Enco
             pred.call(declared.get(c.subject)!.term, declared.get(c.value)!.term) as Bool<'main'>,
           );
         }
+        case 'neverRelation': {
+          // Declines outright, matching this file's own established
+          // pattern for a schema/invariant shape this tier isn't built to
+          // encode (see `SmtTierInapplicable`'s other throw sites).
+          // `docs/DECISIONS.md` (the entry adding `NeverRelationConstraint`)
+          // records why: the naive `ForAll([o], Not(Pred(o, subjTerm)))`
+          // only closes the relation's bare-principal predicate — its
+          // userset-subject branch (a structurally different predicate,
+          // over a different sort) needs the target's whole recursively-
+          // compiled reachability sub-formula negated, not one more atom,
+          // and `compileNode` isn't (yet) exposed in a form this call site
+          // can reuse for that. Real, tractable future work — not attempted
+          // here; the exact tier already enforces this constraint in full
+          // (`../reachability/search.ts`), so declining here just routes
+          // the invariant on to bounded search instead, never a silently
+          // wrong verdict.
+          throw new SmtTierInapplicable('neverRelation constraint not yet supported by this tier');
+        }
         default: {
           const _never: never = c;
           throw new Error(`smt encode: unhandled constraint kind ${JSON.stringify(_never)}`);

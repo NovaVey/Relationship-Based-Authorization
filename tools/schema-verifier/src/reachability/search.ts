@@ -22,7 +22,11 @@
  */
 import type { CompiledSchema } from '../../../../src/schema/dsl/types.js';
 import type { GraphEdge, NodeId, SchemaGraph } from '../ir/types.js';
-import type { Invariant, NotRelationEqualsConstraint } from '../invariants/types.js';
+import type {
+  Invariant,
+  NeverRelationConstraint,
+  NotRelationEqualsConstraint,
+} from '../invariants/types.js';
 import { UnionFind, type VarId } from './union-find.js';
 import type { CheckResult, WitnessTuple } from './types.js';
 
@@ -105,6 +109,35 @@ interface SearchContext {
    * can never reach this value via any path."
    */
   readonly notRelationEquals: readonly NotRelationEqualsConstraint[];
+  /**
+   * The invariant's own `never <namespace>#<relation>(<var>)` constraints
+   * (`docs/DECISIONS.md`, the entry documenting this), each paired with
+   * its own precomputed `exemptVars` — the invariant-declared object
+   * variables a `relationEquals` given already pins for this exact
+   * `(relation, subject)` pair, computed once here rather than
+   * re-derived on every dispatch. See `NeverRelationConstraint`'s own
+   * doc comment for why this exemption exists (a given fact is the
+   * invariant's own legitimate premise, not an adversarial extra grant)
+   * and why the constraint is namespace-qualified (a bare relation name
+   * would collide across unrelated namespaces that happen to share one).
+   *
+   * Enforced once per `direct`-edge dispatch, before either subject-type
+   * branch is tried — deliberately not per-branch the way
+   * `notRelationEquals` is, since blocking relation R "on any object"
+   * means R can never grant the fixed goal subject here at all, via
+   * *either* its bare-principal branch, a wildcard-declared branch (which
+   * `DirectEdge.subjectTypes` folds into the same bare-principal shape —
+   * see `docs/DECISIONS.md` D-181 — so this covers it automatically, with
+   * no separate branch needed), or its userset-subject branch — there is
+   * no legitimate way for R to grant the fixed goal subject here that
+   * isn't one of `edge.subjectTypes`'s own declared entries, so refusing
+   * the whole node once is equivalent to refusing every entry
+   * individually, without needing to enumerate them.
+   */
+  readonly neverRelation: readonly {
+    readonly constraint: NeverRelationConstraint;
+    readonly exemptVars: readonly VarId[];
+  }[];
 }
 
 function freshVar(ctx: SearchContext, type: string): VarId {
@@ -205,6 +238,28 @@ function attempt(
     if (node?.kind !== 'named')
       throw new Error(`search: direct edge from non-named node ${nodeId}`);
     const relationName = node.name;
+    // neverRelation enforcement (docs/DECISIONS.md): checked ONCE, before
+    // either subject-type branch below is tried — not per-branch the way
+    // notRelationEquals is — since a matching constraint means relation R
+    // (this exact namespace#relation) can never grant the fixed goal
+    // subject here via ANY of its declared subject-type branches. Uses the
+    // pre-bind `uf`, not a clone: nothing has bound anything yet at this
+    // point, and the check must fire identically regardless of which
+    // branch would otherwise have been tried. `currentObjectType` is
+    // always this node's own namespace (every call site passes the
+    // node's real namespace, never guesses) — see NeverRelationConstraint's
+    // own doc comment for why matching requires both namespace and
+    // relation name, not relation name alone.
+    for (const { constraint: nc, exemptVars } of ctx.neverRelation) {
+      if (
+        nc.namespace === currentObjectType &&
+        nc.relation === relationName &&
+        uf.same(nc.subject, ctx.goalSubjectVar) &&
+        !exemptVars.some((ev) => uf.same(ev, currentObjectVar))
+      ) {
+        return { kind: 'fail' };
+      }
+    }
     const results = edge.subjectTypes.map((st): AttemptResult => {
       if (st.relation === undefined) {
         if (st.namespace !== ctx.varTypes.get(ctx.goalSubjectVar)) return { kind: 'fail' };
@@ -476,6 +531,36 @@ export function checkInvariant(
       }
     }
   }
+  const neverRelation: Array<{
+    readonly constraint: NeverRelationConstraint;
+    readonly exemptVars: VarId[];
+  }> = [];
+  for (const c of invariant.constraints) {
+    if (c.kind === 'neverRelation') {
+      // Precompute the exempt object set once (docs/DECISIONS.md, the
+      // entry documenting NeverRelationConstraint): every OTHER
+      // relationEquals given naming this exact (relation, subject) pair —
+      // matched by both relation name AND the object's own declared type,
+      // since a same-named relation in an unrelated namespace must never
+      // exempt anything here (the same collision this constraint's own
+      // namespace qualifier exists to avoid). No contradiction check is
+      // needed here the way notRelationEquals gets one — unlike that
+      // primitive, this one is never self-contradictory by construction:
+      // a given fact is exempted rather than conflicting.
+      const exemptVars: VarId[] = [];
+      for (const c2 of invariant.constraints) {
+        if (
+          c2.kind === 'relationEquals' &&
+          c2.relation === c.relation &&
+          varTypes.get(c2.subject) === c.namespace &&
+          uf.same(c2.value, c.subject)
+        ) {
+          exemptVars.push(c2.subject);
+        }
+      }
+      neverRelation.push({ constraint: c, exemptVars });
+    }
+  }
 
   const goalObjectType = varTypes.get(invariant.goal.object);
   const goalSubjectType = varTypes.get(invariant.goal.subject);
@@ -496,6 +581,7 @@ export function checkInvariant(
     namedVars,
     budget: { remaining: MAX_ATTEMPT_CALLS },
     notRelationEquals,
+    neverRelation,
   };
   const result = attempt(ctx, goalNodeId, invariant.goal.object, goalObjectType, new Set(), uf);
 

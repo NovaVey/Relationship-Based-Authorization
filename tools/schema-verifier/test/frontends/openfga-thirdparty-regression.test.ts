@@ -104,24 +104,24 @@ const CORPUS: readonly KnownAnswer[] = [
   },
   {
     basename: 'openfga-github',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    why: 'docs/FINDINGS.md: plain_org_member_never_gets_repo_admin — a direct repo-admin grant.',
+    why: "docs/FINDINGS.md: plain_org_member_never_gets_repo_admin — CLOSED by NeverRelationConstraint (docs/DECISIONS.md); the hand-translated invariant's never lines reference the same relation names this front end produces.",
   },
   {
     basename: 'openfga-gdrive',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    why: "docs/FINDINGS.md: sibling_folder_viewer_cannot_read_document — a direct viewer grant, unaffected by this front end now including the wildcard the hand translation dropped (see this file's own top-of-file comment).",
+    why: "docs/FINDINGS.md: sibling_folder_viewer_cannot_read_document — CLOSED by NeverRelationConstraint, unaffected by this front end now including the wildcard the hand translation dropped (see this file's own top-of-file comment) — none of the four never lines this fixture needs target a wildcard-declared relation.",
   },
   {
     basename: 'openfga-slack',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    why: 'docs/FINDINGS.md: workspace_guest_never_becomes_channel_writer — a direct writer grant.',
+    why: "docs/FINDINGS.md: workspace_guest_never_becomes_channel_writer — CLOSED by NeverRelationConstraint; the hand-translated invariant's never line references the same relation name this front end produces.",
   },
 ];
 

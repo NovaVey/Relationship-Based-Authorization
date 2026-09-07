@@ -1,6 +1,27 @@
 // A user who only has folder-level access to a sibling folder (f2,
 // distinct from d's actual parent f1) should never be able to read a
 // document filed under f1.
+//
+// Before `docs/DECISIONS.md`'s entry adding `NeverRelationConstraint`,
+// this invariant's own real verdict was VIOLATED: nothing stopped the
+// search from adding one more, wholly unconstrained direct grant of
+// `doc.viewer` (bare principal) to `u` — the exact "recurring finding"
+// `docs/FINDINGS.md` disclosed. Three further, independent escapes
+// survived even after excluding that one specific grant (D-131's own
+// narrow primitive): a completely separate top-level union term,
+// `doc.owner`, unrelated to `viewer`; and, via the invariant's own given
+// `parent(d) = f1`, `folder.viewer_direct` and `folder.owner` reachable
+// up an unconstrained ancestor chain. `never doc#viewer(u)`, `never
+// doc#owner(u)`, `never folder#owner(u)`, and `never
+// folder#viewer_direct(u)` close all four — `folder.viewer_direct`'s own
+// line closes the recursive `parent->viewer` ancestor chain at every
+// depth, since every step still has to resolve `folder.viewer_direct`'s
+// own direct edge somewhere. `u`'s real, legitimate grant on `f2` (this
+// invariant's own given premise) is exempted, not blocked, and the
+// negative control confirms the exemption is precise: pinning the given
+// to `f1` (the object the invariant means to probe) instead of `f2`
+// still correctly reports VIOLATED. See `docs/FINDINGS.md` for the full
+// account.
 invariant sibling_folder_viewer_cannot_read_document {
   u: user
   f1: folder
@@ -10,6 +31,11 @@ invariant sibling_folder_viewer_cannot_read_document {
   parent(d) = f1
   viewer_direct(f2) = u
   distinct(f1, f2)
+
+  never doc#viewer(u)
+  never doc#owner(u)
+  never folder#owner(u)
+  never folder#viewer_direct(u)
 
   goal: can_read(u, d)
 }

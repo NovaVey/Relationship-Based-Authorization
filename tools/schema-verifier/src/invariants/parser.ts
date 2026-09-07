@@ -10,17 +10,19 @@
  *   file       := invariant+
  *   invariant  := "invariant" IDENT "{" variable+ constraint* goal "}"
  *   variable   := IDENT ":" IDENT
- *   constraint := distinctConstraint | relationConstraint | notRelationConstraint
+ *   constraint := distinctConstraint | relationConstraint | notRelationConstraint | neverRelationConstraint
  *   distinctConstraint := "distinct" "(" IDENT ("," IDENT)+ ")"
  *   relationConstraint := IDENT "(" IDENT ")" "=" IDENT
  *   notRelationConstraint := "not" IDENT "(" IDENT ")" "=" IDENT
+ *   neverRelationConstraint := "never" IDENT "#" IDENT "(" IDENT ")"
  *   goal       := "goal" ":" IDENT "(" IDENT "," IDENT ")"
  *
  * Reserved words (never valid as a variable/invariant name): `invariant`,
- * `distinct`, `goal`, `not`. Relation and permission names (the `tenant` in
- * `tenant(s) = orgA`, the `view` in `goal: view(s, o)`) are NOT checked
- * against this reserved set or against a real schema here — resolving them
- * is §5's job, once an invariant and a schema graph are walked together.
+ * `distinct`, `goal`, `not`, `never`. Relation and permission names (the
+ * `tenant` in `tenant(s) = orgA`, the `view` in `goal: view(s, o)`) are NOT
+ * checked against this reserved set or against a real schema here —
+ * resolving them is §5's job, once an invariant and a schema graph are
+ * walked together.
  *
  * Two identifier vocabularies, deliberately not one:
  *
@@ -46,7 +48,7 @@ import type {
   TypedVariable,
 } from './types.js';
 
-const RESERVED_WORDS = new Set(['invariant', 'distinct', 'goal', 'not']);
+const RESERVED_WORDS = new Set(['invariant', 'distinct', 'goal', 'not', 'never']);
 
 // `IDENTIFIER_PATTERN` is anchored (`^...$`) for whole-string validation;
 // composing it into these line-level regexes via its `.source` (unanchored)
@@ -73,6 +75,14 @@ const RELATION_EQUALS_LINE = new RegExp(`^(${SCHEMA_ID})\\((${VAR_ID})\\)\\s*=\\
 const NOT_RELATION_EQUALS_LINE = new RegExp(
   `^not\\s+(${SCHEMA_ID})\\((${VAR_ID})\\)\\s*=\\s*(${VAR_ID})$`,
 );
+// `never <namespace>#<relation>(<var>)` — namespace-qualified, deliberately
+// (see `NeverRelationConstraint`'s own doc comment for the real, adversarially
+// -found cross-namespace collision this avoids). Reuses the schema DSL's own
+// `type#relation` userset-subject notation rather than inventing a new
+// separator. `\s+` after `never` for the same reason `not` requires it,
+// though no actual collision is possible here today (this shape, with its
+// `#` and no `=`, can never match `RELATION_EQUALS_LINE`).
+const NEVER_RELATION_LINE = new RegExp(`^never\\s+(${SCHEMA_ID})#(${SCHEMA_ID})\\((${VAR_ID})\\)$`);
 const VARIABLE_LINE = new RegExp(`^(${VAR_ID})\\s*:\\s*(${SCHEMA_ID})$`);
 
 interface Line {
@@ -261,6 +271,27 @@ export function parseInvariants(source: string): ParseInvariantsResult {
           }
         }
         constraints.push({ kind: 'notRelationEquals', relation, subject, value });
+        i++;
+        continue;
+      }
+
+      const neverRelationMatch = NEVER_RELATION_LINE.exec(line.text);
+      if (neverRelationMatch) {
+        const [, namespace, relation, subject] = neverRelationMatch as unknown as [
+          string,
+          string,
+          string,
+          string,
+        ];
+        checkIdentifier(namespace, line.number, 'namespace', errors);
+        checkIdentifier(relation, line.number, 'relation', errors);
+        if (!declared.has(subject)) {
+          errors.push({
+            line: line.number,
+            message: `'never ${namespace}#${relation}(...)' references undeclared variable '${subject}' (invariant '${name}')`,
+          });
+        }
+        constraints.push({ kind: 'neverRelation', namespace, relation, subject });
         i++;
         continue;
       }

@@ -30,6 +30,20 @@
  * structurally distinct escape shape from every other entry in this
  * corpus.
  *
+ * **The tally has since moved again, this time by closing entries, not
+ * a stale count.** `docs/DECISIONS.md`'s entry adding
+ * `NeverRelationConstraint` — the schema-level "this relation can never
+ * be satisfied via any object, anywhere" primitive `docs/FINDINGS.md`'s
+ * own "recurring finding" section named as the real fix six of the
+ * eight same-shape entries needed — closes all six: `openfga-github`,
+ * `spicedb-superuser`, `spicedb-docs-style-sharing`, `openfga-gdrive`,
+ * `openfga-slack`, `spicedb-github`. Current tally: **2 VIOLATED, 10
+ * HOLDS** — the remaining two (`openfga-expenses`'s self-referential
+ * manager loop, `spicedb-userdefined-roles`'s own distinct
+ * unconstrained-second-tuple escape) are both structurally different
+ * shapes this primitive was never designed to reach, named explicitly
+ * in that entry.
+ *
  * Every row's `why` cites `docs/FINDINGS.md`'s own results table — this
  * file asserts the published verdict, it doesn't re-derive it.
  */
@@ -86,11 +100,11 @@ const CORPUS: readonly KnownThirdPartyAnswer[] = [
   {
     schema: 'openfga-github',
     invariant: 'openfga-github',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    validationKind: 'confirmed',
-    why: 'docs/FINDINGS.md: plain_org_member_never_gets_repo_admin — a direct repo-admin grant unrelated to the org-membership path the invariant meant to probe.',
+    validationKind: 'empirically-clean',
+    why: 'docs/FINDINGS.md: plain_org_member_never_gets_repo_admin — CLOSED by NeverRelationConstraint (docs/DECISIONS.md): never repo#admin_direct(s) and never organization#repo_admin(s) rule out both the direct repo-admin grant and the independent org-admin escape the invariant meant to probe.',
   },
   {
     schema: 'openfga-expenses',
@@ -122,47 +136,47 @@ const CORPUS: readonly KnownThirdPartyAnswer[] = [
   {
     schema: 'spicedb-superuser',
     invariant: 'spicedb-superuser',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    validationKind: 'confirmed',
-    why: "docs/FINDINGS.md: document_admin_requires_ownership_chain — a direct owner grant, cheaper for the search to find than the schema's own deliberate site-wide superuser backdoor.",
+    validationKind: 'empirically-clean',
+    why: "docs/FINDINGS.md: document_admin_requires_ownership_chain — CLOSED by NeverRelationConstraint: never document#owner_user(u) and never platform#administrator(u) rule out the direct owner grant and the unconstrained superuser-platform escape, leaving the schema's own deliberate site-wide superuser backdoor itself untouched (that's a separate, real grant this invariant's own givens never establish).",
   },
   {
     schema: 'spicedb-docs-style-sharing',
     invariant: 'spicedb-docs-style-sharing',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    validationKind: 'confirmed',
-    why: 'docs/FINDINGS.md: sibling_group_member_cannot_view_other_group_document — document.viewer accepts a plain user directly, so any invariant about it is trivially escapable regardless of the group logic.',
+    validationKind: 'empirically-clean',
+    why: "docs/FINDINGS.md: sibling_group_member_cannot_view_other_group_document — CLOSED by NeverRelationConstraint: never document#viewer(a) and never group_with_parent#member(a) rule out both the direct viewer grant and the recursive group-membership escape, exempting the invariant's own real membership in `analysis`.",
   },
   {
     schema: 'openfga-gdrive',
     invariant: 'openfga-gdrive',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    validationKind: 'confirmed',
-    why: 'docs/FINDINGS.md: sibling_folder_viewer_cannot_read_document — a direct viewer grant on the document itself.',
+    validationKind: 'empirically-clean',
+    why: 'docs/FINDINGS.md: sibling_folder_viewer_cannot_read_document — CLOSED by NeverRelationConstraint: four never lines (doc#viewer, doc#owner, folder#owner, folder#viewer_direct) rule out the direct viewer grant, the sibling owner union term, and the recursive ancestor-folder escape.',
   },
   {
     schema: 'openfga-slack',
     invariant: 'openfga-slack',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    validationKind: 'confirmed',
-    why: 'docs/FINDINGS.md: workspace_guest_never_becomes_channel_writer — a direct writer grant unrelated to the guest relation, which has no rewrite path into writer/commenter at all.',
+    validationKind: 'empirically-clean',
+    why: 'docs/FINDINGS.md: workspace_guest_never_becomes_channel_writer — CLOSED by NeverRelationConstraint: never channel#writer(u) rules out the direct writer grant unrelated to the guest relation.',
   },
   {
     schema: 'spicedb-github',
     invariant: 'spicedb-github',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
-    validationKind: 'confirmed',
-    why: 'docs/FINDINGS.md: org_member_never_gets_repo_admin_without_role — a direct admin grant, the same shape as openfga-github despite a structurally different schema.',
+    validationKind: 'empirically-clean',
+    why: 'docs/FINDINGS.md: org_member_never_gets_repo_admin_without_role — CLOSED by NeverRelationConstraint: never repository#admin(u) rules out the direct admin grant, the same shape as openfga-github despite a structurally different schema.',
   },
   {
     schema: 'spicedb-userdefined-roles',
@@ -210,11 +224,11 @@ describe('the third-party schema survey — every published docs/FINDINGS.md ver
     },
   );
 
-  it("the corpus itself matches docs/FINDINGS.md's own published tally — 8 VIOLATED, 4 HOLDS, twelve entries total", () => {
+  it("the corpus itself matches docs/FINDINGS.md's own published tally — 2 VIOLATED, 10 HOLDS, twelve entries total", () => {
     expect(CORPUS).toHaveLength(12);
     const violated = CORPUS.filter((c) => c.verdict === 'VIOLATED');
     const holds = CORPUS.filter((c) => c.verdict === 'HOLDS');
-    expect(violated).toHaveLength(8);
-    expect(holds).toHaveLength(4);
+    expect(violated).toHaveLength(2);
+    expect(holds).toHaveLength(10);
   });
 });

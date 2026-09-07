@@ -89,10 +89,14 @@ function loadInvariantText(name: string, source: string): Invariant {
 }
 
 // Adapted from the real `thirdparty/spicedb-superuser.invariant` — same
-// variables, same givens, same goal; only `owner_org` (the hand-
-// translation's own chosen name) swapped for `owner_organization` (this
-// front end's own `${relationName}_${subjectTypeNamespace}` naming for a
-// split-by-type relation — see `translate.ts`'s own arrow-type-split).
+// variables, same givens, same goal, same `never` closures (docs/
+// DECISIONS.md, the entry adding `NeverRelationConstraint`); only
+// `owner_org` (the hand-translation's own chosen name) swapped for
+// `owner_organization` (this front end's own
+// `${relationName}_${subjectTypeNamespace}` naming for a split-by-type
+// relation — see `translate.ts`'s own arrow-type-split). `owner_user`
+// and `platform.administrator` are untouched by that split, so their own
+// `never` lines need no renaming.
 const SUPERUSER_INVARIANT_ADAPTED = `
 invariant document_admin_requires_ownership_chain {
   u: user
@@ -101,15 +105,26 @@ invariant document_admin_requires_ownership_chain {
 
   owner_organization(d) = o
 
+  never document#owner_user(u)
+  never platform#administrator(u)
+
   goal: admin(u, d)
 }
 `;
 
 // Adapted from the real `thirdparty/spicedb-docs-style-sharing.invariant`
-// — same variables, same givens, same goal; only `viewer_group` swapped
-// for `viewer_via_group_with_parent_view` (this front end's own
-// restructuring-relation name for the one case-3 nested-userset target in
-// this schema — see `translate.ts`'s own module doc comment, point 2).
+// — same variables, same givens, same goal, same `never` closures; only
+// `viewer_group` swapped for `viewer_via_group_with_parent_view` (this
+// front end's own restructuring-relation name for the one case-3
+// nested-userset target in this schema — see `translate.ts`'s own module
+// doc comment, point 2) AND `document#viewer` swapped for
+// `document#viewer_direct`, since this front end's own case-3
+// restructuring additionally turns `viewer` from a relation into a
+// permission here (`viewer = viewer_direct | viewer_via_group_with_
+// parent_view->view`) — `never` can only ever name a declared relation,
+// never a permission, so the closure has to target the relation case-3
+// actually produced. `group_with_parent.member` is untouched by any of
+// this, so its own `never` line needs no renaming.
 const DOCS_STYLE_SHARING_INVARIANT_ADAPTED = `
 invariant sibling_group_member_cannot_view_other_group_document {
   a: user
@@ -120,6 +135,9 @@ invariant sibling_group_member_cannot_view_other_group_document {
   member(analysis) = a
   viewer_via_group_with_parent_view(d) = engineering
   distinct(analysis, engineering)
+
+  never document#viewer_direct(a)
+  never group_with_parent#member(a)
 
   goal: view(a, d)
 }
@@ -150,7 +168,7 @@ const CORPUS: readonly KnownAnswer[] = [
   },
   {
     basename: 'spicedb-github',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
     loadInvariant: () => loadInvariantFile('spicedb-github'),
@@ -171,7 +189,7 @@ const CORPUS: readonly KnownAnswer[] = [
   },
   {
     basename: 'spicedb-superuser',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
     loadInvariant: () =>
@@ -179,7 +197,7 @@ const CORPUS: readonly KnownAnswer[] = [
   },
   {
     basename: 'spicedb-docs-style-sharing',
-    verdict: 'VIOLATED',
+    verdict: 'HOLDS',
     fragment: 'monotone',
     proof: 'exact',
     loadInvariant: () =>

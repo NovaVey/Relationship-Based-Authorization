@@ -2,6 +2,19 @@
 // get repository admin just by belonging to the org that owns the repo
 // — admin requires an actual repository-level role or org ownership,
 // neither of which plain membership grants.
+//
+// Before `docs/DECISIONS.md`'s entry adding `NeverRelationConstraint`,
+// this invariant's own real verdict was VIOLATED: nothing stopped the
+// search from adding one more, wholly unconstrained direct grant of
+// `repository.admin` (bare principal) to `u` — the exact "recurring
+// finding" `docs/FINDINGS.md` disclosed, the same shape as
+// `openfga-github` despite a structurally different schema.
+// `repository.admin` is declared as a bare relation (`user |
+// team#maintainer | team#direct_member`), not a permission wrapping
+// alternatives, so this is its only escape route — `never
+// repository#admin(u)` closes all three of its own declared branches at
+// once (bare and both userset-subject forms). See `docs/FINDINGS.md` for
+// the full account.
 invariant org_member_never_gets_repo_admin_without_role {
   u: user
   o: organization
@@ -9,6 +22,8 @@ invariant org_member_never_gets_repo_admin_without_role {
 
   member(o) = u
   organization(r) = o
+
+  never repository#admin(u)
 
   goal: admin(u, r)
 }

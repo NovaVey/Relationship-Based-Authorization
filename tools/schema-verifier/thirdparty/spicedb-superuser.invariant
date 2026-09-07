@@ -3,12 +3,30 @@
 // document's owner to a specific organization o, then ask whether an
 // arbitrary user u gets admin without any pin tying u to o or its
 // platform at all.
+//
+// Before `docs/DECISIONS.md`'s entry adding `NeverRelationConstraint`,
+// this invariant's own real verdict was VIOLATED: nothing stopped the
+// search from adding one more, wholly unconstrained direct grant of
+// `document.owner_user` (bare principal) to `u` — the exact "recurring
+// finding" `docs/FINDINGS.md` disclosed. A second, completely
+// independent escape existed too, unrelated to `owner_user`: an
+// unconstrained direct grant of `platform.administrator` to `u`,
+// reachable via `owner_org->admin` since `o` is already pinned — nothing
+// in this invariant's own givens ties `u` to that platform at all.
+// `never document#owner_user(u)` and `never platform#administrator(u)`
+// close both — `owner_org`'s own bare branch needs no line at all (its
+// declared subject type is `organization`, never `user`, so it can never
+// resolve `u` directly regardless). See `docs/FINDINGS.md` for the full
+// account.
 invariant document_admin_requires_ownership_chain {
   u: user
   o: organization
   d: document
 
   owner_org(d) = o
+
+  never document#owner_user(u)
+  never platform#administrator(u)
 
   goal: admin(u, d)
 }

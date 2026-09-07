@@ -21,8 +21,14 @@
  * single-chain closure with no alternate union branch offering a second
  * escape. The other 6 "same shape" entries have a structurally
  * different, unbounded escape (a second, userset-subject or recursive
- * path this narrow primitive was never designed to reach) and stay
- * `VIOLATED` — this file does NOT assert `HOLDS` for any of them.
+ * path this narrow primitive was never designed to reach) and stayed
+ * `VIOLATED` under this primitive alone — this file does NOT assert
+ * `HOLDS` for any of them via `notRelationEquals`. Those 6 have SINCE
+ * been closed by a different, later primitive built specifically for
+ * that gap — `NeverRelationConstraint` (`docs/DECISIONS.md`) — see
+ * `never-relation.test.ts` for that primitive's own dedicated coverage;
+ * this file's own regression sweep below still confirms only the one
+ * entry (`openfga-expenses`) neither primitive was ever meant to reach.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -299,19 +305,21 @@ describe('Integration — the two disclosed entitlements fixtures close end to e
   });
 });
 
-describe('Regression — the other 7 disclosed VIOLATED entries are untouched (not over-claimed as closed)', () => {
+describe('Regression — the one remaining disclosed VIOLATED entry this primitive was never claimed to close is untouched', () => {
+  // The other 6 of the original 7 ("openfga-github", "spicedb-superuser",
+  // "spicedb-docs-style-sharing", "openfga-gdrive", "openfga-slack",
+  // "spicedb-github") have SINCE been closed by `NeverRelationConstraint`
+  // (docs/DECISIONS.md) — the real "type#relation" userset-subject/
+  // recursive escape this narrow primitive was always documented as
+  // unable to reach on its own. See `never-relation.test.ts`'s own
+  // regression sweep for proof those 6 now report HOLDS, and
+  // `thirdparty-survey.test.ts` for the corpus-wide tally. Only
+  // `openfga-expenses` (a self-referential manager loop, a distinct
+  // shape neither primitive was ever designed to reach) stays here.
   const THIRDPARTY_DIR = fileURLToPath(new URL('../thirdparty/', import.meta.url));
 
-  it.each([
-    'openfga-github',
-    'openfga-expenses',
-    'spicedb-superuser',
-    'spicedb-docs-style-sharing',
-    'openfga-gdrive',
-    'openfga-slack',
-    'spicedb-github',
-  ])(
-    '%s stays VIOLATED — this primitive does not (and was never claimed to) close it',
+  it.each(['openfga-expenses'])(
+    '%s stays VIOLATED — neither notRelationEquals nor neverRelation was ever claimed to close it',
     (basename) => {
       const source = readFileSync(THIRDPARTY_DIR + `${basename}.authz`, 'utf8');
       const compiled = compileSchema(source);
