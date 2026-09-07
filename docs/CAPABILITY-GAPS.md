@@ -354,7 +354,7 @@ remaining loose end (a doc-sync task, not a capability gap).
 
 ## Proof machinery
 
-### Package the schema verifier separately — built, `docs/DECISIONS.md` D-173, D-178, D-179
+### Package the schema verifier separately — built, `docs/DECISIONS.md` D-173, D-178, D-179, D-181
 
 **Status: built and shipped.** D-173 closed the cheapest piece
 (`tools/schema-verifier/action.yml`, a reusable composite GitHub Action
@@ -363,8 +363,9 @@ wrapping `verify-schema`, dogfooded in this repo's own
 `uses: ./tools/schema-verifier` reference). D-178 closed the OpenFGA front
 end and D-179 the SpiceDB front end — see those entries for what shipped
 (`tools/schema-verifier/src/frontends/{openfga,spicedb}/`, sharing one
-`frontends/common/` layer). All three pieces this section originally
-named are now built.
+`frontends/common/` layer). D-181 investigated and closed the one question
+D-178 disclosed but left open (below). All three pieces this section
+originally named are now built.
 
 The third-party survey — **8 VIOLATED / 4 HOLDS, 0 UNKNOWN**
 (`docs/FINDINGS.md:131`, current as of D-151's SMT tier correcting
@@ -400,11 +401,20 @@ previously got wrong:**
    this survey** until now. `openfga-gdrive`'s own hand-translated
    header comment disclosed dropping `user:*` because "this DSL has no
    wildcard concept" — true when written, stale since D-171 shipped.
-   D-178's translator includes real wildcard subject types; see that
-   entry for the one genuinely open question this surfaced (whether the
-   verifier's own reachability/bounded/SMT tiers reason _soundly_ about a
+   D-178's translator includes real wildcard subject types, and disclosed
+   the one genuinely open question this surfaced: whether the verifier's
+   own reachability/bounded/SMT tiers reason _soundly_ about a
    wildcard-declared relation in every case, not just this survey's own
-   witness-driven cases — disclosed there, not resolved).
+   witness-driven cases. **D-181 investigated and closed this.** The
+   `HOLDS`/`UNSAT` direction, and disjoint-subject-type reasoning
+   specifically, were both proven sound — wildcard-blindness there is
+   provably harmless. The `VIOLATED`/witness direction had a real gap,
+   confined to bounded search: `generateCandidateTuples` never
+   constructed the literal `'*'` sentinel, a structural blind spot no
+   bound `k` could close, masked in practice only by an independent,
+   also-real bug in `src/store/tuples.ts` that wrongly accepted a
+   concrete grant against a wildcard-only relation. Both are fixed; see
+   D-181.
 3. **The SpiceDB front end's _parser_ was indeed smaller than this section
    previously framed, exactly as D-178 predicted — but D-179 found two
    genuinely new, real translation problems neither this section nor

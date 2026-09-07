@@ -1,0 +1,12 @@
+// Companion to `fixtures/schemas/wildcard-only-recursive-exclusion.authz`
+// — see that file's own header comment. No constraints at all: nothing
+// stops a witness naming `s` as covered by `viewer`'s wildcard grant and
+// not naming `s` in `blocked` — expected VIOLATED, via bounded search,
+// with a witness that grants through the literal `user:*` sentinel, never
+// a concrete stand-in for `s` specifically.
+invariant nobody_can_view_by_default_recursive {
+  s: user
+  o: folder
+
+  goal: view(s, o)
+}

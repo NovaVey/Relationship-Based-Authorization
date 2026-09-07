@@ -260,11 +260,31 @@ async function validateAgainstSchema(pool: QueryExecutor, tuple: TupleKey): Prom
   // is `undefined` whenever `subjectId === '*'`, so the ordinary branch's
   // own `st.relation === tuple.subjectRelation` comparison is never
   // reached for a wildcard tuple.
+  //
+  // The ordinary branch must also exclude `st.wildcard === true` entries.
+  // D-171 states this feature is "opt-in per relation, never implied by
+  // declaring the plain `user` type alongside it" — a relation declaring
+  // ONLY `<ns>:*` never declared plain `<ns>` at all, so an ordinary
+  // concrete grant against it must be rejected exactly as a `<ns>:*` write
+  // is rejected when only plain `<ns>` was declared (proven by the
+  // sibling write-time control in `test/metamorphic/
+  // wildcard-subtract.integration.test.ts`'s Property C). Without this
+  // exclusion, a wildcard entry is indistinguishable from a plain one here:
+  // both leave `relation` `undefined` (`SubjectTypeRef`'s own "`relation`
+  // and `wildcard` are mutually exclusive"), so for a concrete write
+  // (`tuple.subjectRelation` also `undefined`) `st.relation ===
+  // tuple.subjectRelation` reduces to `undefined === undefined` — true —
+  // and a wildcard-only entry silently satisfied a plain grant it was
+  // never declared to accept. Found during the wildcard-soundness
+  // investigation this decision documents; see `docs/DECISIONS.md`.
   const subjectTypeAllowed =
     tuple.subjectId === WILDCARD_SUBJECT_ID
       ? relation.subjectTypes.some((st) => st.namespace === tuple.subjectNs && st.wildcard === true)
       : relation.subjectTypes.some(
-          (st) => st.namespace === tuple.subjectNs && st.relation === tuple.subjectRelation,
+          (st) =>
+            st.namespace === tuple.subjectNs &&
+            st.wildcard !== true &&
+            st.relation === tuple.subjectRelation,
         );
   if (!subjectTypeAllowed) {
     const attempted =
