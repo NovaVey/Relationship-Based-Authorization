@@ -70,6 +70,7 @@ const EXPECTED_ROUTES: ExpectedRoute[] = [
   { path: '/expand', method: 'post', gated: true, scopeChecked: true },
   { path: '/list-objects', method: 'post', gated: true, scopeChecked: true },
   { path: '/list-users', method: 'post', gated: true, scopeChecked: true },
+  { path: '/scope', method: 'post', gated: true, scopeChecked: true },
   { path: '/watch', method: 'get', gated: true, scopeChecked: true },
   { path: '/tuples', method: 'post', gated: true, scopeChecked: true },
   { path: '/tuples', method: 'delete', gated: true, scopeChecked: true },

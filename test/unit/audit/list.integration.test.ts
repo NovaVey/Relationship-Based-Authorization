@@ -54,10 +54,12 @@ import { productionCheck } from '../../../src/resolve/production/resolver.js';
 import {
   listObjects,
   listUsers,
+  hasAnyGrant,
   LIST_OBJECTS_MAX_CANDIDATES,
   type EntityRef,
   type ListUsersResult,
 } from '../../../src/audit/list.js';
+import { rebuildRelationMembershipIndex } from '../../../src/store/relation-index.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
 
@@ -429,4 +431,113 @@ describe('listObjects truncation — LIST_OBJECTS_MAX_CANDIDATES is a real, enfo
     const returnedIds = objects.map((o) => o.id).sort();
     expect(returnedIds).toEqual(expectedIds);
   }, 60_000);
+});
+
+// -----------------------------------------------------------------------------
+// hasAnyGrant (D-186) — the early-exit sibling `src/audit/scope.ts`'s
+// queryScope is built on. Same candidate sourcing and same real
+// productionCheck calls as listObjects (proven correct above); these tests
+// cover only what's actually new here: the early-exit aggregation itself,
+// and the truncated flag's own "only meaningful when granted is false"
+// semantics.
+// -----------------------------------------------------------------------------
+
+describe('hasAnyGrant — early-exit correctness and the truncated flag', () => {
+  it('granted-true-on-the-very-first-candidate-truncated-is-false', async () => {
+    const ns = uniqueName('hag1');
+    await publishOk([`namespace ${ns} {`, '  relation viewer: user', '}'].join('\n'));
+    await writeOk(tuple(ns, 'aa_first', 'viewer', 'user', 'alice'));
+
+    const result = await hasAnyGrant(pool, ref('user', 'alice'), 'viewer', ns);
+    expect(result).toEqual({ granted: true, truncated: false });
+  });
+
+  it('granted-true-on-a-later-candidate-not-the-first-batch-truncated-is-still-false', async () => {
+    const ns = uniqueName('hag2');
+    await publishOk([`namespace ${ns} {`, '  relation viewer: user', '}'].join('\n'));
+    // 19 real candidates naming a DIFFERENT subject (bob), sorting before the
+    // one real grant to alice (object_id order z_last sorts after every
+    // aa_/m_-prefixed id) — forces the early-exit loop past its first
+    // concurrency batch (default MAX_CONCURRENCY well under 19) before it
+    // finds the real hit, proving the loop actually continues to later
+    // batches rather than only ever checking the first one.
+    for (let i = 0; i < 19; i += 1) {
+      await writeOk(tuple(ns, `m_decoy_${String(i).padStart(2, '0')}`, 'viewer', 'user', 'bob'));
+    }
+    await writeOk(tuple(ns, 'z_last', 'viewer', 'user', 'alice'));
+
+    const result = await hasAnyGrant(pool, ref('user', 'alice'), 'viewer', ns);
+    expect(result).toEqual({ granted: true, truncated: false });
+  });
+
+  it('granted-false-every-real-candidate-checked-and-none-allowed-truncated-is-false-a-fully-proven-negative', async () => {
+    const ns = uniqueName('hag3');
+    await publishOk([`namespace ${ns} {`, '  relation viewer: user', '}'].join('\n'));
+    for (let i = 0; i < 5; i += 1) {
+      await writeOk(tuple(ns, `obj_${i}`, 'viewer', 'user', 'bob'));
+    }
+
+    const result = await hasAnyGrant(pool, ref('user', 'alice'), 'viewer', ns);
+    expect(result).toEqual({ granted: false, truncated: false });
+  });
+
+  it('granted-false-the-candidate-scan-itself-was-capped-truncated-is-true-an-honest-not-proven-absent-signal', async () => {
+    const ns = uniqueName('hag4');
+    await publishOk([`namespace ${ns} {`, '  relation viewer: user', '}'].join('\n'));
+
+    // Every one of these LIST_OBJECTS_MAX_CANDIDATES + 50 objects has a real
+    // tuple (so all of them are real candidates), but every one names bob,
+    // never alice — alice has zero grants anywhere in this namespace, and
+    // the candidate scan itself is genuinely truncated (more real candidates
+    // exist than LIST_OBJECTS_MAX_CANDIDATES), so the honest answer is
+    // "didn't find one within what was examined," not a proven absence.
+    const totalObjects = LIST_OBJECTS_MAX_CANDIDATES + 50;
+    const objectIds = Array.from(
+      { length: totalObjects },
+      (_, i) => `obj${String(i).padStart(5, '0')}`,
+    );
+    const concurrency = 20;
+    for (let start = 0; start < objectIds.length; start += concurrency) {
+      const batch = objectIds.slice(start, start + concurrency);
+      await Promise.all(batch.map((id) => writeOk(tuple(ns, id, 'viewer', 'user', 'bob'))));
+    }
+
+    const result = await hasAnyGrant(pool, ref('user', 'alice'), 'viewer', ns);
+    expect(result).toEqual({ granted: false, truncated: true });
+  }, 60_000);
+
+  it('works-correctly-against-a-computed-permission-target-not-just-a-bare-relation', async () => {
+    const ns = uniqueName('hag5');
+    await publishOk(
+      [`namespace ${ns} {`, '  relation viewer: user', '  permission view = viewer', '}'].join(
+        '\n',
+      ),
+    );
+    await writeOk(tuple(ns, 'doc1', 'viewer', 'user', 'alice'));
+
+    // gate 4 (tryReverseIndexCandidates) always skips acceleration for a
+    // permission target — this proves correctness is unaffected, only speed
+    // differs (see hasAnyGrant's own doc comment).
+    const result = await hasAnyGrant(pool, ref('user', 'alice'), 'view', ns);
+    expect(result).toEqual({ granted: true, truncated: false });
+  });
+
+  it('composes-correctly-with-the-reverse-index-accelerant-once-warm-D-175', async () => {
+    const ns = uniqueName('hag6');
+    await publishOk([`namespace ${ns} {`, '  relation viewer: user', '}'].join('\n'));
+    await writeOk(tuple(ns, 'doc1', 'viewer', 'user', 'alice'));
+
+    const rebuildResult = await rebuildRelationMembershipIndex(pool);
+    expect(rebuildResult.published).toBe(true);
+
+    const hit = await hasAnyGrant(pool, ref('user', 'alice'), 'viewer', ns, {
+      useRelationIndex: true,
+    });
+    expect(hit).toEqual({ granted: true, truncated: false });
+
+    const miss = await hasAnyGrant(pool, ref('user', 'mallory'), 'viewer', ns, {
+      useRelationIndex: true,
+    });
+    expect(miss).toEqual({ granted: false, truncated: false });
+  });
 });

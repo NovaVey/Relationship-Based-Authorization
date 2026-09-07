@@ -65,6 +65,7 @@ import { env } from '../config/env.js';
 import { performCheck, type PerformCheckResult } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { listObjects, listUsers } from '../audit/list.js';
+import { queryScope, SCOPE_QUERY_MAX_TARGETS } from '../audit/scope.js';
 import { writeTuple, deleteTuple, type TupleKey, type WriteTupleResult } from '../store/tuples.js';
 import { decodeToken, currentToken, TokenNotObservedError } from '../store/tokens.js';
 import { fetchWatchEvents, WATCH_DEFAULT_BATCH_LIMIT } from '../store/watch.js';
@@ -87,6 +88,7 @@ import {
   expandResponse,
   listObjectsResponse,
   listUsersResponse,
+  scopeQueryResponse,
   tupleWriteResponse,
   tupleBatchResponse,
   tupleDeleteResponse,
@@ -265,6 +267,37 @@ const listUsersBodySchema = z
   .object({
     object: entityRefSchema,
     relation: identifierField(),
+  })
+  .strict();
+
+// `POST /scope` (new feature, D-186) — one target to check as part of a
+// scope-bounding query. `SCOPE_QUERY_MAX_TARGETS` (imported from
+// `src/audit/scope.ts`, the same constant `queryScope` itself is sized
+// against) mirrors `CHECK_BATCH_MAX_SIZE` immediately below exactly, same
+// reasoning: each target is a full, independent unit of real server-side
+// work (up to a complete candidate scan), so an unbounded array would let
+// one request demand an unbounded amount of it.
+const scopeQueryTargetSchema = z
+  .object({
+    namespace: identifierField(),
+    relationOrPermission: identifierField(),
+  })
+  .strict();
+
+const scopeQueryBodySchema = z
+  .object({
+    subject: entityRefSchema,
+    targets: z
+      .array(scopeQueryTargetSchema)
+      .min(1, 'targets must contain at least one target')
+      .max(
+        SCOPE_QUERY_MAX_TARGETS,
+        `a scope query may contain at most ${SCOPE_QUERY_MAX_TARGETS} targets`,
+      ),
+    // One shared token for the whole query, not one per target — see
+    // src/audit/scope.ts's own top-of-file doc comment for why this
+    // deliberately differs from checkBatchBodySchema's per-item atToken.
+    atToken: z.string().optional(),
   })
   .strict();
 
@@ -1655,6 +1688,85 @@ export async function buildServer(
       const result = await runOrInfrastructureError(reply, () => listUsers(pool, object, relation));
       if (result === undefined) return;
       const resp = listUsersResponse(object, relation, result);
+      await reply.code(resp.status).send(resp.body);
+    },
+  );
+
+  /**
+   * `POST /scope` (new feature, D-186) — the scope-bounding query: given a
+   * principal, which of a caller-supplied set of `(namespace,
+   * relationOrPermission)` targets does that principal currently hold at
+   * least one grant for? Built for a caller minting a delegation credential
+   * that needs to bound its own claimed scope to no more than what the
+   * underlying ReBAC graph actually grants — see `src/audit/scope.ts`'s own
+   * top-of-file doc comment for the full design.
+   *
+   * Gated and rate-limited exactly like `/check/batch` (`checkBatchRateLimit`,
+   * 20/min — each target can cost up to a full candidate scan in the worst
+   * case, the identical reasoning that constant's own comment states).
+   * Scope-checked against every namespace present anywhere in `targets`, not
+   * just the first one — mirrors `/check/batch`'s own identical multi-
+   * namespace scope-check exactly, same reasoning: a caller with a
+   * namespace-scoped DB key could otherwise smuggle a target against an
+   * out-of-scope namespace into an otherwise in-scope-looking request. **The
+   * whole request is rejected, before any target is attempted, the moment
+   * even one target names an out-of-scope namespace or the array itself is
+   * malformed/oversized** — structural problems stay all-or-nothing, same as
+   * `/check/batch`.
+   *
+   * **Deliberately NOT all-or-nothing for a per-target RUNTIME failure,
+   * unlike `/check/batch`.** `queryScope` (`src/audit/scope.ts`) already
+   * catches each target's own failure independently — this handler never
+   * needs (and must never add) a `runOrInfrastructureError` wrapper around
+   * the whole call, since a single target's Postgres error or
+   * `token_not_yet_observed` condition must not discard every other
+   * target's already-computed result. `scopeQueryResponse` maps each
+   * target's own captured `Error` to the same `ApiErrorCode`/message a
+   * whole-request failure would get.
+   */
+  app.post(
+    '/scope',
+    { preHandler: gatedReadPreHandlers(), ...checkBatchRateLimit },
+    async (request, reply) => {
+      const parsed = scopeQueryBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        await sendApiError(reply, invalidRequestError(describeZodError(parsed.error)));
+        return;
+      }
+      const { subject, targets, atToken: opaqueAtToken } = parsed.data;
+
+      const namespaces = [...new Set(targets.map((target) => target.namespace))];
+      const outOfScope = findOutOfScopeNamespace(request.authScopes, namespaces);
+      if (outOfScope !== undefined) {
+        await sendApiError(
+          reply,
+          forbiddenError(
+            `this credential is scoped to a specific set of namespaces and does not include '${outOfScope}'`,
+          ),
+        );
+        return;
+      }
+
+      let atToken: number | undefined;
+      if (opaqueAtToken !== undefined) {
+        try {
+          atToken = decodeToken(opaqueAtToken);
+        } catch (err) {
+          await sendApiError(reply, invalidRequestError((err as Error).message));
+          return;
+        }
+      }
+
+      // No runOrInfrastructureError here, deliberately — see this route's
+      // own doc comment above. queryScope never throws for a per-target
+      // failure; it records one, and the loop below continues regardless.
+      const result = await queryScope(
+        pool,
+        subject,
+        targets,
+        atToken !== undefined ? { atToken } : {},
+      );
+      const resp = scopeQueryResponse(subject, result, atToken);
       await reply.code(resp.status).send(resp.body);
     },
   );

@@ -299,7 +299,7 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
   });
 });
 
-describe('a /check pinned to a real but not-yet-observed atToken gets a distinguishable 503, not the generic infrastructure_unavailable one (D-183)', () => {
+describe('a /check pinned to a real but not-yet-observed atToken gets a distinguishable 503, not the generic infrastructure_unavailable one (D-184)', () => {
   it('post-check-with-a-well-formed-but-astronomically-high-atToken-returns-503-token_not_yet_observed-never-infrastructure_unavailable', async () => {
     // No schema/tuple setup needed — assertTokenObserved runs first, before
     // productionCheck ever opens a transaction or looks up a schema (see
@@ -324,6 +324,127 @@ describe('a /check pinned to a real but not-yet-observed atToken gets a distingu
     expect(body.error.code).toBe('token_not_yet_observed');
     expect(body.error.code).not.toBe('infrastructure_unavailable');
     expect(body.error.message).toMatch(/consistency token 999999999 has not been observed/);
+  });
+});
+
+describe('POST /scope — the real HTTP route end to end (D-186)', () => {
+  it('reports granted:true for a real permission alice holds and granted:false for one she does not, in the same order the targets were supplied', async () => {
+    const ns = uniqueName('scopens');
+    const source = [
+      `namespace ${ns} {`,
+      '  relation viewer: user',
+      '  relation editor: user',
+      '',
+      '  permission view = viewer | editor',
+      '}',
+    ].join('\n');
+    const publishRes = await app.inject({
+      method: 'POST',
+      url: '/schema/publish',
+      payload: { source },
+      headers: authHeaders(),
+    });
+    expect(publishRes.statusCode).toBe(200);
+
+    const objectId = uniqueName('obj');
+    const writeRes = await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: {
+        objectNs: ns,
+        objectId,
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId: 'alice',
+      },
+      headers: authHeaders(),
+    });
+    expect(writeRes.statusCode).toBe(200);
+
+    const scopeRes = await app.inject({
+      method: 'POST',
+      url: '/scope',
+      payload: {
+        subject: { ns: 'user', id: 'alice' },
+        targets: [
+          { namespace: ns, relationOrPermission: 'view' },
+          { namespace: ns, relationOrPermission: 'editor' },
+        ],
+      },
+      headers: authHeaders(),
+    });
+    expect(scopeRes.statusCode).toBe(200);
+    const scopeBody = await parseBody(scopeRes);
+    expect(scopeBody.subject).toEqual({ ns: 'user', id: 'alice' });
+    expect(scopeBody.grants).toEqual([
+      { namespace: ns, relationOrPermission: 'view', granted: true, truncated: false },
+      { namespace: ns, relationOrPermission: 'editor', granted: false, truncated: false },
+    ]);
+  });
+
+  it('rejects the whole request with 400 when targets exceeds SCOPE_QUERY_MAX_TARGETS, never silently truncating it', async () => {
+    const targets = Array.from({ length: 51 }, (_, i) => ({
+      namespace: 'user',
+      relationOrPermission: `permission_${i}`,
+    }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/scope',
+      payload: { subject: { ns: 'user', id: 'alice' }, targets },
+      headers: authHeaders(),
+    });
+    expect(res.statusCode).toBe(400);
+    const body = await parseBody(res);
+    expect(body.error.code).toBe('invalid_request');
+  });
+
+  it("a well-formed but astronomically high atToken surfaces as that target's own per-target error field — never a whole-request 503", async () => {
+    // A real candidate is required for this to actually reach productionCheck
+    // at all (hasAnyGrant's own candidate scan finds nothing to check
+    // against an object namespace with zero tuples, and would report a
+    // plain granted:false long before any token is ever validated — see
+    // ProductionCheckOptions.atToken's own doc comment: the token floor is
+    // checked inside productionCheck, not before a candidate exists to run
+    // it against).
+    const ns = uniqueName('scopetok');
+    await app.inject({
+      method: 'POST',
+      url: '/schema/publish',
+      payload: { source: [`namespace ${ns} {`, '  relation viewer: user', '}'].join('\n') },
+      headers: authHeaders(),
+    });
+    const objectId = uniqueName('obj');
+    await app.inject({
+      method: 'POST',
+      url: '/tuples',
+      payload: {
+        objectNs: ns,
+        objectId,
+        relation: 'viewer',
+        subjectNs: 'user',
+        subjectId: 'alice',
+      },
+      headers: authHeaders(),
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/scope',
+      payload: {
+        subject: { ns: 'user', id: 'alice' },
+        targets: [{ namespace: ns, relationOrPermission: 'viewer' }],
+        atToken: encodeToken(999_999_999),
+      },
+      headers: authHeaders(),
+    });
+    // The whole-request status is still 200 — the failure is per-target.
+    expect(res.statusCode).toBe(200);
+    const body = await parseBody(res);
+    expect(body.grants).toHaveLength(1);
+    expect(body.grants[0].namespace).toBe(ns);
+    expect(body.grants[0].relationOrPermission).toBe('viewer');
+    expect(body.grants[0].error.code).toBe('token_not_yet_observed');
+    expect(body.grants[0].granted).toBeUndefined();
   });
 });
 

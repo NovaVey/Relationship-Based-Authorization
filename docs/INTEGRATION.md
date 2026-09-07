@@ -181,6 +181,39 @@ MAX_CONCURRENCY)` at a time, default 8), there is no per-item try/catch:
   allowed" questions, the same shape a single `/check` answers, not a bulk
   discovery operation.
 
+## Bounding a delegation credential's own scope
+
+A caller minting a short-lived delegation credential — an agent tool-call
+broker handing a sub-agent a scoped token, say — needs the new
+credential's own claimed scope to never exceed what the underlying ReBAC
+graph actually grants right now: a delegation token claiming a permission
+its own principal doesn't hold would be exactly the over-grant class this
+project's whole soundness effort exists to catch, just relocated to a
+different credential instead of a `/check` call.
+
+`POST /scope` (D-186) answers exactly that: given a subject and a
+caller-supplied list of up to 50 `(namespace, relationOrPermission)`
+targets, it reports whether that subject currently holds at least one
+grant for each one — a boolean per target, not a full enumerated object
+list (if you also need concrete object ids for one specific target,
+`/list-objects` already answers that). Gated and rate-limited like
+`/check/batch` (20/min); one shared, optional `atToken` pins the whole
+query to one consistent point, the same consistency-token discipline
+described above.
+
+**The one place this deliberately does not match `/check/batch`'s own
+shape:** a single target's own runtime failure — a genuine Postgres
+error, or that one target's own `token_not_yet_observed` condition —
+never fails the whole request. It surfaces as that target's own `error`
+field in the response body (still `200`), and every other target still
+gets a real, live answer. Only a structural problem (an oversized or
+malformed `targets` array, a namespace outside a scoped credential's own
+authorization) rejects the whole request, before any target is attempted
+— the same class of problem `/check/batch` also rejects outright. See
+`src/audit/scope.ts`'s own top-of-file doc comment for the full design,
+including why this was a deliberate choice, not an oversight, given
+`/check/batch`'s own known all-or-nothing limitation above.
+
 ## Fail-open or fail-closed when this service is unreachable
 
 Everything above assumes the caller can reach this service at all. If the

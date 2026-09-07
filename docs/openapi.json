@@ -741,6 +741,165 @@
         }
       }
     },
+    "/scope": {
+      "post": {
+        "summary": "For each of a caller-supplied set of (namespace, relationOrPermission) targets, does subject currently hold at least one grant? Built for bounding a delegation credential's own scope.",
+        "description": "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 20 requests/minute per client (checkBatchRateLimit — each target can cost up to a full candidate scan), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked. Up to 50 targets per request (SCOPE_QUERY_MAX_TARGETS, src/audit/scope.ts); an oversized or malformed targets array, or any out-of-scope namespace, rejects the whole request (400/403) before any target is attempted. A per-target RUNTIME failure (a genuine Postgres error, or that one target's own token_not_yet_observed) never fails the whole request — it surfaces as that one target's own `error` field in the response body (still HTTP 200), and every other target still gets a real, live answer. See src/audit/scope.ts for the full design, including why this deliberately differs from /check/batch's own all-or-nothing failure mode.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "object",
+                    "properties": {
+                      "ns": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z][a-z0-9_]*$"
+                      }
+                    },
+                    "required": ["ns", "id"],
+                    "additionalProperties": false
+                  },
+                  "targets": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "namespace": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 63,
+                          "pattern": "^[a-z][a-z0-9_]*$"
+                        },
+                        "relationOrPermission": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 63,
+                          "pattern": "^[a-z][a-z0-9_]*$"
+                        }
+                      },
+                      "required": ["namespace", "relationOrPermission"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "description": "Up to 50 (namespace, relationOrPermission) targets to check for subject."
+                  },
+                  "atToken": {
+                    "type": "string",
+                    "description": "An opaque, encoded consistency token from a prior write/delete response's own `token` field (src/store/tokens.ts) — one shared token for the whole query, not one per target. Optional."
+                  }
+                },
+                "required": ["subject", "targets"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One outcome per target, in the same order supplied — a confirmed grant/non-grant, or that one target's own independent error. Never a whole-request 503: a per-target infrastructure_unavailable/token_not_yet_observed condition is embedded in that target's own error field instead (see src/audit/scope.ts).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "subject": {
+                      "type": "object",
+                      "properties": { "ns": { "type": "string" }, "id": { "type": "string" } },
+                      "required": ["ns", "id"]
+                    },
+                    "grants": {
+                      "type": "array",
+                      "items": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "namespace": { "type": "string" },
+                              "relationOrPermission": { "type": "string" },
+                              "granted": { "type": "boolean" },
+                              "truncated": {
+                                "type": "boolean",
+                                "description": "true only when granted is false AND the candidate scan itself was capped — never true when granted is true (one real hit is a complete, exhaustively proven answer regardless of what else was left unexamined)."
+                              }
+                            },
+                            "required": [
+                              "namespace",
+                              "relationOrPermission",
+                              "granted",
+                              "truncated"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "namespace": { "type": "string" },
+                              "relationOrPermission": { "type": "string" },
+                              "error": {
+                                "type": "object",
+                                "properties": {
+                                  "code": { "type": "string" },
+                                  "message": { "type": "string" }
+                                },
+                                "required": ["code", "message"]
+                              }
+                            },
+                            "required": ["namespace", "relationOrPermission", "error"],
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "atToken": {
+                      "type": "string",
+                      "description": "Present only when the request supplied atToken."
+                    }
+                  },
+                  "required": ["subject", "grants"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400 — invalid_request, tuple_validation_failed, or schema_compile_failed (see ApiErrorCode). Body always the shared ApiError envelope.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "401": {
+            "description": "401 — unauthorized (missing/invalid bearer token, or no credential configured for this deployment).",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "403": {
+            "description": "403 — forbidden. The bearer token authenticated successfully but is a namespace-scoped API key (src/api/db-api-keys.ts) whose scope does not cover every namespace this specific request targets. Distinct from 401: this deployment knows exactly who the caller is, and that identity's own authority doesn't reach what it asked for. error.message names the exact out-of-scope namespace.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          },
+          "429": {
+            "description": "429 — rate_limited. Body includes a human-readable retry-after in `error.message`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+            }
+          }
+        }
+      }
+    },
     "/watch": {
       "get": {
         "summary": "Live Server-Sent-Events stream of every write_log row from ?since (or \"now\") forward (D-174).",

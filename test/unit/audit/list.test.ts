@@ -49,6 +49,7 @@ import {
   evaluateExpandNode,
   isUnenumerable,
   listObjects,
+  hasAnyGrant,
   type EntityRef,
   type EvaluateExpandResult,
   type MemberSet,
@@ -61,6 +62,7 @@ import * as publishModule from '../../../src/schema/publish.js';
 import * as relationIndexModule from '../../../src/store/relation-index.js';
 import type { ConnectionSource, QueryResultLike } from '../../../src/store/query-executor.js';
 import type { NamespaceConfig } from '../../../src/schema/dsl/types.js';
+import { env } from '../../../src/config/env.js';
 
 function ref(ns: string, id: string): EntityRef {
   return { ns, id };
@@ -703,5 +705,77 @@ describe('listObjects — the accelerant actually engaging (all five gates pass)
       ],
       truncated: true, // the accelerant's own value, not recomputed
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasAnyGrant (D-186) — the early-exit sibling driving src/audit/scope.ts's
+// queryScope. These DB-free unit tests prove the one thing the real-Postgres
+// integration tests (test/unit/audit/list.integration.test.ts) can't easily
+// observe directly: that a further batch is never even dispatched once an
+// earlier one already found a hit — a real call-count assertion, not just a
+// correct final answer that could coincidentally also be produced by
+// checking every candidate. Reuses this file's own fakePool/ALLOWED/
+// bareRelationConfig helpers exactly as listObjects's own gate tests above do.
+// ---------------------------------------------------------------------------
+
+const DENIED: ProductionCheckResult = { allowed: false, depth: 1, touchedExpiringTuple: false };
+
+describe('hasAnyGrant — early-exit aggregation, a real call-count proof', () => {
+  const ORIGINAL_MAX_CONCURRENCY = env.MAX_CONCURRENCY;
+
+  afterEach(() => {
+    env.MAX_CONCURRENCY = ORIGINAL_MAX_CONCURRENCY;
+  });
+
+  it('stops dispatching further batches the moment an earlier batch finds a hit — later candidates are never even checked', async () => {
+    env.MAX_CONCURRENCY = 2; // deterministic batch size: [c1,c2], [c3,c4], [c5,c6]
+    const pool = fakePool(['c1', 'c2', 'c3', 'c4', 'c5', 'c6']);
+    const productionCheckSpy = vi
+      .spyOn(productionModule, 'productionCheck')
+      .mockImplementation(async (_pool, _subj, object) =>
+        object.id === 'c2' ? ALLOWED(object.id) : DENIED,
+      );
+
+    const result = await hasAnyGrant(pool, ALICE, VIEWER, DOCUMENT_NS);
+
+    expect(result).toEqual({ granted: true, truncated: false });
+    // Only the first batch (c1, c2) was ever dispatched — c3 through c6
+    // (the second and third batches) are never checked at all.
+    expect(productionCheckSpy).toHaveBeenCalledTimes(2);
+    const checkedIds = productionCheckSpy.mock.calls.map(([, , object]) => object.id).sort();
+    expect(checkedIds).toEqual(['c1', 'c2']);
+  });
+
+  it('every candidate denied — checks all of them (no early exit possible), granted false, truncated false (a fully proven negative, the candidate scan itself was not capped)', async () => {
+    env.MAX_CONCURRENCY = 2;
+    const pool = fakePool(['c1', 'c2', 'c3']);
+    const productionCheckSpy = vi
+      .spyOn(productionModule, 'productionCheck')
+      .mockResolvedValue(DENIED);
+
+    const result = await hasAnyGrant(pool, ALICE, VIEWER, DOCUMENT_NS);
+
+    expect(result).toEqual({ granted: false, truncated: false });
+    expect(productionCheckSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('truncated is always false when granted is true, even if the underlying candidate scan itself reported truncated:true — one real hit is a complete, exhaustively proven answer regardless of what was left unexamined', async () => {
+    vi.spyOn(publishModule, 'getLatestNamespaceConfig').mockResolvedValue(
+      bareRelationConfig([{ namespace: 'user' }]),
+    );
+    vi.spyOn(relationIndexModule, 'fetchReverseIndexCandidates').mockResolvedValue({
+      hit: true,
+      objectIds: ['doc1'],
+      truncated: true, // the accelerant itself says "more exist, unexamined"
+    });
+    vi.spyOn(productionModule, 'productionCheck').mockImplementation(async (_pool, _subj, object) =>
+      ALLOWED(object.id),
+    );
+    const pool = fakePool([]);
+
+    const result = await hasAnyGrant(pool, ALICE, VIEWER, DOCUMENT_NS, { useRelationIndex: true });
+
+    expect(result).toEqual({ granted: true, truncated: false });
   });
 });
