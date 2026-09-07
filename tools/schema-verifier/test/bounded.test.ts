@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { compileSchema } from '../../../src/schema/dsl/compiler.js';
-import type { CompiledSchema } from '../../../src/schema/dsl/types.js';
+import { WILDCARD_SUBJECT_ID, type CompiledSchema } from '../../../src/schema/dsl/types.js';
 import {
   boundedSearch,
   generateCandidateTuples,
@@ -238,5 +238,108 @@ describe("generateCandidateTuples — collectPoolNamespaces pools a relation's o
 
     expect(candidates.length).toBeGreaterThan(0);
     expect(candidates.every((c) => c.subjectType === 'user')).toBe(true);
+  });
+});
+
+/**
+ * The wildcard-soundness investigation `docs/DECISIONS.md` documents (the
+ * entry immediately following D-171) found `generateCandidateTuples` never
+ * constructed the literal `WILDCARD_SUBJECT_ID` sentinel for a wildcard-
+ * declared subject type (`<ns>:*`) — a `{namespace, wildcard: true}` entry
+ * was walked identically to a plain `{namespace}` entry, generating only
+ * ordinary concrete individual candidates. For a relation declaring ONLY
+ * `<ns>:*`, the one legal witness a real grant to that relation can ever
+ * produce (a `'*'` tuple) was structurally unconstructible at any bound
+ * `k` — not a completeness gap a larger `k` could close, a permanent blind
+ * spot. This was masked in practice only by a separate, independently
+ * confirmed bug in `src/store/tuples.ts`'s `validateAgainstSchema` (fixed
+ * in the same change) that wrongly accepted a concrete grant against a
+ * wildcard-only relation; fixing that bug alone, with no change here,
+ * would have silently flipped a genuinely `VIOLATED` schema of exactly
+ * this shape into an uncorrectable-by-any-k false `HOLDS`.
+ */
+describe('generateCandidateTuples — a wildcard-declared subject type is represented by the literal `*` sentinel, never dropped or replaced by a concrete stand-in', () => {
+  it('a wildcard-only entry produces exactly one candidate per object — the literal WILDCARD_SUBJECT_ID sentinel, no concrete individuals and no subjectRelation', () => {
+    const schema = loadSchema(SCHEMA_FIXTURE_DIR, 'wildcard-only-recursive-exclusion.authz');
+    const invariant = loadInvariant('wildcard-view-reachable.invariant');
+
+    // k = 1: the folder pool has two instances (the goal's own object `o`,
+    // plus one generic `folder_0`) — one wildcard candidate per object,
+    // never per subject (there is no subject pool to enumerate for a
+    // wildcard grant).
+    const candidates = generateCandidateTuples(schema, ['folder#viewer'], invariant, 1);
+
+    expect(candidates).toHaveLength(2);
+    expect(candidates.map((c) => c.object).sort()).toEqual(['folder_0', 'o']);
+    for (const c of candidates) {
+      expect(c.objectType).toBe('folder');
+      expect(c.relation).toBe('viewer');
+      expect(c.subjectType).toBe('user');
+      expect(c.subject).toBe(WILDCARD_SUBJECT_ID);
+      expect(c.subjectRelation).toBeUndefined();
+    }
+  });
+
+  it('a mixed entry (`user | user:*`) still produces ordinary concrete candidates for the sibling plain entry, alongside one wildcard candidate — the fix narrows only the wildcard entry itself', () => {
+    const source = [
+      'namespace user {',
+      '  relation self: user',
+      '}',
+      '',
+      'namespace document {',
+      '  relation viewer: user | user:*',
+      '}',
+    ].join('\n');
+    const compiled = compileSchema(source);
+    if (!compiled.ok) throw new Error('mixed wildcard probe schema failed to compile');
+
+    const probeSource = [
+      'invariant probe {',
+      '  s: user',
+      '  o: document',
+      '  goal: viewer(s, o)',
+      '}',
+    ].join('\n');
+    const parsed = parseInvariants(probeSource);
+    if (!parsed.ok) throw new Error('mixed wildcard probe invariant failed to parse');
+    const invariant = parsed.invariants[0]!;
+
+    const candidates = generateCandidateTuples(compiled.schema, ['document#viewer'], invariant, 1);
+
+    // k = 1: the document pool has two objects (`o`, `document_0`); the
+    // user pool has two subjects (`s`, `user_0`). One wildcard candidate
+    // per object (2), plus one concrete candidate per (object, subject)
+    // pair from the sibling plain entry (2 × 2 = 4) — the wildcard
+    // entry's own narrowing must not remove the plain entry's candidates.
+    const wildcardCandidates = candidates.filter((c) => c.subject === WILDCARD_SUBJECT_ID);
+    const concreteCandidates = candidates.filter((c) => c.subject !== WILDCARD_SUBJECT_ID);
+    expect(wildcardCandidates).toHaveLength(2);
+    expect(concreteCandidates).toHaveLength(4);
+    expect(concreteCandidates.every((c) => c.subjectRelation === undefined)).toBe(true);
+  });
+
+  it('end-to-end: a wildcard-only, recursive, exclusion-reaching schema is decided by bounded search (SMT/CHC both decline), VIOLATED, witnessed by the real `*` grant — never a fabricated concrete grant to the goal subject', async () => {
+    const schema = loadSchema(SCHEMA_FIXTURE_DIR, 'wildcard-only-recursive-exclusion.authz');
+    const graph = buildSchemaGraph(schema);
+    const invariant = loadInvariant('wildcard-view-reachable.invariant');
+
+    const { result, validation } = await checkAndValidate(graph, schema, invariant);
+
+    expect(result.fragment).toBe('non-monotone');
+    expect(result.proof).toBe('bounded');
+    expect(result.verdict).toBe('VIOLATED');
+    expect(result.witness).toEqual([
+      {
+        objectType: 'folder',
+        object: 'o',
+        relation: 'viewer',
+        subjectType: 'user',
+        subject: WILDCARD_SUBJECT_ID,
+      },
+    ]);
+    // Bounded verdicts get no replay (see check-and-validate.ts's own
+    // doc comment) — already self-validated by construction, since the
+    // witness came directly from the real engine's own `allowed: true`.
+    expect(validation.kind).toBe('not-applicable');
   });
 });

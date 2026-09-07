@@ -1,0 +1,33 @@
+// A wildcard-only relation (`viewer: user:*`, no plain `user` entry)
+// combined with genuine recursion (`parent->view`) and an exclusion
+// (`can_view = viewer - blocked`) — deliberately forces §7's bounded
+// search: the non-recursive SMT tier declines outright on `isRecursive`,
+// and the CHC tier declines the moment it meets the `exclusionBase`/
+// `exclusionSubtract` pair (see `../../src/smt/chc-encode.ts`'s own
+// header comment), so nothing decides `view` before the bounded fallback
+// does.
+//
+// This is the exact shape the wildcard-soundness investigation
+// (docs/DECISIONS.md, the entry following D-171) used to demonstrate a
+// real, then-latent gap: before that entry's fix,
+// `generateCandidateTuples` never constructed the literal `'*'` sentinel
+// for a wildcard-declared subject type, so the ONLY way this schema's one
+// real violation (nobody named `blocked`, and `viewer` grants to
+// everyone) could ever be witnessed was a concrete stand-in grant
+// (`folder:o#viewer@user:s`) that a since-fixed, independent
+// `src/store/tuples.ts` bug happened to accept. With both fixes in place,
+// `viewer`'s only candidate is the real wildcard tuple
+// (`folder:o#viewer@user:*`) — see `test/bounded.test.ts`'s own dedicated
+// describe block for the regression this guards.
+namespace user {
+  relation self: user
+}
+
+namespace folder {
+  relation parent: folder
+  relation viewer: user:*
+  relation blocked: user
+
+  permission can_view = viewer - blocked
+  permission view = can_view | parent->view
+}

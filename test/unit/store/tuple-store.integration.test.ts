@@ -49,6 +49,7 @@ import {
   WRITE_LOG_LOCK_OBJID,
   type TupleKey,
 } from '../../../src/store/tuples.js';
+import { WILDCARD_SUBJECT_ID } from '../../../src/schema/dsl/types.js';
 import { currentToken, assertTokenObserved } from '../../../src/store/tokens.js';
 import { publishSchema, getLatestNamespaceConfig } from '../../../src/schema/publish.js';
 import { productionCheck } from '../../../src/resolve/production/resolver.js';
@@ -528,6 +529,93 @@ describe('a plain subject can never sneak in by matching only half of a differen
       subjectNs: groupNs,
       subjectId: 'eng',
       subjectRelation: 'member',
+    });
+
+    expect(result.ok).toBe(true);
+  });
+});
+
+/**
+ * Closes a real, confirmed bug found by the wildcard-soundness investigation
+ * `docs/DECISIONS.md` documents (the entry immediately following D-171):
+ * `validateAgainstSchema`'s ordinary (non-wildcard-write) branch checked
+ * only `st.namespace === tuple.subjectNs && st.relation ===
+ * tuple.subjectRelation` — never `st.wildcard`. A wildcard-only entry
+ * (`{namespace, wildcard: true}`) leaves `relation` `undefined`, exactly
+ * like a genuine plain entry (`{namespace}`) does — `SubjectTypeRef`'s own
+ * "`relation` and `wildcard` are mutually exclusive" — so for an ordinary
+ * concrete write (`subjectRelation` also `undefined`), `st.relation ===
+ * tuple.subjectRelation` reduced to `undefined === undefined`: true. A
+ * relation declaring ONLY `<ns>:*` silently accepted a concrete grant to
+ * one named individual too, even though D-171 states plainly this feature
+ * is "opt-in per relation, never implied by declaring the plain `user`
+ * type alongside it" — declaring only the wildcard form is the one case
+ * that opt-in framing most directly rules out. The reverse direction (a
+ * relation that never declared `<ns>:*` rejecting a wildcard write) was
+ * already covered by `test/metamorphic/wildcard-subtract.integration.
+ * test.ts`'s Property C write-time control; this closes the missing
+ * mirror image.
+ */
+describe('a concrete subject can never sneak into a wildcard-only declared relation — the wildcard flag must be checked, not just namespace and relation', () => {
+  function viewerWildcardOnlySchemaSource(ns: string): string {
+    return [`namespace ${ns} {`, '  relation viewer: user:*', '}'].join('\n');
+  }
+
+  it('a-concrete-grant-to-a-relation-declaring-only-the-wildcard-subject-type-is-rejected', async () => {
+    const ns = uniqueName('doc');
+    const result0 = await publishSchema(pool, viewerWildcardOnlySchemaSource(ns));
+    if (!result0.ok)
+      throw new Error(`fixture schema failed to publish: ${result0.errors.join('; ')}`);
+
+    const result = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: uniqueName('obj'),
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((e) => e.code === 'subject_type_not_allowed')).toBe(true);
+  });
+
+  it('control-the-same-wildcard-only-relation-genuinely-accepts-an-actual-wildcard-grant', async () => {
+    // Rules out "this fixture just rejects everything" as an alternative
+    // explanation for the test above passing.
+    const ns = uniqueName('doc');
+    const result0 = await publishSchema(pool, viewerWildcardOnlySchemaSource(ns));
+    if (!result0.ok)
+      throw new Error(`fixture schema failed to publish: ${result0.errors.join('; ')}`);
+
+    const result = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: uniqueName('obj'),
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: WILDCARD_SUBJECT_ID,
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('control-a-mixed-relation-declaring-both-plain-and-wildcard-still-accepts-a-concrete-grant', async () => {
+    // Proves the fix's added `st.wildcard !== true` exclusion only removes
+    // the wildcard entry from consideration, not the sibling plain entry —
+    // a relation declaring `user | user:*` must keep accepting ordinary
+    // concrete grants exactly as it did before this fix.
+    const ns = uniqueName('doc');
+    const source = [`namespace ${ns} {`, '  relation viewer: user | user:*', '}'].join('\n');
+    const result0 = await publishSchema(pool, source);
+    if (!result0.ok)
+      throw new Error(`fixture schema failed to publish: ${result0.errors.join('; ')}`);
+
+    const result = await writeTuple(pool, {
+      objectNs: ns,
+      objectId: uniqueName('obj'),
+      relation: 'viewer',
+      subjectNs: 'user',
+      subjectId: 'alice',
     });
 
     expect(result.ok).toBe(true);

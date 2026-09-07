@@ -7,7 +7,7 @@
  * `src/schema/dsl/random.ts` (D-114) and `../validate/fuzz.ts` (D-117)
  * both already follow.
  */
-import type { CompiledSchema } from '../../../../src/schema/dsl/types.js';
+import { WILDCARD_SUBJECT_ID, type CompiledSchema } from '../../../../src/schema/dsl/types.js';
 import type { Invariant, NotRelationEqualsConstraint } from '../invariants/types.js';
 import type { NodeId } from '../ir/types.js';
 import type { WitnessTuple } from '../reachability/types.js';
@@ -134,6 +134,37 @@ export function generateCandidateTuples(
     if (!relation) continue; // unreachable for a real CompiledSchema — defensive only
     for (const objectId of pools.get(namespace) ?? []) {
       for (const st of relation.subjectTypes) {
+        // A wildcard-declared subject type (`<ns>:*`) has exactly one
+        // legal grant shape: the literal WILDCARD_SUBJECT_ID sentinel,
+        // covering every subject of `st.namespace` at once — never a
+        // per-individual grant. D-171: "opt-in per relation, never
+        // implied by declaring the plain type alongside it," enforced at
+        // write time by `src/store/tuples.ts`'s `validateAgainstSchema`
+        // (a concrete grant against a wildcard-only entry is rejected).
+        // Before this branch existed, this generator produced only
+        // ordinary concrete candidates for a wildcard entry, identical to
+        // a plain one — the one witness a wildcard-only relation can
+        // actually satisfy was never constructible at any `k`, a
+        // structural (not bound-limited) blind spot in the bounded-search
+        // fallback specifically confirmed by the wildcard-soundness
+        // investigation `docs/DECISIONS.md` documents. One candidate per
+        // object is enough — unlike a bare-principal entry, there is no
+        // pool of individuals to enumerate for a wildcard grant.
+        if (st.wildcard === true) {
+          const tuple: WitnessTuple = {
+            objectType: namespace,
+            object: objectId,
+            relation: name,
+            subjectType: st.namespace,
+            subject: WILDCARD_SUBJECT_ID,
+          };
+          const key = `${tuple.objectType}:${tuple.object}#${tuple.relation}@${tuple.subjectType}:${tuple.subject}#`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            candidates.push(tuple);
+          }
+          continue;
+        }
         for (const subjectId of pools.get(st.namespace) ?? []) {
           // Bare-principal only (`st.relation === undefined`) — a
           // userset-subject candidate sharing the same object/relation/
