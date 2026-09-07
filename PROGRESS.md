@@ -3016,3 +3016,13 @@ Two things this project had never stated explicitly, stated now: what a caller s
 Then restructured the README itself around what was asked: capability, model, and the soundness claim, not a chronological list of every proof that shipped along the way. Ten sections that had grown into a narrated build history moved, verbatim, into their own new document — not summarized, not condensed, exactly as written — leaving the front page a much shorter, clearer path from "why this exists" to "try it yourself" to "how it works." Every cross-reference the move could have broken was checked directly rather than assumed safe: a few genuinely did break, all found and fixed, and every link in every touched document was confirmed to resolve against the real filesystem before calling this done.
 
 Full account: `docs/DECISIONS.md` D-185.
+
+## The scope-bounding query — the last item on the list, and the only genuinely new capability on it
+
+**Owner:** main agent.
+
+Everything else on the same list turned out to be a fix or a documentation pass; this one didn't — given a principal, return which of a caller-supplied set of permissions across possibly many namespaces they currently hold, the primitive a service minting a short-lived delegation credential needs to make sure that credential never claims more than the real underlying graph actually grants. Given a plan first this time, before any code, per direct instruction: laid out the design — what gets checked, how costs stay bounded, what happens when one part of a bigger request fails — and got it approved before writing a line.
+
+The one real design choice worth calling out: a single failing part of a multi-part request here never takes down the rest of the request with it. This project already has one existing endpoint that works the other way (a whole batch fails if any one piece of it does), already flagged as a known rough edge worth fixing one entry ago — building a second endpoint that repeated the identical rough edge on purpose, with nothing forcing that choice, would have been a mistake made twice instead of once. Every other real design decision (what a "yes" actually proves, how deep a single request's own real cost can go, why this doesn't try to answer the question for every namespace automatically) is written up in full in the underlying decision.
+
+Full account: `docs/DECISIONS.md` D-186.

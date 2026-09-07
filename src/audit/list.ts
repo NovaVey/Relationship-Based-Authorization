@@ -457,6 +457,120 @@ export async function listObjects(
 }
 
 // ---------------------------------------------------------------------------
+// hasAnyGrant — a coarser, cheaper sibling of listObjects for a caller that
+// only needs a yes/no answer, not the full enumerated object set. Built for
+// src/audit/scope.ts's own multi-target scope-bounding query (D-186): a
+// caller scoping a delegation token to "may this principal invoke tool X"
+// needs to know whether at least one grant exists, not which object
+// instances it covers — and doing that across many (namespace, permission)
+// targets in one call would multiply listObjects's own already-capped cost
+// by however many targets are asked for, if it collected every object.
+// ---------------------------------------------------------------------------
+
+export interface HasAnyGrantResult {
+  /** `true` iff a real `productionCheck` confirmed at least one candidate allowed — never inferred, never approximated. */
+  granted: boolean;
+  /**
+   * `true` iff `granted` is `false` AND the candidate scan itself was
+   * capped (`fetchCandidateObjectIds`'s own `LIST_OBJECTS_MAX_CANDIDATES`
+   * limit, or the reverse-index accelerant's identical cap) — an honest
+   * "didn't find one within what was examined, not proven absent" signal,
+   * the same disclosed-not-hidden posture `listObjects`'s own `truncated`
+   * field already takes. Deliberately **always `false` when `granted` is
+   * `true`**: one real hit is a complete, exhaustively proven answer
+   * regardless of how many candidates were never examined — and
+   * deliberately `false` when `granted` is `false` but every real
+   * candidate was actually checked (a fully proven negative, not a guess).
+   */
+  truncated: boolean;
+}
+
+/**
+ * Does `subject` have at least one grant for `relationOrPermission` on ANY
+ * object in `objectNs`, right now? Same candidate sourcing as `listObjects`
+ * (the reverse-index accelerant first, `fetchCandidateObjectIds`'s
+ * namespace-wide scan otherwise — see `tryReverseIndexCandidates`'s own doc
+ * comment for the gates, including the one relevant caveat for a caller of
+ * *this* function specifically: gate 4 skips acceleration for a
+ * `relationOrPermission` naming a computed permission rather than a bare
+ * relation, so a permission-named target here always costs a full
+ * namespace-wide scan rather than an accelerated one — correctness is
+ * identical either way, only speed differs), and the identical soundness
+ * argument this file's own top-of-file doc comment already proves for
+ * `listObjects` (an object with zero `relation_tuples` rows naming it as
+ * `object_ns`/`object_id` can never be `allowed: true`, so the same
+ * candidate set is complete). The only difference from `listObjects` is
+ * the aggregation: `checkCandidatesUntilFirstMatch` below stops dispatching
+ * further batches the moment one candidate is confirmed allowed, rather
+ * than collecting every one — stopping early can only ever affect
+ * *completeness* (within the same already-disclosed candidate-cap limit
+ * `listObjects` accepts), never *soundness* (`granted: true` is only ever
+ * set from one real `productionCheck` `allowed: true`).
+ */
+export async function hasAnyGrant(
+  pool: ConnectionSource,
+  subject: EntityRef,
+  relationOrPermission: string,
+  objectNs: string,
+  options: ListObjectsOptions = {},
+): Promise<HasAnyGrantResult> {
+  const accelerated = await tryReverseIndexCandidates(
+    pool,
+    subject,
+    relationOrPermission,
+    objectNs,
+    options,
+  );
+  const { ids, truncated: candidatesTruncated } =
+    accelerated ?? (await fetchCandidateObjectIds(pool, objectNs));
+
+  const checkOptions: ProductionCheckOptions = {
+    ...(options.atToken !== undefined ? { atToken: options.atToken } : {}),
+    ...(options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {}),
+  };
+
+  const granted = await checkCandidatesUntilFirstMatch(
+    pool,
+    subject,
+    objectNs,
+    ids,
+    relationOrPermission,
+    checkOptions,
+  );
+  return { granted, truncated: !granted && candidatesTruncated };
+}
+
+/**
+ * `checkCandidatesConcurrently`'s own early-exit sibling: identical
+ * batching shape (slice into `Math.max(1, env.MAX_CONCURRENCY)`-sized
+ * batches, `Promise.all` each batch against a real `productionCheck`), but
+ * returns `true` the moment any candidate in the current batch is allowed,
+ * without ever dispatching a further batch — the one place this function's
+ * behavior differs from `checkCandidatesConcurrently`, which always
+ * exhausts every candidate to build the complete set `listObjects` needs.
+ */
+async function checkCandidatesUntilFirstMatch(
+  pool: ConnectionSource,
+  subject: EntityRef,
+  objectNs: string,
+  candidateIds: readonly string[],
+  relationOrPermission: string,
+  checkOptions: ProductionCheckOptions,
+): Promise<boolean> {
+  const concurrency = Math.max(1, env.MAX_CONCURRENCY);
+  for (let start = 0; start < candidateIds.length; start += concurrency) {
+    const batch = candidateIds.slice(start, start + concurrency);
+    const batchResults = await Promise.all(
+      batch.map((id) =>
+        productionCheck(pool, subject, { ns: objectNs, id }, relationOrPermission, checkOptions),
+      ),
+    );
+    if (batchResults.some((result) => result.allowed)) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // listUsers
 // ---------------------------------------------------------------------------
 

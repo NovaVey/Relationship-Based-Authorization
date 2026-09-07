@@ -74,9 +74,10 @@ import type { PerformCheckResult } from '../audit/checks.js';
 import type { ResolutionStep } from '../resolve/production/resolver.js';
 import type { ExpandNode } from '../audit/expand.js';
 import type { ListObjectsResult, ListUsersResult, SubjectRef } from '../audit/list.js';
+import type { ScopeQueryResult } from '../audit/scope.js';
 import type { WriteTupleResult, DeleteTupleResult } from '../store/tuples.js';
 import type { WatchEvent } from '../store/watch.js';
-import { encodeToken } from '../store/tokens.js';
+import { encodeToken, TokenNotObservedError } from '../store/tokens.js';
 import type { SchemaCompileResult } from '../schema/dsl/errors.js';
 import type { CompiledSchema } from '../schema/dsl/types.js';
 import type { PublishResult, PublishedNamespace } from '../schema/publish.js';
@@ -84,6 +85,9 @@ import {
   tupleValidationError,
   schemaCompileError,
   schemaPublishError,
+  tokenNotYetObservedError,
+  infrastructureUnavailableError,
+  type ApiErrorCode,
   type ApiErrorResponse,
   type ApiErrorBody,
 } from './errors.js';
@@ -366,6 +370,89 @@ export function listUsersResponse(
     };
   }
   return { status: 200, body: { object, relation, subjects: result.subjects } };
+}
+
+// ---------------------------------------------------------------------------
+// 2c. scope query (D-186) — given a principal, which of a caller-supplied
+// set of (namespace, relationOrPermission) targets do they currently hold?
+// See `src/audit/scope.ts`'s own top-of-file doc comment for the full
+// design (why per-target, not one all-or-nothing batch, unlike
+// `checkBatchResponse` above).
+// ---------------------------------------------------------------------------
+
+/**
+ * One target's outcome on the wire — a confirmed grant/non-grant, or (see
+ * `src/audit/scope.ts`'s own top-of-file doc comment) that one target's own
+ * independent failure, mapped to the exact same `ApiErrorCode`/message a
+ * whole-request failure would get via `src/api/server.ts`'s
+ * `runOrInfrastructureError` — just attached to this one target instead of
+ * failing the whole response. Always `200` at the response-status level
+ * regardless of how many (or all) targets carry an `error` — the same
+ * "every success status is literal, what happened is a body field"
+ * discipline this file's own top-of-file doc comment states for
+ * `allowed`/`created`/`deleted`/`truncated`, extended here to a per-target
+ * granularity a single check never needed before.
+ */
+export type ScopeGrantResponseOutcome =
+  | { namespace: string; relationOrPermission: string; granted: boolean; truncated: boolean }
+  | {
+      namespace: string;
+      relationOrPermission: string;
+      error: { code: ApiErrorCode; message: string };
+    };
+
+export interface ScopeQueryResponseBody {
+  subject: ApiEntityRef;
+  grants: ScopeGrantResponseOutcome[];
+  atToken?: string;
+}
+
+export interface ScopeQueryApiResponse {
+  status: 200;
+  body: ScopeQueryResponseBody;
+}
+
+/**
+ * Maps one target's own thrown `Error` (`src/audit/scope.ts`'s
+ * `ScopeGrantOutcome`'s `error` variant) to the same `{code, message}` shape
+ * `runOrInfrastructureError` (`src/api/server.ts`) already produces for a
+ * whole-request failure — `instanceof TokenNotObservedError` for the
+ * distinguishable `token_not_yet_observed` (D-184), the generic
+ * infrastructure path otherwise. Kept here, not duplicated in
+ * `server.ts`, so there is exactly one place this specific mapping is
+ * written, matching this file's own top-of-file doc comment: every
+ * response shape is built here, never assembled by hand in
+ * `src/api/server.ts`.
+ */
+function mapTargetError(err: Error): { code: ApiErrorCode; message: string } {
+  const resp =
+    err instanceof TokenNotObservedError
+      ? tokenNotYetObservedError(err.message)
+      : infrastructureUnavailableError(err.message);
+  return resp.body.error;
+}
+
+export function scopeQueryResponse(
+  subject: ApiEntityRef,
+  result: ScopeQueryResult,
+  atToken?: number,
+): ScopeQueryApiResponse {
+  return {
+    status: 200,
+    body: {
+      subject,
+      grants: result.grants.map((outcome) =>
+        'error' in outcome
+          ? {
+              namespace: outcome.namespace,
+              relationOrPermission: outcome.relationOrPermission,
+              error: mapTargetError(outcome.error),
+            }
+          : outcome,
+      ),
+      ...(atToken !== undefined ? { atToken: encodeToken(atToken) } : {}),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

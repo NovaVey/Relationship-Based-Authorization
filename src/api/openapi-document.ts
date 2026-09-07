@@ -2,7 +2,7 @@
  * `buildOpenApiDocument()` — a hand-written, hand-maintained OpenAPI 3.0.3
  * document describing every real HTTP route `src/api/server.ts` registers
  * today: `POST /check`, `POST /check/batch`, `POST /expand`,
- * `POST /list-objects`, `POST /list-users`, `POST /tuples`,
+ * `POST /list-objects`, `POST /list-users`, `POST /scope`, `POST /tuples`,
  * `POST /tuples/batch`, `DELETE /tuples`, `POST /schema/compile`,
  * `POST /schema/publish`, `GET /health`, `GET /metrics`, `GET /watch`, and
  * this module's own consumer, `GET /openapi.json`. `POST /check/batch` was
@@ -10,8 +10,9 @@
  * `checkBatchOperation()`'s own doc comment below for why it reuses
  * `checkOperation()`'s schemas rather than re-transcribing them, and this
  * file's "disclosed, not automatic" note above for why a human had to
- * notice and add it by hand — `GET /metrics`, `POST /tuples/batch`, and
- * `GET /watch` were each added the identical way, later still.
+ * notice and add it by hand — `GET /metrics`, `POST /tuples/batch`,
+ * `GET /watch`, and `POST /scope` (D-186) were each added the identical
+ * way, later still.
  *
  * **No new dependency.** No `zod-to-openapi`, no `@fastify/swagger`, no
  * schema-introspection of any kind — every JSON Schema object below was
@@ -650,6 +651,102 @@ function listUsersOperation(): OpenApiOperation {
   };
 }
 
+/**
+ * `POST /scope` (D-186) — the scope-bounding query. Unlike every other
+ * operation in this file, a single request can carry a MIX of successful
+ * (`granted`/`truncated`) and failed (`error`) outcomes across its own
+ * `grants` array — see `src/audit/scope.ts`'s own top-of-file doc comment
+ * for why this deliberately differs from `checkBatchOperation()`'s own
+ * all-or-nothing shape immediately above.
+ */
+const scopeGrantOutcomeSchema: JsonSchema = {
+  oneOf: [
+    {
+      type: 'object',
+      properties: {
+        namespace: { type: 'string' },
+        relationOrPermission: { type: 'string' },
+        granted: { type: 'boolean' },
+        truncated: {
+          type: 'boolean',
+          description:
+            'true only when granted is false AND the candidate scan itself was capped — never true when granted is true (one real hit is a complete, exhaustively proven answer regardless of what else was left unexamined).',
+        },
+      },
+      required: ['namespace', 'relationOrPermission', 'granted', 'truncated'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        namespace: { type: 'string' },
+        relationOrPermission: { type: 'string' },
+        error: {
+          type: 'object',
+          properties: { code: { type: 'string' }, message: { type: 'string' } },
+          required: ['code', 'message'],
+        },
+      },
+      required: ['namespace', 'relationOrPermission', 'error'],
+      additionalProperties: false,
+    },
+  ],
+};
+
+function scopeOperation(): OpenApiOperation {
+  const requestSchema: JsonSchema = {
+    type: 'object',
+    properties: {
+      subject: entityRefSchema,
+      targets: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { namespace: identifierSchema, relationOrPermission: identifierSchema },
+          required: ['namespace', 'relationOrPermission'],
+          additionalProperties: false,
+        },
+        minItems: 1,
+        description: 'Up to 50 (namespace, relationOrPermission) targets to check for subject.',
+      },
+      atToken: {
+        type: 'string',
+        description:
+          "An opaque, encoded consistency token from a prior write/delete response's own `token` field (src/store/tokens.ts) — one shared token for the whole query, not one per target. Optional.",
+      },
+    },
+    required: ['subject', 'targets'],
+    additionalProperties: false,
+  };
+  const responseSchema: JsonSchema = {
+    type: 'object',
+    properties: {
+      subject: apiEntityRefSchema,
+      grants: { type: 'array', items: scopeGrantOutcomeSchema },
+      atToken: { type: 'string', description: 'Present only when the request supplied atToken.' },
+    },
+    required: ['subject', 'grants'],
+  };
+  return {
+    summary:
+      "For each of a caller-supplied set of (namespace, relationOrPermission) targets, does subject currently hold at least one grant? Built for bounding a delegation credential's own scope.",
+    description:
+      "Gated by requireReadAuth (ADMIN_API_KEY or READONLY_API_KEY). Rate limit: 20 requests/minute per client (checkBatchRateLimit — each target can cost up to a full candidate scan), on top of the 1000 requests/minute per-IP authFloodGuard applied before auth is even checked. Up to 50 targets per request (SCOPE_QUERY_MAX_TARGETS, src/audit/scope.ts); an oversized or malformed targets array, or any out-of-scope namespace, rejects the whole request (400/403) before any target is attempted. A per-target RUNTIME failure (a genuine Postgres error, or that one target's own token_not_yet_observed) never fails the whole request — it surfaces as that one target's own `error` field in the response body (still HTTP 200), and every other target still gets a real, live answer. See src/audit/scope.ts for the full design, including why this deliberately differs from /check/batch's own all-or-nothing failure mode.",
+    security: BEARER_SECURITY,
+    requestBody: { required: true, content: { 'application/json': { schema: requestSchema } } },
+    responses: {
+      '200': jsonResponse(
+        "One outcome per target, in the same order supplied — a confirmed grant/non-grant, or that one target's own independent error. Never a whole-request 503: a per-target infrastructure_unavailable/token_not_yet_observed condition is embedded in that target's own error field instead (see src/audit/scope.ts).",
+        responseSchema,
+      ),
+      '400': RESPONSE_400,
+      '401': RESPONSE_401,
+      '403': RESPONSE_403,
+      '429': RESPONSE_429,
+    },
+  };
+}
+
 /** Shared by POST/DELETE /tuples — identical `tupleBodySchema` request shape either way. */
 function tupleRequestSchema(): JsonSchema {
   return {
@@ -1087,6 +1184,7 @@ export function buildOpenApiDocument(): OpenApiDocument {
       '/expand': { post: expandOperation() },
       '/list-objects': { post: listObjectsOperation() },
       '/list-users': { post: listUsersOperation() },
+      '/scope': { post: scopeOperation() },
       '/watch': { get: watchOperation() },
       '/tuples': { post: tupleWriteOperation(), delete: tupleDeleteOperation() },
       '/tuples/batch': { post: tupleBatchWriteOperation() },
