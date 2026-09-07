@@ -37,6 +37,48 @@ export async function currentToken(pool: QueryExecutor): Promise<number | null> 
 }
 
 /**
+ * Thrown by `assertTokenObserved`'s (and `src/resolve/production/resolver
+ * .ts`'s private `assertTokenObservedOnSnapshot`'s) "not yet observed"
+ * branch specifically — never its "malformed input" branch, which stays a
+ * plain `Error` (a caller passing a non-integer/negative token is a
+ * request-shape bug, already caught earlier by this API's own Zod schema
+ * in practice, not a consistency condition). A distinct class, not a
+ * distinguishing field on `Error`, so `src/api/server.ts`'s
+ * `runOrInfrastructureError` can tell "this specific, named token
+ * condition" apart from "Postgres itself is unreachable" with
+ * `instanceof`, never by string-matching `.message` — the same
+ * `distinguishable, specific error codes over one catch-all` discipline
+ * `src/api/errors.ts`'s own top-of-file doc comment already states.
+ *
+ * **Why this is worth distinguishing at all, given `docs/CONSISTENCY.md`
+ * itself calls the underlying condition "genuinely impossible... on a
+ * single Postgres instance with synchronous commits."** That's true for a
+ * token this same database really did issue — but not for every token a
+ * real caller can hand in. A token from a different deployment/environment,
+ * a token minted by a write against a *different* connection whose commit
+ * genuinely hasn't propagated to `write_log` yet (impossible on a single
+ * primary once the write has actually committed, but not impossible if the
+ * caller raced ahead of that commit), or simply a stale value a caller held
+ * too long, all surface identically here. None of those are "Postgres is
+ * down" — conflating them with a genuine infrastructure outage (today's
+ * behavior: both paths produce a bare `Error`, both surface as the same
+ * `503 infrastructure_unavailable`) denies a sophisticated caller (one that
+ * actually tracks consistency tokens, per `docs/CONSISTENCY.md`'s own
+ * discipline) the one piece of information that would let it react
+ * correctly: retry a token-not-yet-observed condition immediately (a fresh
+ * call opens a fresh transaction/snapshot, and the condition this project's
+ * own design expects to resolve in microseconds, not an outage to back off
+ * from), rather than treating it like a genuine dependency failure worth
+ * circuit-breaking on.
+ */
+export class TokenNotObservedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TokenNotObservedError';
+  }
+}
+
+/**
  * Throws if `token` is higher than every token this database has observed
  * — the property build spec §6.3 states as non-negotiable: "a check pinned
  * to token T never returns a result that ignores a write with token ≤ T."
@@ -78,7 +120,7 @@ export async function assertTokenObserved(pool: QueryExecutor, token: number): P
   }
   const observed = await currentToken(pool);
   if (observed === null || requested > observed) {
-    throw new Error(
+    throw new TokenNotObservedError(
       `consistency token ${requested} has not been observed by this database ` +
         `(highest known token: ${observed ?? 'none — no writes yet'})`,
     );

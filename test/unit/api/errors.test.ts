@@ -27,6 +27,7 @@ import {
   forbiddenError,
   notFoundError,
   rateLimitedError,
+  tokenNotYetObservedError,
   infrastructureUnavailableError,
   internalError,
 } from '../../../src/api/errors.js';
@@ -43,14 +44,17 @@ const ERRORS_SOURCE_PATH = fileURLToPath(new URL('../../../src/api/errors.ts', i
 // ---------------------------------------------------------------------------
 
 // Hand-derived from API_ERROR_STATUS's own doc comment
-// (`400/400/400/401/403/404/429/503/500` for `invalid_request`/
+// (`400/400/400/401/403/404/429/503/503/500` for `invalid_request`/
 // `tuple_validation_failed`/`schema_compile_failed`/`unauthorized`/
-// `forbidden`/`not_found`/`rate_limited`/`infrastructure_unavailable`/
-// `internal_error`), not read off the table itself. `rate_limited` (429)
-// was added after this table alongside `@fastify/rate-limit` — see
-// `docs/DECISIONS.md` D-056. `not_found` (404, full-repo audit finding #14)
-// was added after that. `forbidden` (403, real/mintable/namespace-scoped DB-
-// backed API keys) was added after that.
+// `forbidden`/`not_found`/`rate_limited`/`token_not_yet_observed`/
+// `infrastructure_unavailable`/`internal_error`), not read off the table
+// itself. `rate_limited` (429) was added after this table alongside
+// `@fastify/rate-limit` — see `docs/DECISIONS.md` D-056. `not_found` (404,
+// full-repo audit finding #14) was added after that. `forbidden` (403,
+// real/mintable/namespace-scoped DB-backed API keys) was added after that.
+// `token_not_yet_observed` (503, same status as `infrastructure_unavailable`
+// but a distinct `code` — D-183's own broker-readiness follow-on) was added
+// after that.
 const DOCUMENTED_STATUS: Record<ApiErrorCode, number> = {
   invalid_request: 400,
   tuple_validation_failed: 400,
@@ -59,6 +63,7 @@ const DOCUMENTED_STATUS: Record<ApiErrorCode, number> = {
   forbidden: 403,
   not_found: 404,
   rate_limited: 429,
+  token_not_yet_observed: 503,
   infrastructure_unavailable: 503,
   internal_error: 500,
 };
@@ -80,6 +85,10 @@ describe("every constructor's returned status matches API_ERROR_STATUS for its o
       { expectedCode: 'forbidden', response: forbiddenError("does not include 'document'") },
       { expectedCode: 'not_found', response: notFoundError() },
       { expectedCode: 'rate_limited', response: rateLimitedError(60) },
+      {
+        expectedCode: 'token_not_yet_observed',
+        response: tokenNotYetObservedError('consistency token 42 has not been observed'),
+      },
       {
         expectedCode: 'infrastructure_unavailable',
         response: infrastructureUnavailableError('down'),
@@ -330,6 +339,33 @@ describe('infrastructureUnavailableError — message is exactly "Postgres: <deta
   it('infrastructureunavailableerror-message-is-exactly-postgres-colon-space-detail-with-no-extra-wrapping-text', () => {
     const response = infrastructureUnavailableError('connection refused at 127.0.0.1:5432');
     expect(response.body.error.message).toBe('Postgres: connection refused at 127.0.0.1:5432');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6a. tokenNotYetObservedError — added alongside D-183's broker-readiness
+//     follow-on: a `TokenNotObservedError` (src/store/tokens.ts), routed
+//     here by src/api/server.ts's runOrInfrastructureError instead of the
+//     generic infrastructureUnavailableError path. Unlike that constructor,
+//     `detail` is used verbatim — no `service:` prefix — since naming a
+//     dependency isn't the point of this code.
+// ---------------------------------------------------------------------------
+
+describe('tokenNotYetObservedError — message is the supplied detail verbatim, no prefix', () => {
+  it('tokennotyetobservederror-message-equals-the-supplied-detail-with-no-service-colon-prefix-unlike-infrastructureunavailableerror', () => {
+    const response = tokenNotYetObservedError(
+      'consistency token 42 has not been observed by this database (highest known token: 40)',
+    );
+    expect(response.body.error.message).toBe(
+      'consistency token 42 has not been observed by this database (highest known token: 40)',
+    );
+  });
+
+  it('tokennotyetobservederror-status-is-503-and-body-error-code-is-token-not-yet-observed-distinct-from-infrastructure-unavailable', () => {
+    const response = tokenNotYetObservedError('consistency token 42 has not been observed');
+    expect(response.status).toBe(503);
+    expect(response.body.error.code).toBe('token_not_yet_observed');
+    expect(response.body.error.code).not.toBe('infrastructure_unavailable');
   });
 });
 

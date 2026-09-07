@@ -55,6 +55,7 @@ export type ApiErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'rate_limited'
+  | 'token_not_yet_observed'
   | 'infrastructure_unavailable'
   | 'internal_error';
 
@@ -133,6 +134,21 @@ export interface ApiErrorResponse {
  *   `rateLimitedError` to keep this one response shape even for a limit the
  *   plugin itself enforces, the same reason `invalid_request` exists for
  *   Zod's own framework-level rejections.
+ * - `token_not_yet_observed` — 503, same status as `infrastructure_unavailable`
+ *   but a distinct `code` — see `tokenNotYetObservedError`'s own doc comment.
+ *   A pinned (`atToken`) `/check`, `/check/batch`, `/list-objects`, or
+ *   `/list-users` call whose token this database (or, for `/check`, this
+ *   specific check's own transaction snapshot) hasn't observed yet. Kept at
+ *   503 rather than a 4xx so an existing caller that only branches on
+ *   "5xx means retry" keeps working unchanged; kept as its own `code` rather
+ *   than folded into `infrastructure_unavailable` so a caller that actually
+ *   tracks consistency tokens (`docs/CONSISTENCY.md`) can tell "retry this
+ *   specific check immediately, a fresh call opens a fresh snapshot" apart
+ *   from "this deployment's own Postgres is genuinely unreachable, back off
+ *   or circuit-break" — two conditions today's plain-`Error` throw sites
+ *   (`src/store/tokens.ts`'s `assertTokenObserved`, `src/resolve/production
+ *   /resolver.ts`'s private `assertTokenObservedOnSnapshot`) left
+ *   indistinguishable from each other.
  * - `infrastructure_unavailable` — 503, not 500. See
  *   `infrastructureUnavailableError`'s own doc comment: this is Postgres
  *   being unreachable, the same condition the CLI reports as exit code 3
@@ -151,6 +167,7 @@ export const API_ERROR_STATUS: Readonly<Record<ApiErrorCode, number>> = {
   forbidden: 403,
   not_found: 404,
   rate_limited: 429,
+  token_not_yet_observed: 503,
   infrastructure_unavailable: 503,
   internal_error: 500,
 };
@@ -366,6 +383,31 @@ export function infrastructureUnavailableError(
   service = 'Postgres',
 ): ApiErrorResponse {
   return apiError('infrastructure_unavailable', `${service}: ${detail}`);
+}
+
+/**
+ * A pinned (`atToken`) call whose consistency token this database hasn't
+ * observed yet — `src/store/tokens.ts`'s `TokenNotObservedError`, thrown by
+ * either of its two real call sites (`assertTokenObserved`,
+ * `src/resolve/production/resolver.ts`'s private
+ * `assertTokenObservedOnSnapshot`), routed here instead of
+ * `infrastructureUnavailableError` by `src/api/server.ts`'s
+ * `runOrInfrastructureError` checking `instanceof TokenNotObservedError`
+ * before falling back to the generic infrastructure path. See
+ * `API_ERROR_STATUS`'s own doc comment for why this stays 503 rather than a
+ * new 4xx status, and `docs/CONSISTENCY.md`'s own "consistency-token
+ * discipline" section for the caller-facing retry guidance this code
+ * exists to make actionable: retry immediately (never with backoff — the
+ * condition this project's own design expects to resolve in microseconds,
+ * not an outage), and only after several immediate retries still fail
+ * should a caller treat this the same as a genuine infrastructure
+ * condition. `detail` reuses `TokenNotObservedError`'s own message
+ * verbatim, already a complete, specific sentence — no `service:` prefix
+ * the way `infrastructureUnavailableError` adds one, since naming a
+ * dependency isn't the point here.
+ */
+export function tokenNotYetObservedError(detail: string): ApiErrorResponse {
+  return apiError('token_not_yet_observed', detail);
 }
 
 /**

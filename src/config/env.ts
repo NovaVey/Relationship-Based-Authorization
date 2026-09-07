@@ -91,10 +91,12 @@ export const EnvSchema = z.object({
   // `LOG_LEVEL` (which does drive real Fastify logger config), setting
   // `NODE_ENV=production` today changes no logging format, error
   // verbosity, or other runtime behavior — full-repo audit finding #14
-  // (LOW, fourth audit), disclosed explicitly here the same way
-  // `CHECK_CACHE_TTL_MS`'s own D-028 entry (`docs/DECISIONS.md`) discloses
-  // that variable's placeholder status, so a future reader doesn't assume
-  // this one already does something it doesn't.
+  // (LOW, fourth audit), disclosed explicitly here so a future reader
+  // doesn't assume it already does something it doesn't. (`CHECK_CACHE_
+  // TTL_MS` below was the same kind of disclosed-placeholder variable when
+  // this comment was first written, citing D-028 — D-135 has since built
+  // the real check-result cache it configures, so that comparison no
+  // longer holds; left as a plain disclosure rather than a stale analogy.)
   NODE_ENV: optionalEnum(z.enum(['development', 'test', 'production']).default('development')),
   LOG_LEVEL: optionalEnum(z.enum(['debug', 'info', 'warn', 'error']).default('info')),
 

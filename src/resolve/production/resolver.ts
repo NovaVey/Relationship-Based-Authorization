@@ -149,7 +149,7 @@ import {
   type RewriteRule,
 } from '../../schema/dsl/types.js';
 import { getLatestNamespaceConfig } from '../../schema/publish.js';
-import { assertTokenObserved } from '../../store/tokens.js';
+import { assertTokenObserved, TokenNotObservedError } from '../../store/tokens.js';
 import {
   lookupRelationMembershipIndex,
   type RelationIndexLookup,
@@ -1692,7 +1692,13 @@ async function assertTokenObservedOnSnapshot(client: QueryExecutor, token: numbe
   const raw = rows[0]?.max_token;
   const observed = raw === null || raw === undefined ? null : Number(raw);
   if (observed === null || token > observed) {
-    throw new Error(
+    // TokenNotObservedError, not a plain Error — same distinguishable-code
+    // reasoning as this file's own imported assertTokenObserved (see that
+    // function's own doc comment in src/store/tokens.ts); this is the
+    // second, independent real throw site productionCheck relies on,
+    // enforcing the same condition against this check's own already-open
+    // snapshot rather than the pool at large.
+    throw new TokenNotObservedError(
       `consistency token ${token} has not been observed by this check's own transaction ` +
         `snapshot (highest token visible to this snapshot: ${observed ?? 'none — no writes yet'})`,
     );

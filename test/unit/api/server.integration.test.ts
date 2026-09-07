@@ -36,7 +36,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { buildServer } from '../../../src/api/server.js';
 import { runMigrations } from '../../../src/store/migrate.js';
-import { decodeToken } from '../../../src/store/tokens.js';
+import { decodeToken, encodeToken } from '../../../src/store/tokens.js';
 import { env } from '../../../src/config/env.js';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../src/store/migrations', import.meta.url));
@@ -296,6 +296,34 @@ describe('the full publish -> write -> check -> expand -> delete -> re-check cyc
     const recheckBody = await parseBody(recheckRes);
     expect(recheckBody.allowed).toBe(false);
     expect(recheckBody.path).toBeUndefined();
+  });
+});
+
+describe('a /check pinned to a real but not-yet-observed atToken gets a distinguishable 503, not the generic infrastructure_unavailable one (D-183)', () => {
+  it('post-check-with-a-well-formed-but-astronomically-high-atToken-returns-503-token_not_yet_observed-never-infrastructure_unavailable', async () => {
+    // No schema/tuple setup needed — assertTokenObserved runs first, before
+    // productionCheck ever opens a transaction or looks up a schema (see
+    // ProductionCheckOptions.atToken's own doc comment), so a too-high
+    // token is rejected before any of that would matter. A real, ordinary
+    // NaN-free integer (encodeToken's own validation would reject anything
+    // else before this test even reached the server) that this database
+    // could not possibly have issued in this test run.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: {
+        subject: { ns: 'user', id: 'alice' },
+        relation: 'view',
+        object: { ns: 'doc', id: 'impossible_token_check' },
+        atToken: encodeToken(999_999_999),
+      },
+      headers: authHeaders(),
+    });
+    expect(res.statusCode).toBe(503);
+    const body = await parseBody(res);
+    expect(body.error.code).toBe('token_not_yet_observed');
+    expect(body.error.code).not.toBe('infrastructure_unavailable');
+    expect(body.error.message).toMatch(/consistency token 999999999 has not been observed/);
   });
 });
 
