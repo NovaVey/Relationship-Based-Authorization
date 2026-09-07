@@ -2946,3 +2946,13 @@ A real, unrelated bug found along the way: this project's own formatter had no w
 With this, all three pieces the original schema-verifier packaging gap named are now built.
 
 Full account: `docs/DECISIONS.md` D-179.
+
+## A stale doc caught and fixed: release integrity was already fully done, not still blocked
+
+**Owner:** main agent.
+
+Asked what was still left, answered that release integrity was blocked on a human pushing an actual signed tag — reading the capability-gap doc's own "mostly built, no tag cut yet" status at face value. Told directly that 1.3 was already released, checked the real repository rather than assuming either version was right: a genuine, GitHub-verified signed `v1.3.0` tag exists, the release workflow ran clean against it end to end, and a real GitHub Release with an attached SBOM is live.
+
+The doc had simply gone stale the moment the tag landed, the same shape as two earlier corrections this session — a claim accurate when written, never revisited once the world moved past it, with nothing to catch the drift automatically since it's about external repository state, not code. Fixed the one section that needed it; left the original decision recording the workflow's own build untouched, as this project's own convention for a settled historical entry.
+
+Full account: `docs/DECISIONS.md` D-180.
