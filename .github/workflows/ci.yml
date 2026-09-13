@@ -56,12 +56,18 @@ jobs:
   # misclassified as dev-only) until a genuine production-only install
   # caught it live. Kept as its own job (not a `pre-verify`/post-verify
   # step on `verify` above — that workflow has no hook that runs *after*
-  # its own `build`) — a fresh `npm ci --omit=dev` then `npm run build`
-  # then run the built CLI, independent of whatever `verify` already did.
-  # `--help` needs no DATABASE_URL and no real database — Commander's own
-  # module-level command registration already imports every command file
-  # (this one included) before it ever parses argv, so this exercises the
-  # identical import graph `authz doctor`/`authz serve` would.
+  # its own `build`) — build once with full devDependencies present (`tsc`
+  # itself, `@types/node`/`@types/pg`, needs them to compile at all — a real
+  # regression, caught live, in this job's own first draft: reordering to
+  # `npm ci --omit=dev` before `npm run build` makes `tsc` fail outright
+  # with "Cannot find name 'console'/'process'" across the whole tree,
+  # since the type declarations those need are themselves devDependencies),
+  # *then* strip devDependencies and run the already-built output — the
+  # exact order the job this replaces used. `--help` needs no DATABASE_URL
+  # and no real database — Commander's own module-level command
+  # registration already imports every command file (this one included)
+  # before it ever parses argv, so this exercises the identical import
+  # graph `authz doctor`/`authz serve` would.
   confirm-production-build:
     name: confirm-production-build
     needs: [verify]
@@ -74,10 +80,13 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
-      - run: npm ci --omit=dev
+      - run: npm ci
       - run: npm run build
       - name: Confirm the built CLI starts with only production dependencies installed
-        run: node dist/cli/index.js --help
+        run: |
+          rm -rf node_modules
+          npm ci --omit=dev
+          node dist/cli/index.js --help
 
   # Not in the required status checks list — proves the isolation suite's
   # claims against a real Postgres-backed tuple store, not just against a
