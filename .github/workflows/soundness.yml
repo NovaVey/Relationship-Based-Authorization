@@ -15,7 +15,7 @@ name: Soundness
 #    step is a plain CLI invocation, not a Vitest file that can start its
 #    own container in-process).
 # 2. The PR-comment upsert is a plain Node script
-#    (`scripts/post-soundness-comment.mjs`, Node 22's built-in `fetch`)
+#    (`scripts/post-soundness-comment.mjs`, Node's own built-in `fetch`)
 #    calling the real, already-tested `decidePrCommentAction` from
 #    `src/report/prComment.ts` — not `actions/github-script` with the
 #    decision re-implemented as inline workflow YAML, which would mean two
@@ -71,7 +71,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
 
       - run: npm ci

@@ -7,7 +7,7 @@
 # image is the "run the built service, not the source" path that gap
 # named.
 #
-# `node:22-bookworm-slim` (glibc, Debian), not `-alpine` — `z3-solver` (a
+# `node:24-bookworm-slim` (glibc, Debian), not `-alpine` — `z3-solver` (a
 # real dependency: `tools/schema-verifier`'s SMT tier, not the HTTP
 # service, but still a root `package.json` dependency `npm ci` installs
 # regardless) ships prebuilt native/WASM binaries; alpine's musl libc is a
@@ -18,7 +18,7 @@
 # day someone actually needs the smaller alpine image and confirms z3
 # works there.
 
-FROM node:22-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 WORKDIR /app
 
 # Separate layer from the source copy below so `npm ci` is only re-run
@@ -36,7 +36,7 @@ COPY scripts/copy-migrations.mjs scripts/copy-migrations.mjs
 COPY src ./src
 RUN npm run build
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 

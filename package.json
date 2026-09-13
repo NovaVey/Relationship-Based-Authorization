@@ -24,7 +24,7 @@
   "author": "Tyler Pepitone / Nova Vey Engineering",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "bin": {
     "authz": "./dist/cli/index.js"
@@ -65,7 +65,7 @@
     "@cyclonedx/cyclonedx-npm": "^6.0.1",
     "@eslint/js": "^10.0.1",
     "@testcontainers/postgresql": "^12.1.0",
-    "@types/node": "^25.9.6",
+    "@types/node": "^24.13.4",
     "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.0",
     "eslint": "^10.10.0",

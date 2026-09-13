@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
 
       - run: npm ci
@@ -53,6 +53,19 @@ jobs:
   # required status check and need a branch-protection rule update
   # (docs/github-governance.md Step 2 lists the exact current job names to
   # select there — re-check it if this matrix's Node version ever changes).
+  #
+  # Deliberately NOT bumped to '24' alongside every other node-version pin
+  # in this repo (the engines.node floor bump, D-188): this comment's own
+  # warning is exactly the trap that would spring — changing this single
+  # matrix value renames the required check from "test (22)" to "test (24)",
+  # which branch protection would never see reported again, self-locking
+  # every future PR including this one's own CI run. This job (along with
+  # lint-and-typecheck/build) is already slated for wholesale replacement by
+  # a reusable-workflow migration that has to go through the exact same
+  # required-check rename dance deliberately, with a human updating branch
+  # protection in the same window — bumping this value here first would
+  # just make that PR redo the identical dance twice. Left at '22' on
+  # purpose until that migration lands.
   test:
     name: test
     runs-on: ubuntu-latest
@@ -79,7 +92,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
 
       - run: npm ci
@@ -114,15 +127,15 @@ jobs:
   # Promoting this to required is a manual, deliberate choice — see
   # docs/github-governance.md Step 5.
   #
-  # Runs on Node 22, same as the rest of CI now (it wasn't always — this
+  # Runs on Node 24, same as the rest of CI now (it wasn't always — this
   # job originally ran Node 22 specifically while the rest of CI still
   # matrixed Node 20/22, because the `testcontainers` devDependency
   # requires Node >=22.22: on 20.x its transitive `undici` throws
   # `webidl.util.markAsUncloneable is not a function` before a single test
   # even runs. That constraint is moot now that Node 20 was dropped
-  # everywhere (engines.node is >=22 as of this package's stable line), but
-  # is worth keeping in mind if this job's Node version is ever lowered
-  # again independently of the rest of CI.
+  # everywhere (engines.node is >=24 as of D-188), but is worth keeping in
+  # mind if this job's Node version is ever lowered again independently of
+  # the rest of CI.
   test-integration:
     name: test-integration
     runs-on: ubuntu-latest
@@ -131,7 +144,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
 
       - run: npm ci
@@ -162,7 +175,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: tools/rebac-benchmark/package-lock.json
 
@@ -191,7 +204,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
 
       - run: npm ci

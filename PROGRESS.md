@@ -3040,3 +3040,13 @@ The test-surface cost of this fix turned out much larger than expected once actu
 One related gap was found and deliberately left alone: two other, separate call surfaces (an HTTP read-side route family and a CLI command family) still apply the old strict grammar to the same kind of id, independently of the file this fix touched — genuinely out of scope for this change, and queued separately rather than folded in silently.
 
 Full account: `docs/DECISIONS.md` D-187.
+
+## The supported Node floor moves to 24, and everything that names a Node version follows it — one deliberate exception
+
+**Owner:** main agent.
+
+Checked first whether the current floor was actually forced by anything this project's own code needs — it wasn't; it came from one devDependency's own minimum, comfortably satisfied either way — then bumped it anyway as a plain policy choice: stay on a currently-supported line rather than an older one nothing requires staying on. The types package pinned to match it follows the exact rule this project already wrote down for itself the last time this exact drift got caught and fixed, twice.
+
+Left at just the one file, this would have recreated the identical problem in a different shape almost immediately — CI and the actual shipped container image would keep saying one Node version while the package's own declared floor said another. So every other place in the repo that names a Node version literally moved together, in the same change, with one single, deliberate exception: one CI job's own required-status-check name has the Node version baked directly into it, and changing that one value would rename a check nothing has approved yet, locking every future pull request out until a human fixes branch protection by hand. That job is already scheduled to be replaced entirely by separate, already-planned work that has to have exactly that same human step anyway — so this one value stays as it was, on purpose, until that other work lands, rather than making the same person do the identical dance twice.
+
+Full account: `docs/DECISIONS.md` D-188.
