@@ -306,7 +306,7 @@ repository's example one, see **[`docs/DELIVERY.md`](docs/DELIVERY.md)**.
 
 ## Stack
 
-Node 22 LTS + TypeScript (strict), Postgres via `pg` (hand-written SQL and
+Node 24 LTS + TypeScript (strict), Postgres via `pg` (hand-written SQL and
 migrations, no ORM — the recursive graph walk is the part of this project
 that must be exactly right and auditable, and a query builder is the
 wrong place to hide that), Fastify for the API, `commander` for the CLI,
