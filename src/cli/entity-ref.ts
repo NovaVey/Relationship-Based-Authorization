@@ -24,35 +24,66 @@
  * never changes the actual allow/deny outcome, only the printed/stored
  * proof of it — matching D-093's own MEDIUM severity for the identical
  * API-side gap, closed here for the CLI the same way.
+ *
+ * D-190 (docs/DECISIONS.md): `parseEntityArg`'s `id` half moved off
+ * `IDENTIFIER_PATTERN` onto `isValidDataPlaneId` (`src/store/tuples.ts`) —
+ * an `id` is an opaque foreign-system key, not a schema symbol, so the
+ * strict grammar was the wrong constraint for it (the same distinction
+ * D-187 drew for `writeTuple`/`deleteTuple`'s own `objectId`/`subjectId`,
+ * and D-093/this file's own `entityRefSchema` HTTP-side equivalent shared
+ * before this fix). `ns` is unaffected — still `isValidIdentifier` below —
+ * and the audit-trail-corruption danger above is still fully guarded
+ * against: `isValidDataPlaneId` still rejects `#` (the char the repro
+ * above actually depends on) and every control character; it only
+ * additionally *allows* a colon, which was never part of that repro and
+ * can never be ambiguous with the `ns`/`id` separator since `ns` stays
+ * colon-free by construction (see `isValidDataPlaneId`'s own doc comment
+ * for the full proof, identical to D-187's).
  */
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from '../schema/dsl/types.js';
+import { isValidDataPlaneId } from '../store/tuples.js';
 
 export interface EntityArg {
   ns: string;
   id: string;
 }
 
-/** The exact predicate `identifierField()` (`src/api/server.ts`) applies via Zod — `min(1)` is implied by `IDENTIFIER_PATTERN` itself requiring a leading letter. */
+/**
+ * The exact predicate `identifierField()` (`src/api/server.ts`) applies via
+ * Zod — `min(1)` is implied by `IDENTIFIER_PATTERN` itself requiring a
+ * leading letter. Used for every schema-symbol argument this CLI validates
+ * directly: a `namespace:id` reference's `ns` half (`parseEntityArg` below)
+ * and a bare `relation`/`namespace` positional argument (`check.ts`/
+ * `expand.ts`/`privesc.ts`/`schema.ts`/`apikey.ts`). Never for an `id` half
+ * as of D-190 — see `parseEntityArg`'s own doc comment.
+ */
 export function isValidIdentifier(value: string): boolean {
   return value.length <= MAX_IDENTIFIER_LENGTH && IDENTIFIER_PATTERN.test(value);
 }
 
 /**
  * Parses `namespace:id` — the only form a subject/object reference takes
- * on this CLI — and validates both halves against the same identifier
- * grammar every published namespace/relation/permission name and every
- * `writeTuple`/`deleteTuple` call already has to satisfy. `undefined` for
- * anything else: no colon, a colon at position 0 (empty `ns`), a colon as
- * the last character (empty `id`), or either half failing
- * `isValidIdentifier` — one `undefined` return covers every malformed
- * shape, matching this file's callers' own existing "invalid reference"
- * handling (they don't need to distinguish *why* it was invalid).
+ * on this CLI. `ns` is validated against the strict schema-symbol grammar
+ * (`isValidIdentifier`); `id` against the looser data-plane grammar
+ * (`isValidDataPlaneId`, D-190) — see this file's own top-of-file doc
+ * comment for why the two halves need different constraints. `undefined`
+ * for anything else: no colon, a colon at position 0 (empty `ns`), a colon
+ * as the last character (empty `id`), or either half failing its own
+ * grammar — one `undefined` return covers every malformed shape, matching
+ * this file's callers' own existing "invalid reference" handling (they
+ * don't need to distinguish *why* it was invalid).
+ *
+ * `raw.indexOf(':')` — the *first* colon — is still the correct split
+ * point even though `id` may itself now contain one: `ns` can never
+ * contain a colon (it must pass `isValidIdentifier`), so the first colon
+ * in `raw` is always exactly the `ns`/`id` separator, however many more
+ * colons `id` contributes after it.
  */
 export function parseEntityArg(raw: string): EntityArg | undefined {
   const colon = raw.indexOf(':');
   if (colon <= 0 || colon === raw.length - 1) return undefined;
   const ns = raw.slice(0, colon);
   const id = raw.slice(colon + 1);
-  if (!isValidIdentifier(ns) || !isValidIdentifier(id)) return undefined;
+  if (!isValidIdentifier(ns) || !isValidDataPlaneId(id)) return undefined;
   return { ns, id };
 }

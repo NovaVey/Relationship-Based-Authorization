@@ -192,6 +192,54 @@ describe('a structurally malformed /list-objects or /list-users body is rejected
     expect(spy).not.toHaveBeenCalled();
   });
 
+  // D-190 (docs/DECISIONS.md): entityRefSchema's `id` half moved off the
+  // strict schema-symbol grammar onto the looser data-plane grammar
+  // `writeTuple`/`deleteTuple` already accept (D-187) — `ns` above is
+  // unaffected, but a colon-containing subject/object id (Principal-Graph's
+  // own exporter shape) must now reach listObjects/listUsers instead of
+  // being rejected at the schema layer.
+  it('a-list-objects-body-whose-subject-id-contains-a-colon-reaches-listobjects-instead-of-being-rejected', async () => {
+    env.ADMIN_API_KEY = ADMIN_KEY;
+    const canned: ListObjectsResult = { objects: [], truncated: false };
+    const spy = vi.spyOn(listModule, 'listObjects').mockResolvedValue(canned);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/list-objects',
+      payload: { ...validListObjectsBody, subject: { ns: 'user', id: 'github:owner/repo' } },
+      headers: authHeaders(ADMIN_KEY),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a-list-users-body-whose-object-id-contains-a-colon-reaches-listusers-instead-of-being-rejected', async () => {
+    env.ADMIN_API_KEY = ADMIN_KEY;
+    const canned: ListUsersResult = { subjects: [] };
+    const spy = vi.spyOn(listModule, 'listUsers').mockResolvedValue(canned);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/list-users',
+      payload: { ...validListUsersBody, object: { ns: 'document', id: 'github:owner/repo' } },
+      headers: authHeaders(ADMIN_KEY),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a-list-objects-body-whose-subject-id-contains-a-hash-is-still-rejected-with-400-invalid-request', async () => {
+    env.ADMIN_API_KEY = ADMIN_KEY;
+    const spy = vi.spyOn(listModule, 'listObjects');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/list-objects',
+      payload: { ...validListObjectsBody, subject: { ns: 'user', id: 'evil#hack' } },
+      headers: authHeaders(ADMIN_KEY),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('a-list-users-body-missing-the-required-object-field-is-rejected-and-listusers-is-never-called', async () => {
     env.ADMIN_API_KEY = ADMIN_KEY;
     const spy = vi.spyOn(listModule, 'listUsers');

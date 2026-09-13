@@ -160,17 +160,20 @@ export interface OpenApiDocument {
 
 /**
  * `identifierField()` (`src/api/server.ts`): `z.string().min(1).max(63)
- * .regex(/^[a-z][a-z0-9_]*$/)` — used for every `ns`/`id`/`relation`/
- * `objectNs` field on `/check`, `/expand`, `/list-objects`, `/list-users`
- * (never for `/tuples`' fields — see `tupleFieldSchema` below for why those
- * are a plain, unconstrained string instead). `63` and the pattern are
- * transcribed from `MAX_IDENTIFIER_LENGTH`/`IDENTIFIER_PATTERN`
- * (`src/schema/dsl/types.ts`) by hand, not imported — this file's whole
- * point is to be a plain, dependency-free JSON value, and a JSON Schema
- * `pattern` has to be a plain string regex source either way, so importing
- * the `RegExp` itself would buy nothing beyond one more place this document
- * could subtly diverge from what it renders (e.g. if the source is ever
- * written with flags a JSON Schema `pattern` can't represent).
+ * .regex(/^[a-z][a-z0-9_]*$/)` — used for every schema-symbol field on
+ * `/check`, `/expand`, `/list-objects`, `/list-users`, `/scope`:
+ * `entityRefSchema`'s `ns`, and every route's own `relation`/`objectNs`/
+ * `namespace`/`relationOrPermission` (never for `/tuples`' fields — see
+ * `tupleFieldSchema` below for why those are a plain, unconstrained string
+ * instead; and, as of D-190, never for `entityRefSchema`'s `id` — see
+ * `dataPlaneIdSchema` below). `63` and the pattern are transcribed from
+ * `MAX_IDENTIFIER_LENGTH`/`IDENTIFIER_PATTERN` (`src/schema/dsl/types.ts`)
+ * by hand, not imported — this file's whole point is to be a plain,
+ * dependency-free JSON value, and a JSON Schema `pattern` has to be a plain
+ * string regex source either way, so importing the `RegExp` itself would
+ * buy nothing beyond one more place this document could subtly diverge
+ * from what it renders (e.g. if the source is ever written with flags a
+ * JSON Schema `pattern` can't represent).
  */
 const identifierSchema: JsonSchema = {
   type: 'string',
@@ -180,16 +183,41 @@ const identifierSchema: JsonSchema = {
 };
 
 /**
+ * D-190 (docs/DECISIONS.md): `dataPlaneIdField()` (`src/api/server.ts`) —
+ * the `id` half of `entityRefSchema`, a much looser grammar than
+ * `identifierSchema` above because a subject/object id is an opaque
+ * foreign-system key (Zanzibar treats it as bytes), never a
+ * developer-authored schema symbol. Transcribed from
+ * `invalidDataPlaneIdReason`/`MAX_DATA_PLANE_ID_LENGTH` (`src/store/
+ * tuples.ts`) by hand, same reasoning as `identifierSchema` above for why
+ * this isn't imported. `512` is `MAX_DATA_PLANE_ID_LENGTH`. The `pattern`
+ * is the same "reject only what would break the tuple wire format" grammar
+ * that function enforces — the full C0/C1 control-character range plus the
+ * two reserved wire delimiters `#`/`@` — expressed as a negated character
+ * class; a colon is deliberately *absent* from the exclusion, since an id
+ * may contain one (see that function's own doc comment for why this is
+ * still unambiguous).
+ */
+const dataPlaneIdSchema: JsonSchema = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 512,
+  pattern: '^[^\\x00-\\x1f\\x7f-\\x9f#@]+$',
+};
+
+/**
  * `entityRefSchema` (`src/api/server.ts`): `z.object({ ns: identifierField(),
- * id: identifierField() }).strict()` — every `subject`/`object` field on
- * `/check`, `/expand`, `/list-objects`, `/list-users`. `.strict()` is why
+ * id: dataPlaneIdField() }).strict()` — every `subject`/`object` field on
+ * `/check`, `/expand`, `/list-objects`, `/list-users`, `/scope`. `ns` stays
+ * on the strict schema-symbol grammar; `id` moved to the looser data-plane
+ * grammar under D-190 — see `dataPlaneIdSchema` above. `.strict()` is why
  * `additionalProperties` is `false`, not omitted — see `server.ts`'s own
  * doc comment on `.strict()` for why an unrecognized key must be a rejection,
  * never a silently-dropped field.
  */
 const entityRefSchema: JsonSchema = {
   type: 'object',
-  properties: { ns: identifierSchema, id: identifierSchema },
+  properties: { ns: identifierSchema, id: dataPlaneIdSchema },
   required: ['ns', 'id'],
   additionalProperties: false,
 };

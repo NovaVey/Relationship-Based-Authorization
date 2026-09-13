@@ -195,4 +195,22 @@ describe('authz check — exit codes', () => {
 
     expect(process.exitCode).toBe(2);
   });
+
+  // D-190 (docs/DECISIONS.md): an object id half containing a colon — the
+  // exact Principal-Graph exporter shape ("github:owner/repo") — now
+  // parses as well-formed (`parseEntityArg`'s id half moved onto the
+  // looser data-plane grammar) and proceeds all the way to `check` trying
+  // to touch Postgres, same as any other well-formed reference. Not exit 2
+  // (the malformed-reference guard) and not a silent success either — an
+  // unreachable database still means exit 3, proving this actually reached
+  // `getPool()` rather than being rejected earlier for a reason this
+  // assertion couldn't tell apart from "reached and then failed".
+  it('an-object-reference-whose-id-half-contains-a-colon-is-accepted-as-well-formed-and-proceeds-to-touch-postgres', async () => {
+    env.DATABASE_URL = UNREACHABLE_DATABASE_URL;
+    process.exitCode = undefined;
+
+    await check('user:alice', 'view', 'document:github:owner/repo', {});
+
+    expect(process.exitCode).toBe(3);
+  });
 });
