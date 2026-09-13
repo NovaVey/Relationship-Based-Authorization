@@ -68,22 +68,98 @@ export type WriteTupleResult =
 export type DeleteTupleResult =
   { ok: true; token: number; deleted: boolean } | { ok: false; errors: TupleError[] };
 
-const FIELDS: Array<[keyof TupleKey, string]> = [
+// Schema-symbol fields — developer-authored names the DSL compiler itself
+// emits (namespace/relation names). Still validated against the strict
+// IDENTIFIER_PATTERN grammar below, unchanged by the data-plane loosening
+// this file also defines (see MAX_DATA_PLANE_ID_LENGTH/
+// invalidDataPlaneIdReason's own doc comment for why the two are different
+// things). `subjectRelation` (only present for a tuple-to-userset subject)
+// is schema-symbol-shaped too — checked separately, below, since it's
+// optional and not one of TupleKey's required fields.
+const SCHEMA_SYMBOL_FIELDS: Array<[keyof TupleKey, string]> = [
   ['objectNs', 'object namespace'],
-  ['objectId', 'object id'],
   ['relation', 'relation'],
   ['subjectNs', 'subject namespace'],
-  ['subjectId', 'subject id'],
 ];
 
+// A generous bound for an opaque, foreign-system id — comfortably covers a
+// long AWS ARN or a compound "source:externalId" id (Principal-Graph's own
+// exporter shape, e.g. "github:owner/repo") without being unbounded.
+export const MAX_DATA_PLANE_ID_LENGTH = 512;
+
 /**
- * Validates every identifier-shaped field of a tuple key against the same
- * grammar the schema DSL compiler enforces on namespace/relation names
- * (`IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH` — see `src/schema/dsl/
- * types.ts`'s own note that this is meant to be reused here, not
- * re-derived) — a malformed identifier is rejected before it ever reaches
- * a query, per §10's `a-malformed-namespace-relation-or-id-is-rejected-
- * before-it-reaches-the-database`.
+ * Reason a subjectId/objectId is invalid as a data-plane id, or `null` if
+ * it's fine. Deliberately far looser than `IDENTIFIER_PATTERN`: `objectId`/
+ * `subjectId` are opaque foreign keys from other systems (Zanzibar treats
+ * them as bytes), not developer-authored schema symbols, so the schema
+ * DSL's identifier grammar is the wrong constraint for them — applying it
+ * here rejected every tuple a real external system (e.g. Principal-Graph,
+ * whose exporter builds ids as `${source}:${externalId}`, "github:owner/
+ * repo") would ever try to write.
+ *
+ * Only what would actually break the tuple wire format is rejected here: a
+ * control character, or either wire delimiter (`objectNs:objectId#relation@
+ * subjectNs:subjectId`). A colon is explicitly allowed — an id can contain
+ * one, because wire-parsing always splits `objectNs`/`subjectNs` off the
+ * *first* colon (`src/cli/commands/tuple.ts`'s `parseObjectRef`), and a
+ * namespace (validated separately, above, against the still-strict
+ * `IDENTIFIER_PATTERN`) can never itself contain one — so an embedded colon
+ * in the id half is never ambiguous with the namespace/id separator.
+ */
+export function invalidDataPlaneIdReason(value: string): string | null {
+  if (value.length === 0) return 'must not be empty';
+  if (value.length > MAX_DATA_PLANE_ID_LENGTH) {
+    return `exceeds the maximum data-plane id length (${MAX_DATA_PLANE_ID_LENGTH})`;
+  }
+  if (containsControlCharacter(value)) return 'must not contain control characters';
+  if (value.includes('#') || value.includes('@')) {
+    return "must not contain '#' or '@' (reserved tuple wire delimiters)";
+  }
+  return null;
+}
+
+/**
+ * A plain code-unit scan rather than a `/[\x00-\x1f...]/`-shaped regex —
+ * ESLint's `no-control-regex` rule (this project has no precedent anywhere
+ * of suppressing a lint rule inline; see this file's own established
+ * discipline of fixing the code instead) flags a control-character
+ * character class as suspicious regardless of escape notation, so this
+ * avoids the regex entirely rather than fighting the linter over an
+ * intentional one. Covers the full "control character" range: C0
+ * (0x00-0x1F), DEL (0x7F), and C1 (0x80-0x9F) — not just the handful an
+ * ad-hoc check might think to name individually.
+ */
+function containsControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
+/**
+ * Public predicate wrapping `invalidDataPlaneIdReason` above, for external
+ * callers that just need a boolean — e.g. Principal-Graph/Control-Coverage-
+ * Range, which today each hardcode their own copy of this same grammar as a
+ * literal regex rather than importing it from here.
+ */
+export function isValidDataPlaneId(value: string): boolean {
+  return invalidDataPlaneIdReason(value) === null;
+}
+
+/**
+ * Validates every identifier-shaped field of a tuple key. `objectNs`/
+ * `relation`/`subjectNs` (schema symbols) and, when present,
+ * `subjectRelation` (also schema-symbol-shaped — the *name* of a relation
+ * on the subject's own namespace) go through the same strict grammar the
+ * schema DSL compiler enforces (`IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH`
+ * — see `src/schema/dsl/types.ts`'s own note that this is meant to be
+ * reused here, not re-derived). `objectId`/`subjectId` are a different kind
+ * of field — opaque foreign keys, not schema symbols — and go through the
+ * looser `invalidDataPlaneIdReason` above instead; a malformed value in
+ * either grammar is rejected before it ever reaches a query, per §10's
+ * `a-malformed-namespace-relation-or-id-is-rejected-before-it-reaches-the-
+ * database`.
  *
  * Exported (not module-private, despite `writeTuple`/`deleteTuple` being
  * this function's only in-module callers) so the CLI (`src/cli/commands/
@@ -94,13 +170,13 @@ const FIELDS: Array<[keyof TupleKey, string]> = [
  * infrastructure message (full-repo audit finding #13, LOW, 2026-08-16).
  *
  * D-171: `subjectId === WILDCARD_SUBJECT_ID` ('*') is carved out of the
- * generic `FIELDS` loop for `subjectId` specifically — every other field
- * (`objectNs`, `objectId`, `relation`, `subjectNs`, `subjectRelation`) still
- * enforces `IDENTIFIER_PATTERN` unmodified. A wildcard is always typed by a
- * real, ordinary `subjectNs` (`user`, `document`, ...); there is no bare,
- * untyped `*`. This carve-out is also what makes a previously-written
- * wildcard tuple revocable: `validateIdentifiers` is the only check
- * `deleteTuple` runs, so no separate change is needed there.
+ * data-plane check for `subjectId` specifically — `objectId` has no such
+ * carve-out. A wildcard is always typed by a real, ordinary `subjectNs`
+ * (`user`, `document`, ...), itself still validated against the strict
+ * `IDENTIFIER_PATTERN` above; there is no bare, untyped `*`. This carve-out
+ * is also what makes a previously-written wildcard tuple revocable:
+ * `validateIdentifiers` is the only check `deleteTuple` runs, so no
+ * separate change is needed there.
  */
 export function validateIdentifiers(tuple: TupleKey): TupleError[] {
   const errors: TupleError[] = [];
@@ -123,10 +199,18 @@ export function validateIdentifiers(tuple: TupleKey): TupleError[] {
       });
     }
   };
-  for (const [key, label] of FIELDS) {
-    if (key === 'subjectId' && tuple.subjectId === WILDCARD_SUBJECT_ID) continue;
-    check(tuple[key] as string, label);
-  }
+  const checkDataPlaneId = (value: string, label: string): void => {
+    const reason = invalidDataPlaneIdReason(value);
+    if (reason !== null) {
+      errors.push({ code: 'invalid_identifier', message: `${label} '${value}' ${reason}` });
+    }
+  };
+
+  for (const [key, label] of SCHEMA_SYMBOL_FIELDS) check(tuple[key] as string, label);
+
+  checkDataPlaneId(tuple.objectId, 'object id');
+  if (tuple.subjectId !== WILDCARD_SUBJECT_ID) checkDataPlaneId(tuple.subjectId, 'subject id');
+
   if (tuple.subjectRelation !== undefined) check(tuple.subjectRelation, 'subject relation');
   return errors;
 }
@@ -140,10 +224,12 @@ export function validateIdentifiers(tuple: TupleKey): TupleError[] {
  * (the write API takes raw fields, not a `SubjectTypeRef` selection) — and
  * if this reached a resolver unchecked, `subjectRelation !== undefined`
  * would route it into the userset-subject branch, which would try to
- * recurse into a literal object named `*` (itself impossible to create,
- * since `objectId` is validated by the same `IDENTIFIER_PATTERN` — a safe
- * dead path, but a confusing one worth rejecting explicitly rather than
- * silently tolerating).
+ * recurse into a literal object named `*` — a real, ordinary (if unusual)
+ * object under `objectId`'s own looser data-plane grammar, not the reserved
+ * subject-position wildcard sentinel (`WILDCARD_SUBJECT_ID` only carries
+ * special meaning for `subjectId`, never `objectId`), so nothing structural
+ * stops it from existing — confusing enough to reject explicitly here
+ * rather than silently tolerating it.
  */
 export function validateWildcardStructure(tuple: TupleKey): TupleError[] {
   if (tuple.subjectId === WILDCARD_SUBJECT_ID && tuple.subjectRelation !== undefined) {

@@ -19,6 +19,24 @@
  * writing it down now costs nothing and pins the requirement before the
  * validator exists. Every `it.todo` that uses it becomes real once Phase 1
  * (the schema DSL) and Phase 2 (the tuple writer) exist.
+ *
+ * Data-plane loosening (Principal-Graph interop fix): `objectId`/`subjectId`
+ * no longer share this corpus's blanket "every validator here rejects every
+ * entry" claim — they moved off `IDENTIFIER_PATTERN` onto the far looser
+ * `invalidDataPlaneIdReason` (`src/store/tuples.ts`), which only rejects a
+ * control character, `#`, `@`, an empty string, or exceeding
+ * `MAX_DATA_PLANE_ID_LENGTH`. Most of this corpus's injection-shaped
+ * payloads (quotes, semicolons, a leading digit, `../../etc/passwd`,
+ * `<script>...`) are now *legal* subject/object ids — safe as opaque,
+ * always-parameterized values (never spliced into SQL/DDL — proved
+ * separately, below, for real ids), not because they fail a grammar. Every
+ * `describe` block below that touches `objectId`/`subjectId` specifically
+ * (as opposed to `objectNs`/`relation`/`subjectNs`, which are unaffected)
+ * now derives its expectation from `invalidDataPlaneIdReason` directly,
+ * the same way `classifyPayload` below already derives its expectation from
+ * `IDENTIFIER_PATTERN` for the namespace/relation grammar — not from a
+ * hardcoded "still rejected" list, so this file self-adjusts if either
+ * grammar or the corpus itself ever changes.
  */
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
@@ -31,7 +49,13 @@ import {
   WILDCARD_SUBJECT_ID,
   type NamespaceConfig,
 } from '../../src/schema/dsl/types.js';
-import { writeTuple, deleteTuple, type TupleKey } from '../../src/store/tuples.js';
+import {
+  writeTuple,
+  deleteTuple,
+  invalidDataPlaneIdReason,
+  MAX_DATA_PLANE_ID_LENGTH,
+  type TupleKey,
+} from '../../src/store/tuples.js';
 import { publishSchema } from '../../src/schema/publish.js';
 import {
   tupleWrite,
@@ -392,8 +416,14 @@ describe('namespace and relation identifiers reject the injection payload corpus
     // gated *before* any query is built (already proven behaviorally by
     // the two `INJECTION_PAYLOAD_CORPUS` tests below in the next
     // `describe` block) — proven here at the SQL-capture level too: zero
-    // queries are ever issued for a corpus payload, for real, not just
-    // "the return value looked like a rejection."
+    // queries are ever issued for a corpus payload that's still an invalid
+    // subject id, for real, not just "the return value looked like a
+    // rejection." Narrowed to that still-invalid subset (via
+    // `invalidDataPlaneIdReason` directly, not a hardcoded list — see this
+    // file's own top-of-file doc comment) since most of this corpus is now
+    // a *legal* subject id under the data-plane grammar; those payloads'
+    // own "reaches the database safely parameterized" property is proved
+    // by the real, legitimate write immediately below instead.
     const markerTuple: TupleKey = {
       objectNs: 'sqlgen_marker_object_ns',
       objectId: 'sqlgen_marker_object_id',
@@ -401,7 +431,10 @@ describe('namespace and relation identifiers reject the injection payload corpus
       subjectNs: 'sqlgen_marker_subject_ns',
       subjectId: 'sqlgen_marker_subject_id',
     };
-    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+    const stillInvalidAsSubjectId = INJECTION_PAYLOAD_CORPUS.filter(
+      (payload) => invalidDataPlaneIdReason(payload) !== null,
+    );
+    for (const payload of stillInvalidAsSubjectId) {
       const { pool: rejectPool, calls: rejectCalls } = makeCapturingPool([]);
       const rejected = await writeTuple(rejectPool, { ...markerTuple, subjectId: payload });
       expect(rejected.ok).toBe(false);
@@ -456,7 +489,8 @@ describe('namespace and relation identifiers reject the injection payload corpus
     expect(deleteParams).toContain(markerTuple.objectId);
     expect(deleteParams).toContain(markerTuple.subjectNs);
 
-    for (const payload of INJECTION_PAYLOAD_CORPUS) {
+    // Part C: deleteTuple — same narrowing as Part B above, same reason.
+    for (const payload of stillInvalidAsSubjectId) {
       const { pool: rejectPool, calls: rejectCalls } = makeCapturingPool([]);
       const rejected = await deleteTuple(rejectPool, { ...markerTuple, subjectId: payload });
       expect(rejected.ok).toBe(false);
@@ -500,23 +534,44 @@ describe('subject and object identifiers reject the injection payload corpus', (
     };
   }
 
-  it('writing a tuple rejects every payload in INJECTION_PAYLOAD_CORPUS as a subject id, before the write reaches the tuple store', async () => {
+  /**
+   * `writeTuple` validates identifiers *before* ever calling
+   * `pool.connect()`/`pool.query()` — so whether a write against this
+   * deliberately unreachable pool resolves (`{ ok: false }`, still on the
+   * DB-free identifier-validation side) or throws/rejects (proceeded past
+   * identifier validation into the schema-lookup step, which for this pool
+   * can only ever manifest as a connection error) is itself a real,
+   * structural signal for which side of `invalidDataPlaneIdReason` a
+   * payload landed on — the same technique the 'subject/object id grammar'
+   * describe block below uses for its own fuzz property.
+   */
+  async function proceedsPastIdentifierValidation(tuple: TupleKey): Promise<boolean> {
+    try {
+      const outcome = await writeTuple(unreachablePool, tuple);
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) {
+        expect(outcome.errors.length).toBeGreaterThan(0);
+        expect(outcome.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+      }
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  it('writing a tuple with a subject id from INJECTION_PAYLOAD_CORPUS is rejected before reaching the tuple store if and only if it is still an invalid data-plane id — most of this corpus is now a legal, if unusual, opaque subject id', async () => {
     for (const payload of INJECTION_PAYLOAD_CORPUS) {
-      const result = await writeTuple(unreachablePool, tupleWith({ subjectId: payload }));
-      expect(result.ok).toBe(false);
-      if (result.ok) continue;
-      expect(result.errors.length).toBeGreaterThan(0);
-      expect(result.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+      const stillInvalid = invalidDataPlaneIdReason(payload) !== null;
+      const proceeded = await proceedsPastIdentifierValidation(tupleWith({ subjectId: payload }));
+      expect(proceeded).toBe(!stillInvalid);
     }
   });
 
-  it('writing a tuple rejects every payload in INJECTION_PAYLOAD_CORPUS as an object id, before the write reaches the tuple store', async () => {
+  it('writing a tuple with an object id from INJECTION_PAYLOAD_CORPUS is rejected before reaching the tuple store if and only if it is still an invalid data-plane id — same property as the subject-id case above, object id has no wildcard carve-out to complicate it', async () => {
     for (const payload of INJECTION_PAYLOAD_CORPUS) {
-      const result = await writeTuple(unreachablePool, tupleWith({ objectId: payload }));
-      expect(result.ok).toBe(false);
-      if (result.ok) continue;
-      expect(result.errors.length).toBeGreaterThan(0);
-      expect(result.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+      const stillInvalid = invalidDataPlaneIdReason(payload) !== null;
+      const proceeded = await proceedsPastIdentifierValidation(tupleWith({ objectId: payload }));
+      expect(proceeded).toBe(!stillInvalid);
     }
   });
 
@@ -868,16 +923,20 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
    * Unlike a namespace name (above), `TupleKey.subjectId`/`objectId` are
    * plain JS string fields with no DSL tokenizer standing between the
    * caller and `validateIdentifiers` (`src/store/tuples.ts`) — the raw
-   * candidate is checked against `IDENTIFIER_PATTERN`/
-   * `MAX_IDENTIFIER_LENGTH` directly, with no whitespace-stripping and no
-   * reserved-word carve-out (confirmed: `validateIdentifiers` has no
-   * `RESERVED_WORDS`-equivalent check at all). The flat "accepted iff
-   * matches the grammar" formula the namespace-name property above had to
-   * complicate is therefore exactly right here, unmodified — the two
-   * grammars *look* like they share one corpus (`IDENTIFIER_PATTERN`/
-   * `MAX_IDENTIFIER_LENGTH`) but do not share all of the same acceptance
-   * behavior, which is precisely the distinction this test's own name
-   * flags.
+   * candidate is checked against `invalidDataPlaneIdReason` directly, with
+   * no whitespace-stripping and no reserved-word carve-out (confirmed:
+   * `validateIdentifiers` has no `RESERVED_WORDS`-equivalent check at all).
+   * The flat "accepted iff passes the grammar" formula the namespace-name
+   * property above had to complicate is therefore exactly right here,
+   * unmodified — the two positions *look* like they might share one
+   * grammar, and briefly did (both were `IDENTIFIER_PATTERN`/
+   * `MAX_IDENTIFIER_LENGTH`), but a fix for Principal-Graph interop moved
+   * `objectId`/`subjectId` onto their own, much looser data-plane grammar —
+   * ids are opaque foreign-system bytes, not developer-authored schema
+   * symbols, so the schema DSL's identifier grammar was never the right
+   * constraint for them. See `src/store/tuples.ts`'s own doc comment on
+   * `invalidDataPlaneIdReason` for exactly what's still rejected (a control
+   * character, `#`, `@`, empty, or over length) and why.
    */
   describe('subject/object id grammar', () => {
     const idFuzzPool = new Pool({
@@ -927,23 +986,20 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
       }
     }
 
-    it("for 2,000 random generated strings, a subject/object id is accepted if and only if it matches the published identifier grammar — the same property, run against the id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it. D-171 adds one, and only one, carve-out to this property: a subjectId of exactly WILDCARD_SUBJECT_ID ('*') proceeds past identifier validation even though it never matches IDENTIFIER_PATTERN — objectId has no such carve-out, so the two positions genuinely diverge for this one candidate value.", async () => {
+    it("for 2,000 random generated strings, a subject/object id is accepted if and only if it passes invalidDataPlaneIdReason — the same property, run against the current data-plane id grammar rather than the namespace grammar, since the predecessor learned the hard way (see its own INVALID_SESSION_SETTINGS split) that two grammars sharing most of a corpus is not the same as sharing all of it. D-171 adds one, and only one, carve-out to this property: a subjectId of exactly WILDCARD_SUBJECT_ID ('*') proceeds past identifier validation even though '*' itself would otherwise fail the data-plane grammar too (a bare '*' has no control character, '#', or '@', so it would actually pass invalidDataPlaneIdReason on its own merits now — this carve-out is what makes the wildcard sentinel's acceptance unconditional rather than coincidental) — objectId has no such carve-out, so the two positions still genuinely diverge for this one candidate value.", async () => {
       await assert(
         asyncProperty(string({ maxLength: 200 }), async (candidate) => {
-          const matchesGrammar =
-            IDENTIFIER_PATTERN.test(candidate) &&
-            candidate.length > 0 &&
-            candidate.length <= MAX_IDENTIFIER_LENGTH;
+          const validAsDataPlaneId = invalidDataPlaneIdReason(candidate) === null;
 
           // D-171: subjectId (and only subjectId) also accepts the reserved
           // wildcard sentinel — src/store/tuples.ts's validateIdentifiers
           // carves subjectId === WILDCARD_SUBJECT_ID out of its own
-          // IDENTIFIER_PATTERN check, unconditionally, before any schema
-          // lookup ever runs (so this candidate proceeds past identifier
+          // data-plane check, unconditionally, before any schema lookup
+          // ever runs (so this candidate proceeds past identifier
           // validation regardless of whether any relation actually declared
           // a wildcard subject type — that's a later, schema-aware
           // rejection, not an identifier-grammar one).
-          const expectedSubject = matchesGrammar || candidate === WILDCARD_SUBJECT_ID;
+          const expectedSubject = validAsDataPlaneId || candidate === WILDCARD_SUBJECT_ID;
           const subjectProceeded = await proceedsPastIdentifierValidation(
             tupleWith({ subjectId: candidate }),
           );
@@ -952,13 +1008,35 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
           const objectProceeded = await proceedsPastIdentifierValidation(
             tupleWith({ objectId: candidate }),
           );
-          expect(objectProceeded).toBe(matchesGrammar);
+          expect(objectProceeded).toBe(validAsDataPlaneId);
         }),
         { numRuns: 2000 },
       );
     });
 
-    it('an identifier at exactly the documented length limit is accepted, and one character over is rejected — the predecessor’s own regression (Postgres silently truncates at 63 bytes rather than rejecting) applies with equal force to any identifier this project persists as a lookup key', async () => {
+    it('legal opaque ids that used to be rejected under IDENTIFIER_PATTERN now proceed past identifier validation as both a subject id and an object id — the exact Principal-Graph interop cases this fix exists for', async () => {
+      const nowLegalIds = [
+        'github:owner/repo', // Principal-Graph's own exporter shape: `${source}:${externalId}`
+        'arn:aws:iam::123456789012:role/example-role', // a real AWS ARN — colons throughout, never a wire delimiter
+        'a'.repeat(200), // a long external id, well past MAX_IDENTIFIER_LENGTH (63) but comfortably under MAX_DATA_PLANE_ID_LENGTH
+      ];
+      for (const id of nowLegalIds) {
+        expect(invalidDataPlaneIdReason(id)).toBeNull();
+        expect(await proceedsPastIdentifierValidation(tupleWith({ subjectId: id }))).toBe(true);
+        expect(await proceedsPastIdentifierValidation(tupleWith({ objectId: id }))).toBe(true);
+      }
+    });
+
+    it('a control character, "#", and "@" each still reject a subject/object id — the only things the data-plane grammar actually forbids, since those are the tuple wire format\'s own delimiters (objectNs:objectId#relation@subjectNs:subjectId)', async () => {
+      const stillIllegalIds = ['tab\ttab', 'nul\x00nul', 'has#hash', 'has@at'];
+      for (const id of stillIllegalIds) {
+        expect(invalidDataPlaneIdReason(id)).not.toBeNull();
+        expect(await proceedsPastIdentifierValidation(tupleWith({ subjectId: id }))).toBe(false);
+        expect(await proceedsPastIdentifierValidation(tupleWith({ objectId: id }))).toBe(false);
+      }
+    });
+
+    it('a namespace name at exactly the documented length limit is accepted, and one character over is rejected — the predecessor’s own regression (Postgres silently truncates at 63 bytes rather than rejecting) applies with equal force to any schema symbol this project persists as a lookup key', () => {
       const atLimit = 'a'.repeat(MAX_IDENTIFIER_LENGTH);
       const oneOver = 'a'.repeat(MAX_IDENTIFIER_LENGTH + 1);
       expect(atLimit.length).toBe(MAX_IDENTIFIER_LENGTH);
@@ -990,6 +1068,15 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
         expect(error?.message).toContain('may be at most');
         expect(error?.message).toContain(String(MAX_IDENTIFIER_LENGTH));
       }
+    });
+
+    it('a subject id at exactly the data-plane length limit is accepted, and one character over is rejected — the same boundary discipline as the namespace-name case above, against MAX_DATA_PLANE_ID_LENGTH (512) instead of MAX_IDENTIFIER_LENGTH (63) now that subjectId/objectId have their own, much larger cap', async () => {
+      const atLimit = 'a'.repeat(MAX_DATA_PLANE_ID_LENGTH);
+      const oneOver = 'a'.repeat(MAX_DATA_PLANE_ID_LENGTH + 1);
+      expect(atLimit.length).toBe(MAX_DATA_PLANE_ID_LENGTH);
+      expect(oneOver.length).toBe(MAX_DATA_PLANE_ID_LENGTH + 1);
+      expect(invalidDataPlaneIdReason(atLimit)).toBeNull();
+      expect(invalidDataPlaneIdReason(oneOver)).not.toBeNull();
 
       // Subject id (writeTuple) — the store's own independent length
       // check (`validateIdentifiers`, `src/store/tuples.ts`), DB-free via
@@ -1008,7 +1095,7 @@ describe('fuzzing against the identifier grammar once it exists (property-based,
         expect(oneOverWrite.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
         expect(
           oneOverWrite.errors.some((e) =>
-            e.message.includes('exceeds the maximum identifier length'),
+            e.message.includes('exceeds the maximum data-plane id length'),
           ),
         ).toBe(true);
       }

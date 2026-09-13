@@ -155,8 +155,10 @@ export async function tupleWrite(
     return;
   }
   // Pure, DB-free identifier-pattern check — run before the DATABASE_URL
-  // check below so a malformed identifier (e.g. an id containing a space)
-  // is reported as the argument error it is, exit code 2, regardless of
+  // check below so a malformed identifier (e.g. a relation name containing
+  // a space, or an object/subject id containing a control character or a
+  // reserved '#'/'@' wire delimiter) is reported as the argument error it
+  // is, exit code 2, regardless of
   // whether a database happens to be configured. `writeTuple` itself runs
   // this exact same check again once a pool exists (defense in depth, not
   // redundant — a caller other than this CLI might call `writeTuple`
