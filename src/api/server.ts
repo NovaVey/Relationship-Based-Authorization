@@ -66,7 +66,13 @@ import { performCheck, type PerformCheckResult } from '../audit/checks.js';
 import { expand } from '../audit/expand.js';
 import { listObjects, listUsers } from '../audit/list.js';
 import { queryScope, SCOPE_QUERY_MAX_TARGETS } from '../audit/scope.js';
-import { writeTuple, deleteTuple, type TupleKey, type WriteTupleResult } from '../store/tuples.js';
+import {
+  writeTuple,
+  deleteTuple,
+  invalidDataPlaneIdReason,
+  type TupleKey,
+  type WriteTupleResult,
+} from '../store/tuples.js';
 import { decodeToken, currentToken, TokenNotObservedError } from '../store/tokens.js';
 import { fetchWatchEvents, WATCH_DEFAULT_BATCH_LIMIT } from '../store/watch.js';
 import { compileSchema } from '../schema/dsl/compiler.js';
@@ -134,34 +140,74 @@ declare module 'fastify' {
   }
 }
 
-// `identifierField()` — the same grammar `src/store/tuples.ts`'s
-// `validateIdentifiers` already enforces on every tuple write/delete
+// `identifierField()` — the schema-symbol grammar `src/store/tuples.ts`'s
+// `validateIdentifiers` enforces on `objectNs`/`relation`/`subjectNs`
 // (`IDENTIFIER_PATTERN`/`MAX_IDENTIFIER_LENGTH`, `src/schema/dsl/types.ts`),
-// applied here too. `/check`/`/expand` never route through `writeTuple`/
-// `deleteTuple` — they call `performCheck`/`expand` directly — so before
-// this fix, `entityRefSchema`'s `ns`/`id` and both routes' `relation` field
-// accepted any non-empty string, with no identifier-grammar or length
-// enforcement at all. Not an auth bypass: `getConfig` (the production
-// resolver's namespace-config lookup) still gates on `object.ns` matching a
-// real *published* namespace first, and a published namespace name is
-// itself already grammar-clean by construction (it went through the DSL
-// compiler to get published) — so a malformed `ns` on an unpublished
-// namespace is rejected downstream regardless, just later and less clearly.
-// The real damage a malformed identifier does: `src/resolve/production/
-// resolver.ts` documents and depends on "no real identifier contains `:` or
-// `#`" (`entityNameKey`, `parseFrontierKeyString`) to reconstruct an
-// audit-trail path — an id like `'evil#hack'` can make that parsing
-// silently mis-split, corrupting the resolution path an ALLOWED result
-// shows its work with. And every malformed value that does clear the
-// namespace-gate reaches the `checks` audit table's plain `text` columns
-// permanently, with no `CHECK` constraint to catch it later. Full-repo
-// audit finding #3, MEDIUM, third audit, 2026-08-17. See docs/DECISIONS.md.
+// applied here to every field that names a namespace or relation/permission
+// symbol: `entityRefSchema`'s `ns`, and every route's own `relation`/
+// `objectNs`/`namespace`/`relationOrPermission` field. `/check`/`/expand`
+// never route through `writeTuple`/`deleteTuple` — they call `performCheck`/
+// `expand` directly — so before this fix, all of these accepted any
+// non-empty string, with no identifier-grammar or length enforcement at
+// all. Not an auth bypass: `getConfig` (the production resolver's
+// namespace-config lookup) still gates on `object.ns` matching a real
+// *published* namespace first, and a published namespace name is itself
+// already grammar-clean by construction (it went through the DSL compiler
+// to get published) — so a malformed `ns` on an unpublished namespace is
+// rejected downstream regardless, just later and less clearly. The real
+// damage a malformed schema symbol does: `src/resolve/production/
+// resolver.ts` documents and depends on "no real namespace/relation
+// contains `:` or `#`" (`entityNameKey`, `parseFrontierKeyString`) to
+// reconstruct an audit-trail path — a relation like `'hack#view'` can make
+// that parsing silently mis-split, corrupting the resolution path an
+// ALLOWED result shows its work with. And every malformed value that does
+// clear the namespace-gate reaches the `checks` audit table's plain `text`
+// columns permanently, with no `CHECK` constraint to catch it later.
+// Full-repo audit finding #3, MEDIUM, third audit, 2026-08-17. See
+// docs/DECISIONS.md.
+//
+// D-190 (docs/DECISIONS.md): `entityRefSchema`'s `id` half moved *off* this
+// function onto `dataPlaneIdField()` below — see that function's own doc
+// comment for why an `id` is a different kind of thing than an `ns`/
+// `relation`.
 function identifierField(): z.ZodString {
   return z
     .string()
     .min(1)
     .max(MAX_IDENTIFIER_LENGTH)
     .regex(IDENTIFIER_PATTERN, `must match ${IDENTIFIER_PATTERN.source}`);
+}
+
+// D-190 (docs/DECISIONS.md): the `id` half of `entityRefSchema` — a
+// subject/object id is an opaque foreign-system key (Zanzibar treats it as
+// bytes), never a developer-authored schema symbol, so `identifierField()`
+// above is the wrong constraint for it — exactly the same distinction
+// D-187 already drew for `objectId`/`subjectId` on `writeTuple`/
+// `deleteTuple`. Before this fix, `entityRefSchema` applied the strict
+// schema-symbol grammar to `id` too, so a Principal-Graph-shaped id like
+// `"github:owner/repo"` — already writable as a tuple since D-187 — was
+// rejected the moment any of `/check`, `/check/batch`, `/expand`,
+// `/list-objects`, `/list-users`, or `/scope` tried to look it up: the
+// write path and the read path disagreed about what a valid id even was.
+// Reuses `invalidDataPlaneIdReason` directly from `src/store/tuples.ts`
+// rather than re-deriving the grammar here, so both paths can never drift
+// apart again — the same reasoning `MAX_DATA_PLANE_ID_LENGTH`/
+// `invalidDataPlaneIdReason` were exported *publicly* for in the first
+// place (D-187's own item 4). `ns` is unaffected: it stays on
+// `identifierField()` above, since a subject/object's namespace is a schema
+// symbol like any other, and the resolver-soundness argument for allowing
+// a colon in `id` (`entityNameKey`/`parseFrontierKeyString` split on the
+// *first* `:`/`#`, which stays unambiguous exactly because `ns` never
+// contains one) is identical to D-187's — see that entry for the full
+// proof, unchanged here since nothing about it depends on which call
+// surface (`writeTuple` vs. `/check`) supplied the id.
+function dataPlaneIdField(): z.ZodString {
+  return z.string().superRefine((value, ctx) => {
+    const reason = invalidDataPlaneIdReason(value);
+    if (reason !== null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: reason });
+    }
+  });
 }
 
 // `.strict()` on every body schema below (full-repo audit finding #4,
@@ -178,7 +224,7 @@ function identifierField(): z.ZodString {
 // `unrecognized_keys` issue already carries a specific, readable message)
 // exactly like any other malformed-body case, rather than a silent,
 // undetectable behavior change.
-const entityRefSchema = z.object({ ns: identifierField(), id: identifierField() }).strict();
+const entityRefSchema = z.object({ ns: identifierField(), id: dataPlaneIdField() }).strict();
 
 const checkBodySchema = z
   .object({

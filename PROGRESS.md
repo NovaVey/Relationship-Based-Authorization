@@ -3059,6 +3059,18 @@ Before writing any workflow YAML, went and read the actual shared workflow this 
 
 The very first version of the replacement had a real bug, caught immediately by its own first real CI run rather than by inspection: it stripped away the packages only needed to compile the project before actually compiling it, which cannot work — fixed to build first, the same order the job it replaced always used, then strip those packages afterward to prove the finished result still runs without them.
 
-The bigger reason this is intentionally not finished yet: three of this repository's required merge checks are about to stop existing under their old names the moment this change lands, replaced by one differently-named check — confirmed for certain, from this very change's own real CI run, rather than guessed at. Nothing that merges a commit can update which check names this repository's own merge protection actually requires; only a person with admin access to the repository's settings can do that, in the GitHub UI itself. So this stays open, fully green, clearly labeled, until that one manual step happens — pushing it through as though it were routine would have quietly locked every future pull request out the moment it merged.
+The bigger reason this wasn't merged the moment it went green: three of this repository's required merge checks were about to stop existing under their old names the moment this change landed, replaced by one differently-named check — confirmed for certain, from this very change's own real CI run, rather than guessed at. Nothing that merges a commit can update which check names this repository's own merge protection actually requires; only a person with admin access to the repository's settings can do that, in the GitHub UI itself. So this stayed open, fully green, clearly labeled, until that one manual step happened, confirmed live via the GitHub API rather than assumed — only then merged.
 
 Full account: `docs/DECISIONS.md` D-189.
+
+## Closing the one gap D-187 deliberately left open: the read side (`/check`, `/expand`, and every route/CLI command that shares their id validation) now accepts the same ids the write side already does
+
+**Owner:** main agent.
+
+D-187 fixed the write path so another service's own real ids could be stored as tuples, but flagged plainly that it hadn't fixed the read path to match — the same kind of id could be written, then rejected the moment anything tried to check or expand it back. This finishes that: the HTTP routes and CLI commands that ask "is this id valid" independently of a tuple write now ask the exact same question, using the exact same shared rule, instead of a second copy of the old, stricter one.
+
+Checked every existing test for this code first, rather than assuming none would break — none did. The only cases that used to assert an id must be rejected all did so with a character that's still rejected today (a wire delimiter); nothing had ever pinned the exact behavior this change actually loosens, unlike last time, so this was pure addition, not surgery on old proof. New, direct tests were added for both halves of the fix — the shared library function in isolation, and each real route/command it feeds into — including the exact motivating shapes (a GitHub-style id, a real cloud-provider resource identifier) and confirming the genuinely dangerous characters still reject exactly as before.
+
+Checked the README in full before calling this done, since it was asked for directly — it never described this rule at all, in either its old or new form, so there was nothing in it to correct.
+
+Full account: `docs/DECISIONS.md` D-190.

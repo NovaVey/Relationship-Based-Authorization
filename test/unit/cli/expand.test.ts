@@ -100,4 +100,20 @@ describe('authz expand — exit codes', () => {
 
     expect(process.exitCode).toBe(2);
   });
+
+  // D-190 (docs/DECISIONS.md): an object id half containing a colon — the
+  // exact Principal-Graph exporter shape ("github:owner/repo") — now
+  // parses as well-formed (`parseEntityArg`'s id half moved onto the
+  // looser data-plane grammar) and proceeds all the way to `expandCli`
+  // trying to touch Postgres, same as any other well-formed reference. Not
+  // exit 2 (the malformed-reference guard) and not a silent success either
+  // — an unreachable database still means exit 3.
+  it('an-object-reference-whose-id-half-contains-a-colon-is-accepted-as-well-formed-and-proceeds-to-touch-postgres', async () => {
+    env.DATABASE_URL = UNREACHABLE_DATABASE_URL;
+    process.exitCode = undefined;
+
+    await expandCli('document:github:owner/repo', 'view');
+
+    expect(process.exitCode).toBe(3);
+  });
 });

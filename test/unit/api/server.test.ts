@@ -255,6 +255,101 @@ describe('a well-formed but grammar-invalid identifier is rejected with 400 inva
 });
 
 // ---------------------------------------------------------------------------
+// 1b-2. D-190 (docs/DECISIONS.md): `entityRefSchema`'s `id` half moved off
+//     the strict schema-symbol grammar (finding #3 above) onto the looser
+//     data-plane grammar `writeTuple`/`deleteTuple` already accept
+//     (D-187) — a subject/object `id` is an opaque foreign-system key, not
+//     a schema symbol, so a colon-containing id (Principal-Graph's own
+//     exporter shape) must now reach `performCheck`/`expand` instead of
+//     being rejected at the schema layer. `ns` is unaffected (still
+//     covered by 1b above); the wire-format-breaking characters
+//     (`#`/`@`/control chars) and the length cap must still reject.
+// ---------------------------------------------------------------------------
+
+describe("entityRefSchema's id half accepts the data-plane grammar, not the strict schema-symbol one (D-190)", () => {
+  it('a-check-body-whose-subject-id-contains-a-colon-reaches-performcheck-instead-of-being-rejected', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const canned: PerformCheckResult = { allowed: false, depth: 0, touchedExpiringTuple: false };
+    const spy = vi.spyOn(checksModule, 'performCheck').mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: { ...validCheckBody, subject: { ns: 'user', id: 'github:owner/repo' } },
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[1]).toMatchObject({ ns: 'user', id: 'github:owner/repo' });
+  });
+
+  it('an-expand-body-whose-object-id-contains-a-colon-reaches-expand-instead-of-being-rejected', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const canned: ExpandNode = {
+      kind: 'relation',
+      object: { ns: 'document', id: 'arn:aws:iam::123456789012:role/example-role' },
+      relation: 'viewer',
+      directSubjects: [],
+      usersets: [],
+    };
+    const spy = vi.spyOn(expandModule, 'expand').mockResolvedValue(canned);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/expand',
+      payload: {
+        ...validExpandBody,
+        object: { ns: 'document', id: 'arn:aws:iam::123456789012:role/example-role' },
+      },
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a-hash-the-relation-wire-delimiter', 'evil#hack'],
+    ['an-at-sign-the-subject-wire-delimiter', 'evil@hack'],
+    ['a-control-character', 'evil\thack'],
+  ])(
+    'a-check-body-whose-object-id-contains-%s-is-still-rejected-with-400-invalid-request',
+    async (_label, id) => {
+      env.ADMIN_API_KEY = CORRECT_KEY;
+      const spy = vi.spyOn(checksModule, 'performCheck');
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/check',
+        payload: { ...validCheckBody, object: { ns: 'document', id } },
+        headers: authHeaders(CORRECT_KEY),
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect((await parseBody(res)).error.code).toBe('invalid_request');
+      expect(spy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('a-check-body-whose-object-id-exceeds-the-data-plane-length-limit-is-rejected-with-400-invalid-request', async () => {
+    env.ADMIN_API_KEY = CORRECT_KEY;
+    const spy = vi.spyOn(checksModule, 'performCheck');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/check',
+      payload: { ...validCheckBody, object: { ns: 'document', id: 'x'.repeat(513) } },
+      headers: authHeaders(CORRECT_KEY),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect((await parseBody(res)).error.code).toBe('invalid_request');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 1c. Full-repo audit finding #4 (MEDIUM, fourth audit): an unrecognized
 //     key in an otherwise-valid body is rejected with 400 invalid_request,
 //     not silently dropped — `.strict()` on every body schema
