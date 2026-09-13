@@ -4,27 +4,40 @@
  * mirroring `expand.test.ts`/`soundness.test.ts`) — full-repo audit finding
  * #13: `tupleWrite`/`tupleDelete` checked `env.DATABASE_URL` and exited 3
  * *before* ever running `validateIdentifiers` on the already-parsed tuple
- * key, so a malformed identifier (e.g. an id containing a space) was masked
- * behind an unrelated "DATABASE_URL is not set" infrastructure message
- * whenever no database happened to be configured — reported at exit 3
- * instead of the exit-2 argument error it actually is.
+ * key, so a malformed identifier was masked behind an unrelated "DATABASE_URL
+ * is not set" infrastructure message whenever no database happened to be
+ * configured — reported at exit 3 instead of the exit-2 argument error it
+ * actually is.
  *
  *   - a malformed object/subject reference (bad grammar — no colon, empty
  *     id) exits 2, before either command ever touches Postgres
  *   - a well-formed-grammar but invalid-identifier reference (e.g. an id
- *     containing a space) ALSO exits 2, before either command ever touches
- *     Postgres — this is the specific case finding #13 covers; before the
- *     fix, this case fell all the way through to the `DATABASE_URL` check
- *     and exited 3 whenever no database was configured
+ *     containing a control character) ALSO exits 2, before either command
+ *     ever touches Postgres — this is the specific case finding #13 covers;
+ *     before the fix, this case fell all the way through to the
+ *     `DATABASE_URL` check and exited 3 whenever no database was configured
  *   - an unreachable database exits 3, for a *validly-shaped* tuple key
  *
  * Confirmed directly against `src/cli/commands/tuple.ts` before writing
  * these tests: `buildTupleKey`'s own parsing only checks colon/hash
  * *position* (grammar), never character content — `validateIdentifiers`
  * (now exported from `src/store/tuples.ts` specifically for this) is the
- * check that rejects an id like `'INVALID ID'`, and now runs directly in
- * the CLI before the `DATABASE_URL` check, not only later inside
+ * check that rejects a malformed identifier, and now runs directly in the
+ * CLI before the `DATABASE_URL` check, not only later inside
  * `writeTuple`/`deleteTuple` themselves.
+ *
+ * A data-plane loosening fix later moved `objectId`/`subjectId` off the
+ * strict schema-symbol grammar onto a far looser one (`invalidDataPlaneIdReason`,
+ * `src/store/tuples.ts` — a length cap, no control characters, no `#`/`@`;
+ * see that function's own doc comment for why) — an id containing a *space*,
+ * this suite's own original example of "well-formed grammar, still an
+ * invalid identifier," is no longer invalid at all under that looser grammar
+ * (a space is not a control character, not `#`/`@`). A control character
+ * (e.g. a tab) is still rejected by both the old and new grammar, so it
+ * replaces "a space" below as the still-valid example for finding #13's
+ * own point — the ordering claim itself (identifier validation runs before
+ * the `DATABASE_URL` check) is unaffected by which grammar is doing the
+ * rejecting.
  *
  * Deliberately DB-free (no `PostgreSqlContainer`, no Docker) — see
  * `docs/DECISIONS.md` D-019/D-030: none of the cases here need a *working*
@@ -60,26 +73,28 @@ describe.each([
     expect(process.exitCode).toBe(2);
   });
 
-  it('an-object-id-containing-a-space-fails-identifier-validation-and-exits-2-not-3-even-with-no-database-url-configured', async () => {
+  it('an-object-id-containing-a-control-character-fails-identifier-validation-and-exits-2-not-3-even-with-no-database-url-configured', async () => {
     // The finding's own reproduction: DATABASE_URL deliberately unset
     // entirely. Before the fix, this fell through the grammar-only
-    // buildTupleKey check (which accepts 'document:INVALID ID' — colon
+    // buildTupleKey check (which accepts 'document:INVALID\tID' — colon
     // position is fine), reached the DATABASE_URL check next, and exited 3
     // with a Postgres-connection message instead of reporting the real,
-    // immediately-decidable argument error.
+    // immediately-decidable argument error. A tab, not a space: a space is
+    // no longer an invalid data-plane id at all (see this file's own
+    // top-of-file doc comment) — a control character still is.
     env.DATABASE_URL = undefined;
     process.exitCode = undefined;
 
-    await command('document:INVALID ID', 'viewer', 'user:alice');
+    await command('document:INVALID\tID', 'viewer', 'user:alice');
 
     expect(process.exitCode).toBe(2);
   });
 
-  it('a-subject-id-containing-a-space-is-also-caught-before-the-database-url-check', async () => {
+  it('a-subject-id-containing-a-control-character-is-also-caught-before-the-database-url-check', async () => {
     env.DATABASE_URL = undefined;
     process.exitCode = undefined;
 
-    await command('document:readme', 'viewer', 'user:INVALID ID');
+    await command('document:readme', 'viewer', 'user:INVALID\tID');
 
     expect(process.exitCode).toBe(2);
   });

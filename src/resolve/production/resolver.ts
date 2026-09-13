@@ -639,10 +639,14 @@ async function getConfig(ctx: WalkContext, ns: string): Promise<NamespaceConfig 
 
 /**
  * Branch-local cycle-detection key: `(namespace, id, relation-or-
- * permission-name)`, joined with `:`/`#` — separators that can never
- * appear in a real identifier (`IDENTIFIER_PATTERN` in
- * `src/schema/dsl/types.ts` only allows `[a-z][a-z0-9_]*`), so this can
- * never collide by accident.
+ * permission-name)`, joined with `:`/`#`. `object.ns`/`name` are schema
+ * symbols (`IDENTIFIER_PATTERN`, `src/schema/dsl/types.ts` — never `:` or
+ * `#`); `object.id` is a data-plane value (`invalidDataPlaneIdReason`,
+ * `src/store/tuples.ts`) that may legally contain a `:` but, like `ns`/
+ * `name`, never a `#` — so two different `(ns, id, name)` triples can
+ * still never collide into the same key by accident (this string is only
+ * ever compared for equality via `visiting.has`/`.add` below, never
+ * reverse-parsed, so `id`'s embedded `:` never needs to be split back out).
  */
 function entityNameKey(object: EntityRef, name: string): string {
   return `${object.ns}:${object.id}#${name}`;
@@ -1342,9 +1346,16 @@ function groupTuplesByFrontierKey(
 
 /**
  * Parses one `path` element (`ns:id#relation`) back into its parts.
- * Unambiguous: every namespace/id/relation is restricted to
- * `[a-z][a-z0-9_]*` (`IDENTIFIER_PATTERN`), which never contains `:` or
- * `#`, so splitting on the first occurrence of each is always correct.
+ * Unambiguous: `ns`/`relation` are schema symbols restricted to
+ * `[a-z][a-z0-9_]*` (`IDENTIFIER_PATTERN`, `src/schema/dsl/types.ts`), which
+ * never contains `:` or `#` — so the string's first `:` can only ever be
+ * the literal separator `frontierKeyStr` inserted, never one embedded in
+ * `ns` itself. `id`, by contrast, is a data-plane value (`invalidDataPlaneIdReason`,
+ * `src/store/tuples.ts`) that may legally contain a `:` (e.g.
+ * "github:owner/repo") but — like `ns`/`relation` — never a `#`, so the
+ * first (and only) `#` in the whole string is still unambiguously the
+ * id/relation boundary. Splitting on the first `:` then the first `#`
+ * therefore stays correct even though `id` alone may embed a colon.
  */
 function parseFrontierKeyString(raw: string): RelationClosureKey {
   const hashIndex = raw.indexOf('#');

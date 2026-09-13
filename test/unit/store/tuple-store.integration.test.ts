@@ -45,9 +45,11 @@ import {
   deleteTuple,
   listTuplesByObject,
   listTuplesBySubject,
+  invalidDataPlaneIdReason,
   WRITE_LOG_LOCK_CLASSID,
   WRITE_LOG_LOCK_OBJID,
   type TupleKey,
+  type TupleError,
 } from '../../../src/store/tuples.js';
 import { WILDCARD_SUBJECT_ID } from '../../../src/schema/dsl/types.js';
 import { currentToken, assertTokenObserved } from '../../../src/store/tokens.js';
@@ -324,25 +326,76 @@ describe('a malformed namespace, relation, or id is rejected before it reaches t
     subjectId: 'alice',
   };
 
-  const fieldPositions: Array<{ label: string; build: (payload: string) => TupleKey }> = [
-    { label: 'object namespace', build: (p) => ({ ...baseTuple, objectNs: p }) },
-    { label: 'object id', build: (p) => ({ ...baseTuple, objectId: p }) },
-    { label: 'relation', build: (p) => ({ ...baseTuple, relation: p }) },
-    { label: 'subject namespace', build: (p) => ({ ...baseTuple, subjectNs: p }) },
-    { label: 'subject id', build: (p) => ({ ...baseTuple, subjectId: p }) },
+  // `isDataPlaneId` (Principal-Graph interop fix): `objectId`/`subjectId`
+  // moved off the strict schema-symbol grammar (`IDENTIFIER_PATTERN`) onto
+  // the much looser `invalidDataPlaneIdReason` (`src/store/tuples.ts`) —
+  // ids are opaque foreign-system bytes, not developer-authored schema
+  // symbols. `objectNs`/`relation`/`subjectNs` are unaffected and still
+  // reject this entire corpus unconditionally; the two id positions now
+  // reject only the subset `invalidDataPlaneIdReason` still flags (a
+  // control character, `#`, `@`, empty, or over `MAX_DATA_PLANE_ID_LENGTH`).
+  const fieldPositions: Array<{
+    label: string;
+    build: (payload: string) => TupleKey;
+    isDataPlaneId: boolean;
+  }> = [
+    {
+      label: 'object namespace',
+      build: (p) => ({ ...baseTuple, objectNs: p }),
+      isDataPlaneId: false,
+    },
+    { label: 'object id', build: (p) => ({ ...baseTuple, objectId: p }), isDataPlaneId: true },
+    { label: 'relation', build: (p) => ({ ...baseTuple, relation: p }), isDataPlaneId: false },
+    {
+      label: 'subject namespace',
+      build: (p) => ({ ...baseTuple, subjectNs: p }),
+      isDataPlaneId: false,
+    },
+    { label: 'subject id', build: (p) => ({ ...baseTuple, subjectId: p }), isDataPlaneId: true },
   ];
 
+  /**
+   * Both `writeTuple` and `deleteTuple` validate identifiers strictly
+   * before ever touching `unreachablePool` — so for a payload that's
+   * genuinely rejected at this field position, `op` resolves
+   * `{ ok: false, errors: [{ code: 'invalid_identifier' }] }` and the pool
+   * is never queried; for a payload that's now a *legal* data-plane id
+   * (most of this corpus, at the two id positions only), `op` proceeds
+   * into schema validation, which for this deliberately unreachable pool
+   * can only ever manifest as a thrown connection error. Asserting on
+   * which of those two things happens is itself the proof "rejected before
+   * it reaches the database" (the resolve case) vs. "reached the database
+   * layer, safely, as an ordinary value" (the throw case) — not just that
+   * the return value looked like a rejection.
+   */
+  async function expectIdentifierOutcome(
+    op: (pool: Pool, tuple: TupleKey) => Promise<{ ok: boolean; errors?: TupleError[] }>,
+    tuple: TupleKey,
+    label: string,
+    payload: string,
+    shouldReject: boolean,
+  ): Promise<void> {
+    if (shouldReject) {
+      const result = await op(unreachablePool, tuple);
+      expect(result.ok, `expected ${label} payload ${JSON.stringify(payload)} to be rejected`).toBe(
+        false,
+      );
+      if (result.ok) return;
+      expect(result.errors?.length).toBeGreaterThan(0);
+      expect(result.errors?.every((e) => e.code === 'invalid_identifier')).toBe(true);
+    } else {
+      await expect(
+        op(unreachablePool, tuple),
+        `expected ${label} payload ${JSON.stringify(payload)} to proceed past identifier validation (now a legal data-plane id)`,
+      ).rejects.toBeInstanceOf(Error);
+    }
+  }
+
   it('a-malformed-namespace-relation-or-id-is-rejected-before-it-reaches-the-database', async () => {
-    for (const { label, build } of fieldPositions) {
+    for (const { label, build, isDataPlaneId } of fieldPositions) {
       for (const payload of INJECTION_PAYLOAD_CORPUS) {
-        const result = await writeTuple(unreachablePool, build(payload));
-        expect(
-          result.ok,
-          `expected ${label} payload ${JSON.stringify(payload)} to be rejected`,
-        ).toBe(false);
-        if (result.ok) continue;
-        expect(result.errors.length).toBeGreaterThan(0);
-        expect(result.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+        const shouldReject = !isDataPlaneId || invalidDataPlaneIdReason(payload) !== null;
+        await expectIdentifierOutcome(writeTuple, build(payload), label, payload, shouldReject);
       }
     }
   });
@@ -362,16 +415,10 @@ describe('a malformed namespace, relation, or id is rejected before it reaches t
    * identifier is harmless") would go undetected without this.
    */
   it('a-malformed-namespace-relation-or-id-is-also-rejected-by-deleteTuple-before-it-reaches-the-database', async () => {
-    for (const { label, build } of fieldPositions) {
+    for (const { label, build, isDataPlaneId } of fieldPositions) {
       for (const payload of INJECTION_PAYLOAD_CORPUS) {
-        const result = await deleteTuple(unreachablePool, build(payload));
-        expect(
-          result.ok,
-          `expected ${label} payload ${JSON.stringify(payload)} to be rejected by deleteTuple`,
-        ).toBe(false);
-        if (result.ok) continue;
-        expect(result.errors.length).toBeGreaterThan(0);
-        expect(result.errors.every((e) => e.code === 'invalid_identifier')).toBe(true);
+        const shouldReject = !isDataPlaneId || invalidDataPlaneIdReason(payload) !== null;
+        await expectIdentifierOutcome(deleteTuple, build(payload), label, payload, shouldReject);
       }
     }
   });

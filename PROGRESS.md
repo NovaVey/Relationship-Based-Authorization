@@ -3026,3 +3026,17 @@ Everything else on the same list turned out to be a fix or a documentation pass;
 The one real design choice worth calling out: a single failing part of a multi-part request here never takes down the rest of the request with it. This project already has one existing endpoint that works the other way (a whole batch fails if any one piece of it does), already flagged as a known rough edge worth fixing one entry ago — building a second endpoint that repeated the identical rough edge on purpose, with nothing forcing that choice, would have been a mistake made twice instead of once. Every other real design decision (what a "yes" actually proves, how deep a single request's own real cost can go, why this doesn't try to answer the question for every namespace automatically) is written up in full in the underlying decision.
 
 Full account: `docs/DECISIONS.md` D-186.
+
+## Principal-Graph interop bug fix: `objectId`/`subjectId` no longer share the schema DSL's own strict identifier grammar
+
+**Owner:** main agent.
+
+An external bug report: another service's own tuple exporter builds subject/object ids as `source:externalId` (a GitHub-shaped id, an AWS ARN), and every single tuple it tried to write here was rejected — the two services could not compose at all. Root cause was a real, narrow bug, not a design gap: one function was applying the schema DSL's own identifier grammar (meant for developer-authored namespace/relation names) to two fields that are actually opaque foreign keys from another system, which Zanzibar's own model treats as plain bytes.
+
+Gave those two fields their own, much looser rule instead — reject only what would actually break the tuple's own wire format (a control character, or either of its two reserved delimiters) — while leaving every schema-symbol field exactly as strict as it already was. Before touching a single test, checked the parts of this project that actually matter most for a system whose whole purpose is proving no unauthorized path resolves: several places reconstruct an audit trail or detect a cycle by joining a namespace/id/relation triple into one string, relying on "a real identifier never contains this character" to split it back apart correctly. Confirmed directly, field by field, that loosening only the id half keeps every one of those provably sound — nothing needed to change there, only a few comments whose stated reasoning had gone stale.
+
+The test-surface cost of this fix turned out much larger than expected once actually touching the code: four separate test blocks across three different files had built their own proof around the exact behavior being changed, including one whose own canonical example of "still an invalid identifier" was a plain space — which is no longer invalid at all under the new rule. All four rewritten to derive their own expectation from the real new validator directly, the same way this project's older fuzz tests already do for the schema grammar, rather than a hand-maintained list that would silently drift out of sync again.
+
+One related gap was found and deliberately left alone: two other, separate call surfaces (an HTTP read-side route family and a CLI command family) still apply the old strict grammar to the same kind of id, independently of the file this fix touched — genuinely out of scope for this change, and queued separately rather than folded in silently.
+
+Full account: `docs/DECISIONS.md` D-187.

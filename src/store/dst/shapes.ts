@@ -598,15 +598,19 @@ function membershipIdentityKey(ns: string, id: string, relation: string): string
 /**
  * Parses one `path` element (`ns:id#relation`) back into its parts —
  * unambiguous for the identical reason `resolver.ts`'s own private
- * `parseFrontierKeyString` already documents: every namespace/id/relation is
- * restricted to `[a-z][a-z0-9_]*` (`IDENTIFIER_PATTERN`), which never
- * contains `:` or `#`. A separate, independent copy for the identical
- * "duplication over a backwards/risky import" reasoning as
- * `membershipIdentityKey` above — this file has no dependency on
- * `resolver.ts` at all, and creating one purely to reuse a four-line parser
- * would be exactly the kind of undisclosed coupling `relation-index.ts`'s own
- * top-of-file doc comment already refuses for the identical reason
- * (`store/` must never depend on `resolve/`).
+ * `parseFrontierKeyString` already documents: `ns`/`relation` are schema
+ * symbols restricted to `[a-z][a-z0-9_]*` (`IDENTIFIER_PATTERN`), never `:`
+ * or `#`, so the first `:` in the string is always the literal separator;
+ * `id` is a data-plane value that may legally contain a `:` but, like
+ * `ns`/`relation`, never a `#` (`invalidDataPlaneIdReason`, `src/store/
+ * tuples.ts`), so the first `#` is still always the id/relation boundary.
+ * A separate, independent copy for the identical "duplication over a
+ * backwards/risky import" reasoning as `membershipIdentityKey` above —
+ * this file has no dependency on `resolver.ts` at all, and creating one
+ * purely to reuse a four-line parser would be exactly the kind of
+ * undisclosed coupling `relation-index.ts`'s own top-of-file doc comment
+ * already refuses for the identical reason (`store/` must never depend on
+ * `resolve/`).
  */
 function parseMembershipIdentityKey(raw: string): { ns: string; id: string; relation: string } {
   const hashIndex = raw.indexOf('#');
