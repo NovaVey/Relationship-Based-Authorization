@@ -96,7 +96,7 @@ jobs:
         run: npx cyclonedx-npm --output-format json --output-file sbom.cdx.json
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@e598afbe1493e6b1bafb1f389cabb956eab91231 # v3.0.3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: sbom.cdx.json
           generate_release_notes: true
