@@ -3050,3 +3050,15 @@ Checked first whether the current floor was actually forced by anything this pro
 Left at just the one file, this would have recreated the identical problem in a different shape almost immediately — CI and the actual shipped container image would keep saying one Node version while the package's own declared floor said another. So every other place in the repo that names a Node version literally moved together, in the same change, with one single, deliberate exception: one CI job's own required-status-check name has the Node version baked directly into it, and changing that one value would rename a check nothing has approved yet, locking every future pull request out until a human fixes branch protection by hand. That job is already scheduled to be replaced entirely by separate, already-planned work that has to have exactly that same human step anyway — so this one value stays as it was, on purpose, until that other work lands, rather than making the same person do the identical dance twice.
 
 Full account: `docs/DECISIONS.md` D-188.
+
+## Three separate CI jobs folded into one shared, cross-repo workflow — pushed, but deliberately left unmerged for a human to finish
+
+**Owner:** main agent.
+
+Before writing any workflow YAML, went and read the actual shared workflow this depended on directly from its own source repository, rather than assuming what it expected — a real, useful precaution: its own inputs and defaults turned out to line up cleanly with what this repo already had, but that was confirmed, not assumed.
+
+The very first version of the replacement had a real bug, caught immediately by its own first real CI run rather than by inspection: it stripped away the packages only needed to compile the project before actually compiling it, which cannot work — fixed to build first, the same order the job it replaced always used, then strip those packages afterward to prove the finished result still runs without them.
+
+The bigger reason this is intentionally not finished yet: three of this repository's required merge checks are about to stop existing under their old names the moment this change lands, replaced by one differently-named check — confirmed for certain, from this very change's own real CI run, rather than guessed at. Nothing that merges a commit can update which check names this repository's own merge protection actually requires; only a person with admin access to the repository's settings can do that, in the GitHub UI itself. So this stays open, fully green, clearly labeled, until that one manual step happens — pushing it through as though it were routine would have quietly locked every future pull request out the moment it merged.
+
+Full account: `docs/DECISIONS.md` D-189.

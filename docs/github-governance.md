@@ -48,9 +48,22 @@ Create a rule targeting `main` with:
     them), select these exact checks — the job names come directly from
     `.github/workflows/ci.yml`, plus `schema-verifier` from
     `.github/workflows/schema-verifier.yml`:
-    - `lint-and-typecheck`
-    - `test (22)`
-    - `build`
+    - `verify / verify (24)` — D-189 (`docs/DECISIONS.md`): replaces the
+      former `lint-and-typecheck`/`test (22)`/`build` (all three folded
+      into one call to the shared `NovaVey/.github` reusable workflow).
+      This exact string was read directly off a real PR's own CI run, not
+      guessed — a reusable-workflow-call job's reported name is
+      `<calling-job-id> / <inner-job-name> (<matrix-value>)`, which for
+      this repo's own `verify:` job calling that workflow's own `verify`
+      job with a single-entry `["24"]` matrix comes out to this. If this
+      repo's own job id, or the shared workflow's own job name, or the
+      `node-versions` input ever changes, this string changes with it —
+      re-read the real name from a live PR rather than recomputing it by
+      hand.
+    - `confirm-production-build` — D-189: the former `build` job's own
+      "starts with only production dependencies installed" step (D-168),
+      kept as its own small job since the shared reusable workflow has no
+      hook for a step that runs after its own build.
     - `schema-verifier` — added once the workflow had run green on three
       real PRs (#83, #84, #85), per the deliberate hold stated in
       `docs/DECISIONS.md` D-123 and the schema verifier's own build spec
@@ -60,6 +73,13 @@ Create a rule targeting `main` with:
       pass, `{1, 3}` = fail (D-123's own "Exit-code gating" section has
       the full reasoning for why a non-monotone `HOLDS up to k = 1` still
       counts as a pass here).
+  - D-189 transition note: `verify / verify (24)` and
+    `confirm-production-build` replace `lint-and-typecheck`/`test (22)`/
+    `build` — remove those three retired names and add the two new ones
+    in the same Settings edit, not as two separate steps. An in-between
+    state where an old required name is still selected but the workflow
+    that produced it no longer exists would block every PR exactly as
+    surely as never editing the list at all.
   - Do **not** add `security-audit` or `test-integration` to this list —
     both are intentionally advisory (`continue-on-error: true` /
     `test-integration`'s own comment in the workflow) under the Standard

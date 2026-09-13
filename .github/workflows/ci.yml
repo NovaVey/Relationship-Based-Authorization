@@ -1,8 +1,14 @@
 name: CI
 
-# Job ids below (lint-and-typecheck, test, build, security-audit) are referenced
-# verbatim in docs/github-governance.md as required branch-protection status
-# checks. If you rename a job here, update that doc in the same commit.
+# D-189 (docs/DECISIONS.md): lint/format/typecheck/test/build (formerly
+# separate lint-and-typecheck/test/build jobs) now run via the shared
+# NovaVey/.github reusable workflow — see the `verify` job below and that
+# decision entry for the required-status-check-rename handling this needed.
+# Job ids below (security-audit) are still referenced verbatim in
+# docs/github-governance.md as required branch-protection status checks;
+# see that doc and D-189 for the `verify` job's own required-check name.
+# If you rename a job here, update docs/github-governance.md in the same
+# commit.
 
 on:
   push:
@@ -14,78 +20,57 @@ permissions:
   contents: read
 
 jobs:
-  lint-and-typecheck:
-    name: lint-and-typecheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: '24'
-          cache: 'npm'
-
-      - run: npm ci
-
-      # tools/rebac-benchmark/ is a separate npm package (its own
-      # package.json/package-lock.json, with dependencies — e.g.
-      # @authzed/authzed-node, @openfga/sdk — that aren't in this root
-      # package.json at all), so the root `npm ci` above never installs
-      # it. Its own eslint.config.mjs deliberately spreads this repo's
-      # root config so the directory gets identical typed-lint rules (see
-      # that file's own comment) via a `projectService` pointed at its own
-      # tsconfig.json — but that needs this directory's own node_modules
-      # present so the SDK types actually resolve. Without it, typed
-      # ESLint sees every SDK member as an unresolved type and cascades
-      # into dozens of `no-unsafe-*` errors (confirmed live: removing this
-      # directory's own node_modules and re-running `eslint .` reproduces
-      # exactly the 86 errors this step exists to prevent).
-      - run: npm ci
-        working-directory: tools/rebac-benchmark
-
-      - run: npm run format:check
-      - run: npm run lint
-      - run: npm run typecheck
-
-  # Single-entry matrix (not a plain step) deliberately kept as a matrix:
-  # GitHub Actions still names the check "test (22)" with the parens suffix
-  # even with one value, so dropping the matrix entirely would rename this
-  # required status check and need a branch-protection rule update
-  # (docs/github-governance.md Step 2 lists the exact current job names to
-  # select there — re-check it if this matrix's Node version ever changes).
+  # Replaces the former separate lint-and-typecheck/test/build jobs — all
+  # three folded into the shared reusable workflow's own single `npm run
+  # verify` (format:check && lint && typecheck && test && build), which this
+  # repo already had as one script. `node-versions` explicit (not the
+  # reusable workflow's own `["24", "26"]` default) to match this repo's
+  # own single-Node-version-of-record policy (D-188's engines.node floor),
+  # not inherit an extra Node 26 leg this repo hasn't separately opted into.
+  # `pre-verify` reproduces the former lint-and-typecheck job's own second
+  # `npm ci` in tools/rebac-benchmark — needed so typed ESLint can resolve
+  # that package's SDK types (see that job's own former comment, preserved
+  # in git history) — since `install-command` only ever runs once, against
+  # the repo root.
   #
-  # Deliberately NOT bumped to '24' alongside every other node-version pin
-  # in this repo (the engines.node floor bump, D-188): this comment's own
-  # warning is exactly the trap that would spring — changing this single
-  # matrix value renames the required check from "test (22)" to "test (24)",
-  # which branch protection would never see reported again, self-locking
-  # every future PR including this one's own CI run. This job (along with
-  # lint-and-typecheck/build) is already slated for wholesale replacement by
-  # a reusable-workflow migration that has to go through the exact same
-  # required-check rename dance deliberately, with a human updating branch
-  # protection in the same window — bumping this value here first would
-  # just make that PR redo the identical dance twice. Left at '22' on
-  # purpose until that migration lands.
-  test:
-    name: test
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: ['22']
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+  # Two real, disclosed differences from the jobs this replaces, see D-189
+  # for the full reasoning: the `test` step here is a plain `npm test`, not
+  # `npm run test:coverage` — this reusable workflow's own `npm run verify`
+  # step isn't parameterizable, so coverage collection in CI is dropped,
+  # not just unreported; and the D-168 production-dependencies-only build
+  # check (no hook point in the reusable workflow for a step that runs
+  # *after* its own build) is kept as its own small, separate, local job
+  # below instead of folded in.
+  verify:
+    uses: NovaVey/.github/.github/workflows/node-verify.yml@main
+    with:
+      node-versions: '["24"]'
+      pre-verify: 'npm ci --prefix tools/rebac-benchmark'
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-
-      - run: npm ci
-      - run: npm run test:coverage
-
-  build:
-    name: build
-    needs: [lint-and-typecheck, test]
+  # D-168 (docs/DECISIONS.md): a plain `npm ci` (as the `verify` job above
+  # runs, via `install-command`'s own default) installs devDependencies
+  # too, so `npm run verify`'s own `build` step can't catch a built command
+  # that only works because some devDependency happens to already be in
+  # node_modules — exactly what happened to `fast-check` (a real runtime
+  # need of `src/cli/index.ts`'s eagerly-imported `soundness` command,
+  # misclassified as dev-only) until a genuine production-only install
+  # caught it live. Kept as its own job (not a `pre-verify`/post-verify
+  # step on `verify` above — that workflow has no hook that runs *after*
+  # its own `build`) — build once with full devDependencies present (`tsc`
+  # itself, `@types/node`/`@types/pg`, needs them to compile at all — a real
+  # regression, caught live, in this job's own first draft: reordering to
+  # `npm ci --omit=dev` before `npm run build` makes `tsc` fail outright
+  # with "Cannot find name 'console'/'process'" across the whole tree,
+  # since the type declarations those need are themselves devDependencies),
+  # *then* strip devDependencies and run the already-built output — the
+  # exact order the job this replaces used. `--help` needs no DATABASE_URL
+  # and no real database — Commander's own module-level command
+  # registration already imports every command file (this one included)
+  # before it ever parses argv, so this exercises the identical import
+  # graph `authz doctor`/`authz serve` would.
+  confirm-production-build:
+    name: confirm-production-build
+    needs: [verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -97,18 +82,6 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-
-      # D-168 (docs/DECISIONS.md): `npm ci` above installs devDependencies
-      # too, so this job's own `npm run build` step can't catch a built
-      # command that only works because some devDependency happens to
-      # already be in node_modules — exactly what happened to `fast-check`
-      # (a real runtime need of `src/cli/index.ts`'s eagerly-imported
-      # `soundness` command, misclassified as dev-only) until a genuine
-      # production-only install caught it live. `--help` needs no
-      # DATABASE_URL and no real database — Commander's own module-level
-      # command registration already imports every command file (this
-      # one included) before it ever parses argv, so this exercises the
-      # identical import graph `authz doctor`/`authz serve` would.
       - name: Confirm the built CLI starts with only production dependencies installed
         run: |
           rm -rf node_modules
