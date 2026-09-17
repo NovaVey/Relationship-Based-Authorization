@@ -13,6 +13,11 @@ import {
   WILDCARD_SUBJECT_ID,
 } from '../schema/dsl/types.js';
 import type { ConnectionSource, QueryExecutor } from './query-executor.js';
+import {
+  MAX_DATA_PLANE_ID_LENGTH,
+  invalidDataPlaneIdReason,
+  isValidDataPlaneId,
+} from '@novavey/contracts';
 
 export interface TupleKey {
   objectNs: string;
@@ -82,22 +87,28 @@ const SCHEMA_SYMBOL_FIELDS: Array<[keyof TupleKey, string]> = [
   ['subjectNs', 'subject namespace'],
 ];
 
-// A generous bound for an opaque, foreign-system id — comfortably covers a
-// long AWS ARN or a compound "source:externalId" id (Principal-Graph's own
-// exporter shape, e.g. "github:owner/repo") without being unbounded.
-export const MAX_DATA_PLANE_ID_LENGTH = 512;
-
 /**
- * Reason a subjectId/objectId is invalid as a data-plane id, or `null` if
- * it's fine. Deliberately far looser than `IDENTIFIER_PATTERN`: `objectId`/
- * `subjectId` are opaque foreign keys from other systems (Zanzibar treats
- * them as bytes), not developer-authored schema symbols, so the schema
- * DSL's identifier grammar is the wrong constraint for them — applying it
- * here rejected every tuple a real external system (e.g. Principal-Graph,
- * whose exporter builds ids as `${source}:${externalId}`, "github:owner/
- * repo") would ever try to write.
+ * The data-plane id grammar (`MAX_DATA_PLANE_ID_LENGTH`/
+ * `invalidDataPlaneIdReason`/`isValidDataPlaneId`, imported above) used to
+ * be defined here and independently re-hardcoded by every consumer —
+ * Principal-Graph's exporter, Control-Coverage-Range's scenario
+ * identifiers. This project is that grammar's authoritative source, so it
+ * now lives in `@novavey/contracts` instead, as the one place its actual
+ * implementation is defined — RBA imports it back rather than keeping a
+ * second, only-coincidentally-identical copy alongside the shared one. See
+ * `@novavey/contracts`'s PROTOCOL.md §1 for the full history, including the
+ * now-closed rba-exporter-identifier-grammar-mismatch gap this grammar
+ * split closed.
  *
- * Only what would actually break the tuple wire format is rejected here: a
+ * Deliberately far looser than `IDENTIFIER_PATTERN`: `objectId`/`subjectId`
+ * are opaque foreign keys from other systems (Zanzibar treats them as
+ * bytes), not developer-authored schema symbols, so the schema DSL's
+ * identifier grammar is the wrong constraint for them — applying it here
+ * rejected every tuple a real external system (e.g. Principal-Graph, whose
+ * exporter builds ids as `${source}:${externalId}`, "github:owner/repo")
+ * would ever try to write.
+ *
+ * Only what would actually break the tuple wire format is rejected: a
  * control character, or either wire delimiter (`objectNs:objectId#relation@
  * subjectNs:subjectId`). A colon is explicitly allowed — an id can contain
  * one, because wire-parsing always splits `objectNs`/`subjectNs` off the
@@ -106,46 +117,7 @@ export const MAX_DATA_PLANE_ID_LENGTH = 512;
  * `IDENTIFIER_PATTERN`) can never itself contain one — so an embedded colon
  * in the id half is never ambiguous with the namespace/id separator.
  */
-export function invalidDataPlaneIdReason(value: string): string | null {
-  if (value.length === 0) return 'must not be empty';
-  if (value.length > MAX_DATA_PLANE_ID_LENGTH) {
-    return `exceeds the maximum data-plane id length (${MAX_DATA_PLANE_ID_LENGTH})`;
-  }
-  if (containsControlCharacter(value)) return 'must not contain control characters';
-  if (value.includes('#') || value.includes('@')) {
-    return "must not contain '#' or '@' (reserved tuple wire delimiters)";
-  }
-  return null;
-}
-
-/**
- * A plain code-unit scan rather than a `/[\x00-\x1f...]/`-shaped regex —
- * ESLint's `no-control-regex` rule (this project has no precedent anywhere
- * of suppressing a lint rule inline; see this file's own established
- * discipline of fixing the code instead) flags a control-character
- * character class as suspicious regardless of escape notation, so this
- * avoids the regex entirely rather than fighting the linter over an
- * intentional one. Covers the full "control character" range: C0
- * (0x00-0x1F), DEL (0x7F), and C1 (0x80-0x9F) — not just the handful an
- * ad-hoc check might think to name individually.
- */
-function containsControlCharacter(value: string): boolean {
-  for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return true;
-  }
-  return false;
-}
-
-/**
- * Public predicate wrapping `invalidDataPlaneIdReason` above, for external
- * callers that just need a boolean — e.g. Principal-Graph/Control-Coverage-
- * Range, which today each hardcode their own copy of this same grammar as a
- * literal regex rather than importing it from here.
- */
-export function isValidDataPlaneId(value: string): boolean {
-  return invalidDataPlaneIdReason(value) === null;
-}
+export { MAX_DATA_PLANE_ID_LENGTH, invalidDataPlaneIdReason, isValidDataPlaneId };
 
 /**
  * Validates every identifier-shaped field of a tuple key. `objectNs`/

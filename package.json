@@ -49,6 +49,7 @@
   },
   "dependencies": {
     "@fastify/rate-limit": "^11.2.0",
+    "@novavey/contracts": "git+https://github.com/NovaVey/Stack-Contracts.git#0fed74338c7108ff225ba48e137f75377f596718",
     "@openfga/sdk": "^0.9.7",
     "@openfga/syntax-transformer": "^0.2.2",
     "commander": "^15.0.0",

@@ -30,46 +30,23 @@ import {
 import { encodeToken } from '../../store/tokens.js';
 import { getPool, closePool } from '../../store/client.js';
 import { env } from '../../config/env.js';
-
-interface ObjectRef {
-  ns: string;
-  id: string;
-}
-
-interface SubjectRef extends ObjectRef {
-  relation?: string;
-}
+import { parseObjectRef, parseSubjectRef } from '@novavey/contracts';
 
 /**
- * Parses `namespace:id` — used for the object argument, which is never a
- * userset reference.
+ * `parseObjectRef`/`parseSubjectRef` (imported above from
+ * `@novavey/contracts`, re-exported below) used to be defined here as this
+ * project's own copy of the RBA wire-format grammar
+ * (`namespace:id`/`namespace:id#relation`) — that grammar is now owned by
+ * `@novavey/contracts`, with this project importing it back rather than
+ * maintaining a second copy. See that package's PROTOCOL.md §1.
  *
- * Exported for `test/isolation/identifier-and-tuple-validation.fuzz.test.ts`
+ * Both re-exported for `test/isolation/identifier-and-tuple-validation.fuzz.test.ts`
  * (the malformed-userset-subject-grammar `.todo()`s), which needs to
  * inspect the raw-string splitting behavior directly, not just the CLI
  * command's own output — see that file's own doc comment on why. No
- * behavior change; this was module-private since Phase 2.
+ * behavior change from this project's original implementation.
  */
-export function parseObjectRef(raw: string): ObjectRef | undefined {
-  const colon = raw.indexOf(':');
-  if (colon <= 0 || colon === raw.length - 1) return undefined;
-  return { ns: raw.slice(0, colon), id: raw.slice(colon + 1) };
-}
-
-/**
- * Parses `namespace:id` or `namespace:id#relation` — used for the subject
- * argument. Exported for the same reason as `parseObjectRef` above.
- */
-export function parseSubjectRef(raw: string): SubjectRef | undefined {
-  const hash = raw.indexOf('#');
-  const objectPart = hash === -1 ? raw : raw.slice(0, hash);
-  const object = parseObjectRef(objectPart);
-  if (!object) return undefined;
-  if (hash === -1) return object;
-  const relation = raw.slice(hash + 1);
-  if (relation.length === 0) return undefined;
-  return { ...object, relation };
-}
+export { parseObjectRef, parseSubjectRef };
 
 /** Exported for the same reason as `parseObjectRef`/`parseSubjectRef` above. */
 export function buildTupleKey(
