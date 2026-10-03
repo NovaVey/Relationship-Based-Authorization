@@ -54,7 +54,7 @@
     "@openfga/syntax-transformer": "^0.2.2",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
-    "fast-check": "^4.9.0",
+    "fast-check": "^4.10.2",
     "fastify": "^5.12.3",
     "ioredis": "^6.0.0",
     "pg": "^8.23.0",
